@@ -48,7 +48,8 @@ the part that has to be perfect.
   compositing on the GPU (Vulkan, Metal), export on NVENC, Vulkan or
   VideoToolbox, with software as the fallback.
 - **Professional timeline workflow.** Track scrubbing with audio, ripple
-  delete, compound clips, copy/paste properties, magnet snapping, clip speed
+  delete, compound clips, copy/paste properties, copy/paste of clips and
+  media between projects and Venturi windows, magnet snapping, clip speed
   from 1% to 10,000%, unlimited undo with a jumpable history.
 - **Audio, finished in place.** A mixer with per-track and master gain,
   balance, meters and an effect chain: 6-band equalizer and 3-band

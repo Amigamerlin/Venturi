@@ -36,6 +36,10 @@ history.paste_clips:
   en: "Paste clips"
   it: "Incolla clip"
 
+history.paste_media:
+  en: "Paste media"
+  it: "Incolla media"
+
 history.paste_attributes:
   en: "Paste properties"
   it: "Incolla proprietà"

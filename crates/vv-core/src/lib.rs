@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod command;
 pub mod edit;
 pub mod grade;

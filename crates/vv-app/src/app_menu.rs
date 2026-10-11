@@ -23,6 +23,7 @@ impl VenturiApp {
             .as_ref()
             .is_some_and(|d| d.is_capturing());
         let keymap = self.settings.keymap.clone();
+        let menu_paste = std::mem::take(&mut self.menu_paste_pending);
         ui.input(|i| {
             arrow_input.1 = i.time;
             if typing || capturing_shortcut {
@@ -134,7 +135,8 @@ impl VenturiApp {
                 (Action::Cut, egui::Event::Cut),
                 (Action::Paste, egui::Event::Paste(pasted_text)),
             ] {
-                if pressed(action) {
+                let from_menu = menu_paste && matches!(event, egui::Event::Paste(_));
+                if pressed(action) || from_menu {
                     clipboard_events.push(event);
                 }
             }
@@ -319,16 +321,16 @@ impl VenturiApp {
                             ui.close();
                         }
                         if ui
-                            .add_enabled(
-                                !self.timeline_state.clipboard.is_empty(),
-                                egui::Button::new(
-                                    keymap.menu_label(&t!("menu.paste"), Action::Paste),
-                                ),
-                            )
+                            .button(keymap.menu_label(&t!("menu.paste"), Action::Paste))
                             .on_hover_text(t!("menu.paste_hint"))
                             .clicked()
                         {
-                            self.paste_clipboard_at_playhead();
+                            // Another instance may have copied: only the
+                            // system clipboard knows.
+                            self.menu_paste_pending = true;
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                            ui.ctx().request_repaint();
                             ui.close();
                         }
                         if ui
@@ -668,6 +670,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::ToggleClipsDisabled => t!("history.toggle_clips_disabled"),
         L::InsertClips => t!("history.insert_clips"),
         L::PasteClips => t!("history.paste_clips"),
+        L::PasteMedia => t!("history.paste_media"),
         L::DuplicateClips => t!("history.duplicate_clips"),
         L::DeleteClips => t!("history.delete_clips"),
         L::RippleDelete => t!("history.ripple_delete"),

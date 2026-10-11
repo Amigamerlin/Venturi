@@ -387,6 +387,13 @@ struct VenturiApp {
     paste_image_dialog: Option<paste_image::PasteImageDialog>,
     paste_image_needs_save: bool,
     paste_key_watch: paste_image::PasteKeyWatch,
+    /// Tells this instance's copies from other instances' ones.
+    clipboard_instance: u64,
+    /// Media copied from the pool, in this project's ids.
+    copied_media: Vec<MediaId>,
+    /// Paste from the menu: the clipboard's text arrives as a `Paste`
+    /// event the next frame.
+    menu_paste_pending: bool,
     speed_dialog: Option<speed_dialog::SpeedDialog>,
     silence_dialog: Option<silence_dialog::SilenceDialog>,
     /// Proposed again at the next silence removal of the session.
@@ -520,6 +527,12 @@ impl Default for VenturiApp {
             paste_image_dialog: None,
             paste_image_needs_save: false,
             paste_key_watch: Default::default(),
+            clipboard_instance: {
+                use std::hash::BuildHasher;
+                std::collections::hash_map::RandomState::new().hash_one(std::process::id())
+            },
+            copied_media: Vec::new(),
+            menu_paste_pending: false,
             speed_dialog: None,
             silence_dialog: None,
             silence_params: Default::default(),
@@ -2604,16 +2617,20 @@ impl VenturiApp {
             })
     }
 
-    /// Copy/cut/paste from the keyboard. After a copy it writes a placeholder
-    /// into the system clipboard: egui-winit generates `Event::Paste` only if
-    /// that is not empty. An empty `Paste` may be an image in the clipboard.
+    /// Copy/cut/paste from the keyboard. A copy also writes the copied clips
+    /// or media to the system clipboard as text, so another instance can
+    /// paste them; an empty `Paste` may be an image in the clipboard.
     fn handle_clipboard_events(&mut self, ui: &egui::Ui, events: &[egui::Event]) {
         for event in events {
             match event {
                 egui::Event::Copy => {
-                    self.copy_selected_clips();
-                    if !self.timeline_state.clipboard.is_empty() {
-                        ui.ctx().copy_text("venturi:clip".to_owned());
+                    let copied = if self.media_pool_state.focused {
+                        self.copy_selected_media()
+                    } else {
+                        self.copy_selected_clips()
+                    };
+                    if copied {
+                        self.publish_clipboard(ui.ctx());
                     }
                 }
                 // Ctrl+X in a text field cuts the text, not the clips.
@@ -2622,26 +2639,126 @@ impl VenturiApp {
                         continue;
                     }
                     self.copy_selected_clips();
-                    ui.ctx().copy_text("venturi:clip".to_owned());
+                    self.publish_clipboard(ui.ctx());
                     self.delete_selected();
                 }
                 egui::Event::Paste(text) if text.is_empty() => {
                     self.request_clipboard_image(ui.ctx())
                 }
-                egui::Event::Paste(_) => self.paste_clipboard_at_playhead(),
+                egui::Event::Paste(text) => self.paste_text(text),
                 _ => {}
             }
         }
     }
 
+    fn clipboard_origin(&self) -> vv_core::clipboard::ClipboardOrigin {
+        vv_core::clipboard::ClipboardOrigin {
+            instance: self.clipboard_instance,
+            epoch: self.session.epoch(),
+        }
+    }
+
+    fn publish_clipboard(&self, ctx: &egui::Context) {
+        ctx.copy_text(self.clipboard_text());
+    }
+
+    fn clipboard_text(&self) -> String {
+        vv_core::clipboard::ClipboardPayload::new(
+            self.clipboard_origin(),
+            &self.session.project,
+            &self.copied_media,
+            &self.timeline_state.clipboard,
+        )
+        .to_text()
+    }
+
+    fn copy_selected_media(&mut self) -> bool {
+        if self.media_pool_state.selected.is_empty() {
+            return false;
+        }
+        self.copied_media = self.media_pool_state.selected.iter().copied().collect();
+        self.timeline_state.clipboard.clear();
+        true
+    }
+
+    /// Text from the system clipboard: clips or media copied by Venturi,
+    /// maybe another instance or project. Any other text pastes what this
+    /// instance copied last.
+    fn paste_text(&mut self, text: &str) {
+        use vv_core::clipboard::{ClipboardPayload, PayloadError};
+        let payload = match ClipboardPayload::from_text(text) {
+            None => {
+                if !self.media_pool_state.focused {
+                    self.paste_clipboard_at_playhead();
+                }
+                return;
+            }
+            Some(Err(PayloadError::UnsupportedVersion(version))) => {
+                self.project_error =
+                    Some(t!("menu.paste_unsupported", version = version).into_owned());
+                return;
+            }
+            Some(Err(PayloadError::Malformed(e))) => {
+                self.project_error = Some(t!("menu.paste_malformed", error = e).into_owned());
+                return;
+            }
+            Some(Ok(payload)) => payload,
+        };
+        let to_pool = self.media_pool_state.focused || !payload.has_clips();
+        if payload.origin == self.clipboard_origin() {
+            if to_pool {
+                let media: Vec<MediaId> = self
+                    .copied_media
+                    .iter()
+                    .copied()
+                    .filter(|&id| self.session.project.media_pool.contains_key(id))
+                    .collect();
+                self.media_pool_state.select_only(media);
+            } else {
+                self.paste_clipboard_at_playhead();
+            }
+            return;
+        }
+        if to_pool {
+            if !payload.has_media() {
+                return;
+            }
+            let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::PasteMedia);
+            let pasted = payload.merge_into(&mut self.session.project, &mut add);
+            self.add_pasted_entities(add);
+            self.media_pool_state.select_only(pasted.media);
+            return;
+        }
+        if self.timeline_id.is_none() {
+            return;
+        }
+        let mark = self.session.history.begin_group();
+        let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::PasteClips);
+        let pasted = payload.merge_into(&mut self.session.project, &mut add);
+        self.add_pasted_entities(add);
+        self.paste_entries_at_playhead(pasted.clips);
+        self.session
+            .history
+            .end_group_as(mark, vv_core::CommandLabel::PasteClips);
+    }
+
+    /// Pasted media need their thumbnail, proxy and waveform like imported ones.
+    fn add_pasted_entities(&mut self, add: vv_core::AddEntities) {
+        let added: Vec<MediaId> = add.media_ids().collect();
+        self.session.apply(Box::new(add));
+        for media_id in added {
+            self.enqueue_media_background_jobs(media_id);
+        }
+    }
+
     /// Copies the selected clips (the linked groups are all already inside the
     /// selection).
-    fn copy_selected_clips(&mut self) {
+    fn copy_selected_clips(&mut self) -> bool {
         let Some(timeline_id) = self.timeline_id else {
-            return;
+            return false;
         };
         if self.timeline_state.selected.is_empty() {
-            return;
+            return false;
         }
 
         let tl = &self.session.project.timelines[timeline_id];
@@ -2667,7 +2784,7 @@ impl VenturiApp {
             .collect();
 
         if collected.is_empty() {
-            return;
+            return false;
         }
 
         let anchor = collected
@@ -2689,22 +2806,26 @@ impl VenturiApp {
         }
 
         self.timeline_state.clipboard = collected.into_iter().map(|(_, e)| e).collect();
+        self.copied_media.clear();
+        true
     }
 
     /// Pastes the clipboard at the playhead preserving the distances and the linked
     /// groups; the pasted clips overwrite what was underneath.
     fn paste_clipboard_at_playhead(&mut self) {
+        self.paste_entries_at_playhead(self.timeline_state.clipboard.clone());
+    }
+
+    fn paste_entries_at_playhead(&mut self, entries: Vec<timeline_ui::ClipboardEntry>) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        if self.timeline_state.clipboard.is_empty() {
+        if entries.is_empty() {
             return;
         }
         let playhead = self.timeline_state.playhead;
-        let entries: Vec<timeline_ui::ClipboardEntry> = self
-            .timeline_state
-            .clipboard
-            .iter()
+        let entries: Vec<timeline_ui::ClipboardEntry> = entries
+            .into_iter()
             // Pasting a copied compound clip inside its own
             // nested timeline (directly or through another
             // compound clip) would close a cycle — see
@@ -2719,7 +2840,6 @@ impl VenturiApp {
                 | vv_core::ClipSource::Text
                 | vv_core::ClipSource::Adjustment => true,
             })
-            .cloned()
             .collect();
         if entries.is_empty() {
             return;

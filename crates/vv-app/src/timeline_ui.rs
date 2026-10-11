@@ -152,26 +152,7 @@ pub struct TimelineState {
     marker_lane: egui::Rect,
 }
 
-/// A copied clip. Id and group are reassigned on paste; the position
-/// is relative to the leftmost of the copied clips.
-#[derive(Clone)]
-pub struct ClipboardEntry {
-    /// Origin track as V/A + number, not an absolute index: pasting
-    /// from a compound clip with video tracks only into a
-    /// video+audio timeline must land on V2, not on the track of index 2 (which there
-    /// is audio).
-    pub track_kind: TrackKind,
-    pub track_number: usize,
-    pub relative_start: FrameIdx,
-    /// The clip as it was at copy time; id, position and group are reassigned
-    /// on paste.
-    pub clip: Clip,
-    /// Fps of the origin timeline, in which `clip` and
-    /// `relative_start` are expressed.
-    pub timeline_fps: vv_core::Rational,
-    /// Clips with the same tag were in the same group at copy time.
-    pub link_tag: Option<u64>,
-}
+pub use vv_core::clipboard::ClipboardEntry;
 
 /// A pointer gesture on the timeline: at most one at a time.
 enum Gesture {

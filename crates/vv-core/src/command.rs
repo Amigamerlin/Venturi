@@ -41,6 +41,7 @@ pub enum CommandLabel {
     ToggleClipsDisabled,
     InsertClips,
     PasteClips,
+    PasteMedia,
     DuplicateClips,
     DeleteClips,
     RippleDelete,

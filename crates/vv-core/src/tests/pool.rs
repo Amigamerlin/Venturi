@@ -22,7 +22,7 @@ fn absorb_all(
     folder: Option<FolderId>,
 ) -> Vec<TimelineId> {
     let mut add = AddEntities::new(CommandLabel::ImportOtio);
-    let timelines = absorb(project, &mut add, other, reuse, folder);
+    let (timelines, _) = absorb(project, &mut add, other, reuse, folder);
     History::default().do_command(project, Box::new(add));
     timelines
 }

@@ -96,6 +96,14 @@ menu.paste_hint:
   en: "Pastes at the playhead position"
   it: "Incolla alla posizione del playhead"
 
+menu.paste_unsupported:
+  en: "The clipboard comes from a newer Venturi (format %{version}): update to paste it."
+  it: "Gli appunti vengono da un Venturi più recente (formato %{version}): aggiorna per incollarli."
+
+menu.paste_malformed:
+  en: "Could not read the copied clips: %{error}"
+  it: "Impossibile leggere le clip copiate: %{error}"
+
 menu.paste_attributes:
   en: "Paste properties..."
   it: "Incolla proprietà..."

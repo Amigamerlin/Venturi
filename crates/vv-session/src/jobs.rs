@@ -507,6 +507,7 @@ impl Session {
             )
         });
         let timelines = vv_core::pool::absorb(&mut self.project, &mut add, project, &reuse, folder)
+            .0
             .into_iter()
             .zip(top_level)
             .filter_map(|(id, top)| top.then_some(id))

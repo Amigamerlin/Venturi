@@ -4883,3 +4883,124 @@ fn ctrl_comma_opens_the_settings() {
     output.textures_delta.clear();
     assert!(app.settings_dialog.is_some());
 }
+
+/// Two instances: what one copies, the other pastes as text from the
+/// system clipboard.
+fn copied_from_another_instance(path: &str) -> String {
+    let (mut source, media_id) = app_with_media_at(
+        vv_core::Rational::new(30, 1),
+        vv_core::Rational::new(30, 1),
+        100,
+    );
+    let item = &mut source.session.project.media_pool[media_id];
+    item.path = path.into();
+    item.content_hash = 99;
+    let timeline_id = source.timeline_id.unwrap();
+    let clip_id = source.session.project.alloc_clip_id();
+    let clip = vv_core::Clip::from_source_range(
+        clip_id,
+        vv_core::ClipSource::Media(media_id),
+        0,
+        20,
+        40,
+        vv_core::Rational::one(),
+    );
+    source.session.project.timelines[timeline_id].tracks[0].insert_sorted(clip);
+    source.timeline_state.selected.insert((0, clip_id));
+    assert!(source.copy_selected_clips());
+    source.clipboard_text()
+}
+
+#[test]
+fn clips_copied_in_another_instance_paste_with_their_media() {
+    let text = copied_from_another_instance("/footage/take1.mkv");
+    let (mut app, own_media) = app_with_media_at(
+        vv_core::Rational::new(30, 1),
+        vv_core::Rational::new(30, 1),
+        100,
+    );
+    app.timeline_state.playhead = 10;
+
+    app.paste_text(&text);
+
+    let timeline_id = app.timeline_id.unwrap();
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].timeline_start, 10);
+    let vv_core::ClipSource::Media(pasted) = clips[0].source else {
+        panic!("not a media clip");
+    };
+    assert_ne!(pasted, own_media);
+    let item = &app.session.project.media_pool[pasted];
+    assert_eq!(item.path, std::path::Path::new("/footage/take1.mkv"));
+    assert!(
+        app.thumbnails.contains_key(&item.content_hash),
+        "thumbnail requested"
+    );
+
+    app.undo();
+    assert!(
+        app.session.project.timelines[timeline_id].tracks[0]
+            .clips
+            .is_empty()
+    );
+    assert!(
+        !app.session.project.media_pool.contains_key(pasted),
+        "one undo step"
+    );
+}
+
+#[test]
+fn media_copied_from_another_pool_paste_into_the_pool() {
+    let (mut source, media_id) = app_with_media_at(
+        vv_core::Rational::new(30, 1),
+        vv_core::Rational::new(30, 1),
+        100,
+    );
+    source.media_pool_state.select_only([media_id]);
+    assert!(source.copy_selected_media());
+    let text = source.clipboard_text();
+
+    let mut app = VenturiApp::default();
+    app.media_pool_state.focused = true;
+    app.paste_text(&text);
+
+    let pasted: Vec<MediaId> = app.media_pool_state.selected.iter().copied().collect();
+    assert_eq!(pasted.len(), 1);
+    assert_eq!(
+        app.session.project.media_pool[pasted[0]].path,
+        std::path::Path::new("/tmp/vv-conform-test.mp4")
+    );
+    let content_hash = app.session.project.media_pool[pasted[0]].content_hash;
+    assert!(
+        app.thumbnails.contains_key(&content_hash),
+        "thumbnail requested"
+    );
+}
+
+#[test]
+fn a_paste_in_the_copying_instance_reuses_its_own_media() {
+    let (mut app, media_id) = app_with_media_at(
+        vv_core::Rational::new(30, 1),
+        vv_core::Rational::new(30, 1),
+        100,
+    );
+    let timeline_id = app.timeline_id.unwrap();
+    let clip = full_track_clip(app.session.project.alloc_clip_id().0, media_id);
+    let clip_id = clip.id;
+    app.session.project.timelines[timeline_id].tracks[0].insert_sorted(clip);
+    app.timeline_state.selected.insert((0, clip_id));
+    assert!(app.copy_selected_clips());
+    let text = app.clipboard_text();
+    app.timeline_state.playhead = 200_000;
+
+    app.paste_text(&text);
+
+    assert_eq!(app.session.project.media_pool.len(), 1);
+    assert_eq!(
+        app.session.project.timelines[timeline_id].tracks[0]
+            .clips
+            .len(),
+        2
+    );
+}

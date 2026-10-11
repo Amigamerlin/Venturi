@@ -101,14 +101,14 @@ impl Command for AddEntities {
 /// `folder` (the folders of `other` are not carried over). A media of
 /// `other` found in `reuse` is replaced by the one of `project` it maps to.
 /// A timeline without a pool item gets one at the root. Returns the new
-/// timelines, in `other`'s order.
+/// timelines, in `other`'s order, and where each media of `other` went.
 pub fn absorb(
     project: &mut Project,
     add: &mut AddEntities,
     other: Project,
     reuse: &HashMap<MediaId, MediaId>,
     folder: Option<FolderId>,
-) -> Vec<TimelineId> {
+) -> (Vec<TimelineId>, HashMap<MediaId, MediaId>) {
     let timeline_ids: HashMap<TimelineId, TimelineId> = other
         .timelines
         .keys()
@@ -154,7 +154,7 @@ pub fn absorb(
         timelines.push(new_id);
     }
     add.media.extend(items);
-    timelines
+    (timelines, media_ids)
 }
 
 /// A copy of the timeline of `source` (a compound pool item) as a new
