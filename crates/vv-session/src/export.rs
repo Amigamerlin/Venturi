@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use vv_core::{Clip, ClipId, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind};
 
+use vv_audio::SampleBlocks;
 use vv_audio::mixer::{
     AudioSource, ClipAudio, MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into,
     timeline_frame_to_sample,
@@ -691,7 +692,7 @@ struct WantedFrames(HashMap<PathBuf, Vec<(usize, std::ops::Range<u64>)>>);
 
 impl AudioSource for WantedFrames {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.file_frames(path, stream, 0..u64::MAX).0
+        self.file_frames(path, stream, 0..u64::MAX)
     }
 
     fn file_frames(
@@ -699,13 +700,13 @@ impl AudioSource for WantedFrames {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
-    ) -> (ClipAudio, u64) {
+    ) -> ClipAudio {
         let windows = self.0.entry(path.to_path_buf()).or_default();
         let window = (stream, frames);
         if !windows.contains(&window) {
             windows.push(window);
         }
-        (ClipAudio::Pending, 0)
+        ClipAudio::Pending
     }
 }
 
@@ -718,7 +719,7 @@ struct DecodedAudio {
 
 impl AudioSource for DecodedAudio {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.file_frames(path, stream, 0..u64::MAX).0
+        self.file_frames(path, stream, 0..u64::MAX)
     }
 
     fn file_frames(
@@ -726,12 +727,16 @@ impl AudioSource for DecodedAudio {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
-    ) -> (ClipAudio, u64) {
+    ) -> ClipAudio {
         let start = frames.start;
         self.files
             .get(&(path.to_path_buf(), stream, frames))
-            .map_or((ClipAudio::Missing, 0), |buffer| {
-                (ClipAudio::Ready(buffer.clone()), start)
+            .map_or(ClipAudio::Missing, |buffer| {
+                ClipAudio::Ready(SampleBlocks::contiguous(
+                    buffer.clone(),
+                    start,
+                    PROJECT_CHANNELS,
+                ))
             })
     }
 

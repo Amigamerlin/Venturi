@@ -74,7 +74,20 @@ fn audio_track(clips: Vec<Clip>) -> Track {
 
 /// Mono: `a` is always 0.5, `b` is a ramp (sample i = i/1000);
 /// stream 1 of `a` is 0.25.
-fn buffers(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+fn mono(samples: Arc<Vec<f32>>) -> SampleBlocks {
+    SampleBlocks::contiguous(samples, 0, 1)
+}
+
+fn buffers(path: &Path, stream: usize) -> Option<SampleBlocks> {
+    samples(path, stream).map(mono)
+}
+
+/// `samples` as stereo frames.
+fn stereo(path: &Path, stream: usize) -> Option<SampleBlocks> {
+    samples(path, stream).map(|s| SampleBlocks::contiguous(s, 0, 2))
+}
+
+fn samples(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
     match (path.to_str()?, stream) {
         ("a.wav", 0) => Some(Arc::new(vec![0.5; 1000])),
         ("a.wav", 1) => Some(Arc::new(vec![0.25; 1000])),
@@ -348,8 +361,9 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
 
     let buffer: Arc<Vec<f32>> =
         Arc::new((0..AUDIO_SAMPLES).map(|i| i as f32 / 100_000.0).collect());
-    let buffer_for =
-        |path: &Path, _stream: usize| (path.to_str() == Some("slow.wav")).then(|| buffer.clone());
+    let buffer_for = |path: &Path, _stream: usize| {
+        (path.to_str() == Some("slow.wav")).then(|| mono(buffer.clone()))
+    };
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |p: &Path, s: usize| {
         buffer_for(p, s)
     });
@@ -407,8 +421,9 @@ fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
         .insert(timeline(vec![audio_track(vec![clip])]));
 
     let buffer: Arc<Vec<f32>> = Arc::new((0..10_010).map(|i| i as f32 / 100_000.0).collect());
-    let buffer_for =
-        |path: &Path, _stream: usize| (path.to_str() == Some("slow.wav")).then(|| buffer.clone());
+    let buffer_for = |path: &Path, _stream: usize| {
+        (path.to_str() == Some("slow.wav")).then(|| mono(buffer.clone()))
+    };
     let mix_all = |project: &Project| {
         let timeline = &project.timelines[timeline_id];
         let snap =
@@ -453,7 +468,7 @@ fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
     clip.effects.gain_db = gain;
     let tl = timeline(vec![audio_track(vec![clip])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
-        Some(Arc::new(vec![0.5; len_frames]))
+        Some(mono(Arc::new(vec![0.5; len_frames])))
     });
     let mut out = vec![0.0; len_frames];
     mix_range(&snap, 0, &mut out);
@@ -521,7 +536,11 @@ fn stereo_mix_keeps_channels_interleaved() {
     let (project, a, _) = project();
     let tl = timeline(vec![audio_track(vec![clip_at(a, 1, 0, 1)])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut |_: &Path, _: usize| {
-        Some(Arc::new([0.1, 0.9].repeat(100)))
+        Some(SampleBlocks::contiguous(
+            Arc::new([0.1, 0.9].repeat(100)),
+            0,
+            2,
+        ))
     });
     let mut out = vec![0.0; 40];
     mix_range(&snap, 5, &mut out);
@@ -661,8 +680,7 @@ fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
         len: 1000,
         source_offset: 0,
         step: 1.0,
-        buffer: Arc::new(Vec::new()),
-        buffer_start: 0,
+        buffer: mono(Arc::new(Vec::new())),
         gain_db: Keyframed::constant(0.0),
         track: 0,
         clip_fps: 10.0,
@@ -717,7 +735,7 @@ fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
     clip.fade_in = (GAIN_BLOCK_FRAMES / 10) as FrameIdx;
     let tl = timeline(vec![audio_track(vec![clip])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
-        Some(Arc::new(vec![0.5; len_frames]))
+        Some(mono(Arc::new(vec![0.5; len_frames])))
     });
     let mut out = vec![9.0; len_frames];
     mix_range(&snap, 0, &mut out);
@@ -786,7 +804,7 @@ impl AudioSource for FakeStretch {
 
     fn stretched(
         &mut self,
-        _buffer: &Arc<Vec<f32>>,
+        _buffer: &SampleBlocks,
         range: std::ops::Range<u64>,
         tempo: f64,
         _sample_rate: u32,
@@ -794,7 +812,7 @@ impl AudioSource for FakeStretch {
     ) -> ClipAudio {
         self.asked.push((range, tempo));
         if self.ready {
-            ClipAudio::Ready(Arc::new(vec![0.9; 100]))
+            ClipAudio::Ready(mono(Arc::new(vec![0.9; 100])))
         } else {
             ClipAudio::Pending
         }
@@ -861,7 +879,7 @@ fn balance_attenuates_only_the_opposite_channel() {
     left.mix.pan = -0.5;
     let mut tl = timeline(vec![left]);
     tl.master.pan = 0.5;
-    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut buffers);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut stereo);
     let mut out = vec![9.0; 4];
     mix_range(&snap, 0, &mut out);
     assert_eq!(out, [0.25, 0.25, 0.25, 0.25]);
@@ -1158,7 +1176,8 @@ fn mono_sends_the_average_of_the_channels_to_all_of_them() {
     let tl = timeline(vec![track]);
     // Sound on the left channel only.
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut |path: &Path, _| {
-        (path.to_str()? == "a.wav").then(|| Arc::new([0.8f32, 0.0].repeat(500)))
+        (path.to_str()? == "a.wav")
+            .then(|| SampleBlocks::contiguous(Arc::new([0.8f32, 0.0].repeat(500)), 0, 2))
     });
     let mut out = vec![0.0; 20];
     mix_range(&snap, 0, &mut out);
@@ -1167,7 +1186,8 @@ fn mono_sends_the_average_of_the_channels_to_all_of_them() {
     let mut centred = tl.clone();
     centred.tracks[0].mix.pan = 0.0;
     let snap = MixSnapshot::from_timeline(&project, &centred, RATE, 2, &mut |path: &Path, _| {
-        (path.to_str()? == "a.wav").then(|| Arc::new([0.8f32, 0.0].repeat(500)))
+        (path.to_str()? == "a.wav")
+            .then(|| SampleBlocks::contiguous(Arc::new([0.8f32, 0.0].repeat(500)), 0, 2))
     });
     mix_range(&snap, 0, &mut out);
     assert_eq!(&out[..4], [0.4, 0.4, 0.4, 0.4]);
@@ -1210,17 +1230,15 @@ impl AudioSource for Windowed {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
-    ) -> (ClipAudio, u64) {
+    ) -> ClipAudio {
         self.asked.push((path.to_path_buf(), frames.clone()));
-        let Some(whole) = buffers(path, stream) else {
-            return (ClipAudio::Missing, 0);
+        let Some(whole) = samples(path, stream) else {
+            return ClipAudio::Missing;
         };
         let end = (frames.end as usize).min(whole.len());
         let start = (frames.start as usize).min(end);
-        (
-            ClipAudio::Ready(Arc::new(whole[start..end].to_vec())),
-            frames.start,
-        )
+        let window = Arc::new(whole[start..end].to_vec());
+        ClipAudio::Ready(SampleBlocks::contiguous(window, start as u64, 1))
     }
 }
 

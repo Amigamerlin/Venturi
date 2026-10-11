@@ -2,6 +2,7 @@
 //! (see ARCHITECTURE.md § Audio pipeline). The mixer position is the
 //! playback clock.
 
+pub mod blocks;
 pub mod dynamics;
 pub mod eq;
 mod filter;
@@ -11,6 +12,7 @@ pub mod recorder;
 pub mod spectrum;
 pub mod stretch;
 
+pub use blocks::SampleBlocks;
 pub use mixer::{
     AnalysisSlot, AudioSource, BandMeter, ClipAudio, LevelAnalysis, LevelReading, MixSnapshot,
     Mixer, MixerState, StretchedWindow,

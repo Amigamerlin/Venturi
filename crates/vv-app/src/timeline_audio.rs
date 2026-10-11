@@ -136,11 +136,10 @@ impl TimelineAudio {
             .filter_map(|stream| self.buffers.get_or_request_first(path, stream))
             .map(|buffer| MixClip {
                 start: 0,
-                len: buffer.len() as u64 / channels.max(1) as u64,
+                len: buffer.end(),
                 source_offset: 0,
                 step: 1.0,
                 buffer,
-                buffer_start: 0,
                 gain_db: Keyframed::constant(0.0),
                 track: 0,
                 clip_fps: fps,
