@@ -170,9 +170,11 @@ pub fn decode_audio_streams_streaming(
         return Ok(formats);
     }
 
-    let mut packet = ffmpeg::Packet::empty();
     let mut samples = Vec::new();
     loop {
+        // `Packet::read` does not unref the previous packet: reusing one
+        // would leak every packet read.
+        let mut packet = ffmpeg::Packet::empty();
         match packet.read(&mut ictx) {
             Ok(()) => {
                 let Some((slot, (_, stream))) = decoders

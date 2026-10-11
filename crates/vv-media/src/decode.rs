@@ -503,9 +503,10 @@ impl Decoder {
             });
         }
 
-        let mut packet = ffmpeg::Packet::empty();
-
         loop {
+            // `Packet::read` does not unref the previous packet: reusing one
+            // would leak every packet read.
+            let mut packet = ffmpeg::Packet::empty();
             match packet.read(&mut self.ictx) {
                 Ok(()) => {
                     if packet.stream() != self.video_stream_index {
