@@ -1,13 +1,15 @@
 //! Audio buffers already in the mixer's format, per `(path, audio_stream_index)`,
-//! in blocks of `BLOCK_FRAMES` holding only what the timeline reads. Decode +
-//! resample on a dedicated thread; every block plays as soon as it is decoded.
+//! in blocks of `BLOCK_FRAMES` holding only what the timeline reads, within
+//! a memory budget that keeps the blocks closest to the playhead. Decode +
+//! resample on a dedicated thread, seeking to each job and taking the one
+//! closest to the playhead first; every block plays as soon as it is decoded.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -51,9 +53,18 @@ const BLOCK_FRAMES: u64 = 1 << 16;
 /// decodes nothing.
 const MARGIN_BLOCKS: u64 = 1;
 
+/// Blocks per decode job: how far a decode goes before the worker looks
+/// again for the job closest to the playhead.
+const JOB_BLOCKS: u64 = 8;
+
 /// New blocks rebuild the mix at most this often: until compound clips are
 /// mixed by block, each rebuild mixes a partial compound whole.
 const BLOCK_REBUILD_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Over budget, a playhead move this long chooses again what to keep.
+const REBALANCE_FRAMES: u64 = 2 * vv_audio::mixer::PROJECT_SAMPLE_RATE as u64;
+
+pub const DEFAULT_AUDIO_BUDGET_BYTES: usize = 1_000_000_000;
 
 #[derive(Default)]
 struct StreamCache {
@@ -61,13 +72,14 @@ struct StreamCache {
     jobs: Vec<Job>,
     /// Frames of the stream, once a decode reached its end.
     end: Option<u64>,
+    /// The stream ends before this: a decode seeked here found nothing.
+    ends_before: Option<u64>,
     /// No such stream, or it does not decode.
     missing: bool,
-    /// Read since `begin_pass`.
+    /// Read since the pass began.
     asked: bool,
-    used: HashSet<u64>,
-    /// Read whole with its end still unknown: no block is dropped.
-    used_all: bool,
+    /// Blocks read since the pass began, with when they play.
+    wanted: HashMap<u64, u64>,
 }
 
 impl StreamCache {
@@ -79,7 +91,6 @@ impl StreamCache {
 struct Job {
     id: u64,
     blocks: Range<u64>,
-    prioritized: bool,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -88,7 +99,8 @@ struct DecodeJob {
     path: PathBuf,
     stream: usize,
     blocks: Range<u64>,
-    first: bool,
+    /// When its first block plays, for the order of the jobs.
+    plays_at: u64,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -102,18 +114,32 @@ enum Decoded {
         job: u64,
         /// Frames of the stream, if the decode reached its end.
         end: Option<u64>,
+        /// Where it seeked, if it reached the end with nothing decoded.
+        ends_before: Option<u64>,
         missing: bool,
     },
 }
 
 pub struct MixBufferCache {
     channels: u16,
+    budget_bytes: usize,
     streams: HashMap<Key, StreamCache>,
-    /// Block ranges asked for and not decoded nor in flight, sent to the
-    /// worker by `flush_plans` so the clips of one pass make few jobs.
-    plans: Vec<(Key, Vec<Range<u64>>, bool)>,
     job_keys: HashMap<u64, Key>,
     next_id: u64,
+    /// Where the mix plays, in samples of what is mixed (a timeline, or a
+    /// media in the preview): the worker reads it to pick a job.
+    playhead: Arc<AtomicU64>,
+    /// Between `begin_*pass` and `sweep_unused`, which plans what was asked.
+    in_pass: bool,
+    /// Blocks asked for outside a pass, or a playhead move over budget:
+    /// `poll` runs `rebalance`.
+    unplanned: bool,
+    /// The last `rebalance` left blocks out, and where the playhead was.
+    over_budget: bool,
+    rebalanced_at: u64,
+    /// A media preview is mixed, not a timeline: its pass keeps the
+    /// timeline's mixdowns, stretches and levels.
+    media_pass: bool,
     worker: Worker<DecodeJob>,
     decoded_rx: mpsc::Receiver<Decoded>,
     /// Blocks arrived and not yet reported by `poll`, and when it last did.
@@ -141,41 +167,37 @@ pub struct MixBufferCache {
 impl MixBufferCache {
     pub fn spawn(sample_rate: u32, channels: u16) -> Self {
         let (decoded_tx, decoded_rx) = mpsc::channel::<Decoded>();
+        let playhead = Arc::new(AtomicU64::new(0));
+        let worker_playhead = playhead.clone();
         let worker = Worker::spawn(move |job_rx: mpsc::Receiver<DecodeJob>| {
-            let mut queue = VecDeque::new();
-            let mut started = HashSet::new();
+            let mut queue: Vec<DecodeJob> = Vec::new();
             loop {
                 if queue.is_empty() {
                     match job_rx.recv() {
-                        Ok(job) => enqueue(&mut queue, job),
+                        Ok(job) => queue.push(job),
                         Err(_) => break,
                     }
                 }
-                while let Ok(job) = job_rx.try_recv() {
-                    enqueue(&mut queue, job);
-                }
-                let Some(job) = queue.pop_front() else {
+                queue.extend(job_rx.try_iter());
+                queue.retain(|job| !job.cancelled.load(Ordering::Relaxed));
+                let playhead = worker_playhead.load(Ordering::Relaxed);
+                let Some(next) = queue
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, job)| (job.plays_at.abs_diff(playhead), job.id))
+                    .map(|(i, _)| i)
+                else {
                     continue;
                 };
-                // The other queued jobs of the same file go in the same
-                // pass: one read of the file serves them all.
-                let path = job.path.clone();
-                let mut batch = vec![job];
-                let mut rest = VecDeque::new();
-                for job in queue.drain(..) {
-                    if job.path == path {
-                        batch.push(job);
-                    } else {
-                        rest.push_back(job);
-                    }
-                }
+                let job = queue.swap_remove(next);
+                // The other streams of the same file over the same blocks:
+                // one read serves them all.
+                let (mut batch, rest): (Vec<_>, Vec<_>) = queue
+                    .drain(..)
+                    .partition(|other| other.path == job.path && other.blocks == job.blocks);
                 queue = rest;
-                // A priority request duplicates one already queued.
-                batch
-                    .retain(|job| !job.cancelled.load(Ordering::Relaxed) && started.insert(job.id));
-                if batch.is_empty() {
-                    continue;
-                }
+                batch.insert(0, job);
+                let path = batch[0].path.clone();
                 if !decode_blocks(&path, &batch, sample_rate, channels, &decoded_tx) {
                     break;
                 }
@@ -228,10 +250,16 @@ impl MixBufferCache {
         });
         Self {
             channels,
+            budget_bytes: DEFAULT_AUDIO_BUDGET_BYTES,
             streams: HashMap::new(),
-            plans: Vec::new(),
             job_keys: HashMap::new(),
             next_id: 0,
+            playhead,
+            in_pass: false,
+            unplanned: false,
+            over_budget: false,
+            rebalanced_at: 0,
+            media_pass: false,
             worker,
             decoded_rx,
             unreported_blocks: false,
@@ -250,45 +278,72 @@ impl MixBufferCache {
         }
     }
 
+    #[cfg(test)]
+    pub fn set_budget_bytes(&mut self, bytes: usize) {
+        self.budget_bytes = bytes;
+        self.unplanned = true;
+    }
+
+    /// Where the mix plays now, in samples of what is mixed.
+    pub fn set_playhead(&mut self, sample: u64) {
+        self.playhead.store(sample, Ordering::Relaxed);
+        if self.over_budget && sample.abs_diff(self.rebalanced_at) > REBALANCE_FRAMES {
+            self.unplanned = true;
+        }
+    }
+
     /// From here to `sweep_unused`, a full mix of the timeline: what it
     /// does not read is dropped.
     pub fn begin_pass(&mut self) {
-        for stream in self.streams.values_mut() {
-            stream.asked = false;
-            stream.used.clear();
-            stream.used_all = false;
-        }
-        self.compound_used.clear();
+        self.begin(false);
     }
 
-    /// Drops the blocks, mixdowns, stretches and levels no mix asked for, and
-    /// cancels the decodes no longer wanted: to be called after rebuilding
-    /// the snapshot of the whole timeline.
+    /// Like `begin_pass`, for the preview of a media: the timeline's
+    /// mixdowns, stretches and levels are kept for when it plays again.
+    pub fn begin_media_pass(&mut self) {
+        self.begin(true);
+    }
+
+    fn begin(&mut self, media_pass: bool) {
+        self.in_pass = true;
+        self.media_pass = media_pass;
+        for stream in self.streams.values_mut() {
+            stream.asked = false;
+            stream.wanted.clear();
+        }
+        if !media_pass {
+            self.compound_used.clear();
+        }
+    }
+
+    /// Drops the blocks, mixdowns, stretches and levels the pass did not
+    /// ask for, cancels the decodes no longer wanted and plans the others.
     pub fn sweep_unused(&mut self) {
-        self.flush_plans();
+        self.in_pass = false;
         let job_keys = &mut self.job_keys;
         self.streams.retain(|_, stream| {
             let StreamCache {
                 blocks,
                 jobs,
                 asked,
-                used,
-                used_all,
+                wanted,
                 ..
             } = stream;
-            if !*used_all {
-                blocks.retain(|index, _| *asked && used.contains(index));
-                jobs.retain(|job| {
-                    let wanted = *asked && job.blocks.clone().any(|index| used.contains(&index));
-                    if !wanted {
-                        job.cancelled.store(true, Ordering::Relaxed);
-                        job_keys.remove(&job.id);
-                    }
-                    wanted
-                });
-            }
+            blocks.retain(|index, _| wanted.contains_key(index));
+            jobs.retain(|job| {
+                let keep = job.blocks.clone().any(|index| wanted.contains_key(&index));
+                if !keep {
+                    job.cancelled.store(true, Ordering::Relaxed);
+                    job_keys.remove(&job.id);
+                }
+                keep
+            });
             *asked
         });
+        self.rebalance();
+        if self.media_pass {
+            return;
+        }
         let used = &self.compound_used;
         self.compound.retain(|media_id, _| used.contains(media_id));
         let used = std::mem::take(&mut self.stretch_used);
@@ -297,73 +352,61 @@ impl MixBufferCache {
         self.levels.retain(|key, _| used.contains(key));
     }
 
-    /// The whole of `stream` of `path`, as far as decoded. Queues its decode
-    /// ahead of the others (it does not interrupt the one in progress).
-    pub fn get_or_request_first(&mut self, path: &Path, stream: usize) -> Option<SampleBlocks> {
-        let audio = self.lookup(path, stream, 0..u64::MAX, true);
-        self.flush_plans();
-        match audio {
+    /// Frames `frames` of `stream` of `path`, as far as decoded; for the
+    /// preview of a media, so they play at their own position.
+    pub fn media_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: Range<u64>,
+    ) -> Option<SampleBlocks> {
+        let plays_at = frames.start;
+        match self.lookup(path, stream, frames, plays_at) {
             ClipAudio::Ready(buffer) | ClipAudio::Partial(buffer) => Some(buffer),
             ClipAudio::Pending | ClipAudio::Missing => None,
         }
     }
 
     /// Non-blocking: the blocks holding `needed`, `Partial` while some are
-    /// still decoding. Those neither decoded nor in flight are planned,
-    /// with `MARGIN_BLOCKS` around them.
-    fn lookup(&mut self, path: &Path, stream: usize, needed: Range<u64>, first: bool) -> ClipAudio {
-        let key = (path.to_path_buf(), stream);
-        let entry = self.streams.entry(key.clone()).or_default();
+    /// not decoded. Asks for them, with `MARGIN_BLOCKS` around:
+    /// `rebalance` decides which to decode and keep.
+    fn lookup(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        needed: Range<u64>,
+        plays_at: u64,
+    ) -> ClipAudio {
+        let playhead = self.playhead.load(Ordering::Relaxed);
+        let entry = self
+            .streams
+            .entry((path.to_path_buf(), stream))
+            .or_default();
         entry.asked = true;
         if entry.missing {
             return ClipAudio::Missing;
         }
         let first_block = needed.start / BLOCK_FRAMES;
-        let end = entry.end.map_or(needed.end, |end| end.min(needed.end));
-        let unbounded = end == u64::MAX;
-        let last_block = if unbounded {
-            entry.blocks.keys().max().map_or(0, |max| max + 1)
-        } else {
-            end.div_ceil(BLOCK_FRAMES)
-        }
-        .max(first_block);
-
-        let mut wanted = Vec::new();
-        if unbounded {
-            entry.used_all = true;
-            if !entry.jobs.iter().any(|job| job.blocks.end == u64::MAX) {
-                wanted.push(first_block..u64::MAX);
+        let limit = entry.end.or(entry.ends_before).unwrap_or(u64::MAX);
+        let last_block = needed
+            .end
+            .min(limit)
+            .div_ceil(BLOCK_FRAMES)
+            .max(first_block);
+        let blocks_end = limit.div_ceil(BLOCK_FRAMES);
+        let wanted = first_block.saturating_sub(MARGIN_BLOCKS)
+            ..(last_block + MARGIN_BLOCKS).min(blocks_end).max(last_block);
+        for index in wanted {
+            let plays = (plays_at + index * BLOCK_FRAMES).saturating_sub(needed.start);
+            let closest = entry
+                .wanted
+                .get(&index)
+                .is_none_or(|&other| plays.abs_diff(playhead) < other.abs_diff(playhead));
+            if closest {
+                entry.wanted.insert(index, plays);
             }
-        } else {
-            let margin_end = match entry.end {
-                Some(end) => (last_block + MARGIN_BLOCKS).min(end.div_ceil(BLOCK_FRAMES)),
-                None => last_block + MARGIN_BLOCKS,
-            };
-            for index in first_block.saturating_sub(MARGIN_BLOCKS)..margin_end.max(last_block) {
-                entry.used.insert(index);
-                if entry.blocks.contains_key(&index) {
-                    continue;
-                }
-                if entry.in_flight(index) {
-                    continue;
-                }
-                match wanted.last_mut() {
-                    Some(run) if run.end == index => run.end = index + 1,
-                    _ => wanted.push(index..index + 1),
-                }
-            }
-        }
-        if first {
-            for job in entry.jobs.iter_mut().filter(|job| !job.prioritized) {
-                job.prioritized = true;
-                self.worker.send(DecodeJob {
-                    id: job.id,
-                    path: key.0.clone(),
-                    stream,
-                    blocks: job.blocks.clone(),
-                    first,
-                    cancelled: job.cancelled.clone(),
-                });
+            if !self.in_pass && !entry.blocks.contains_key(&index) && !entry.in_flight(index) {
+                self.unplanned = true;
             }
         }
 
@@ -371,11 +414,8 @@ impl MixBufferCache {
             .map(|index| entry.blocks.get(&index).cloned())
             .collect();
         let present = blocks.iter().filter(|b| b.is_some()).count();
-        let complete = !unbounded && present == blocks.len();
-        let view_end = match entry.end {
-            Some(end) => end.min(last_block * BLOCK_FRAMES),
-            None => last_block * BLOCK_FRAMES,
-        };
+        let view_end = entry.end.unwrap_or(u64::MAX).min(last_block * BLOCK_FRAMES);
+        let complete = present == blocks.len();
         let view = SampleBlocks::new(
             first_block * BLOCK_FRAMES,
             BLOCK_FRAMES,
@@ -383,9 +423,6 @@ impl MixBufferCache {
             blocks,
             view_end,
         );
-        if !wanted.is_empty() {
-            self.plan(key, wanted, first);
-        }
         if complete {
             ClipAudio::Ready(view)
         } else if present > 0 {
@@ -395,47 +432,100 @@ impl MixBufferCache {
         }
     }
 
-    fn plan(&mut self, key: Key, blocks: Vec<Range<u64>>, first: bool) {
-        match self.plans.iter_mut().find(|(k, _, _)| *k == key) {
-            Some((_, planned, prioritized)) => {
-                planned.extend(blocks);
-                *prioritized |= first;
-            }
-            None => self.plans.push((key, blocks, first)),
+    /// Keeps the wanted blocks closest to the playhead that fit the
+    /// budget: drops the others, plans the missing ones, cancels the jobs
+    /// left without one. `true` if it dropped blocks.
+    fn rebalance(&mut self) -> bool {
+        self.unplanned = false;
+        let playhead = self.playhead.load(Ordering::Relaxed);
+        self.rebalanced_at = playhead;
+        let mut wanted: Vec<(u64, &Key, u64)> = self
+            .streams
+            .iter()
+            .flat_map(|(key, stream)| {
+                stream
+                    .wanted
+                    .iter()
+                    .map(move |(&index, &plays)| (plays, key, index))
+            })
+            .collect();
+        wanted.sort_unstable_by_key(|&(plays, key, index)| (plays.abs_diff(playhead), key, index));
+        let block_bytes = BLOCK_FRAMES as usize * self.channels.max(1) as usize * 4;
+        let fit = (self.budget_bytes / block_bytes).min(wanted.len());
+        self.over_budget = fit < wanted.len();
+        let mut kept: HashMap<Key, Vec<(u64, u64)>> = HashMap::new();
+        for &(plays, key, index) in &wanted[..fit] {
+            kept.entry(key.clone()).or_default().push((index, plays));
         }
-    }
 
-    fn flush_plans(&mut self) {
-        for (key, planned, first) in std::mem::take(&mut self.plans) {
-            let stream = self.streams.entry(key.clone()).or_default();
-            for blocks in merge_ranges(planned) {
-                let id = self.next_id;
-                self.next_id += 1;
-                let cancelled = Arc::new(AtomicBool::new(false));
-                self.worker.send(DecodeJob {
-                    id,
-                    path: key.0.clone(),
-                    stream: key.1,
-                    blocks: blocks.clone(),
-                    first,
-                    cancelled: cancelled.clone(),
-                });
-                self.job_keys.insert(id, key.clone());
+        let mut dropped = false;
+        let mut plans: Vec<(Key, Range<u64>, u64)> = Vec::new();
+        for (key, stream) in &mut self.streams {
+            let keep = kept.remove(key).unwrap_or_default();
+            let keep_set: HashSet<u64> = keep.iter().map(|&(index, _)| index).collect();
+            let before = stream.blocks.len();
+            let wanted = &stream.wanted;
+            stream
+                .blocks
+                .retain(|index, _| keep_set.contains(index) || !wanted.contains_key(index));
+            dropped |= stream.blocks.len() < before;
+            let job_keys = &mut self.job_keys;
+            stream.jobs.retain(|job| {
+                let keep = job.blocks.clone().any(|index| keep_set.contains(&index));
+                if !keep {
+                    job.cancelled.store(true, Ordering::Relaxed);
+                    job_keys.remove(&job.id);
+                }
+                keep
+            });
+            let mut missing: Vec<(u64, u64)> = keep
+                .into_iter()
+                .filter(|&(index, _)| {
+                    !stream.blocks.contains_key(&index) && !stream.in_flight(index)
+                })
+                .collect();
+            missing.sort_unstable();
+            for (index, plays) in missing {
+                match plans.last_mut() {
+                    Some((k, run, _))
+                        if k == key && run.end == index && run.end - run.start < JOB_BLOCKS =>
+                    {
+                        run.end += 1;
+                    }
+                    _ => plans.push((key.clone(), index..index + 1, plays)),
+                }
+            }
+        }
+        // The worker may start on the first before the others arrive.
+        plans.sort_by_key(|&(_, _, plays_at)| plays_at.abs_diff(playhead));
+        for (key, blocks, plays_at) in plans {
+            let id = self.next_id;
+            self.next_id += 1;
+            let cancelled = Arc::new(AtomicBool::new(false));
+            self.worker.send(DecodeJob {
+                id,
+                path: key.0.clone(),
+                stream: key.1,
+                blocks: blocks.clone(),
+                plays_at,
+                cancelled: cancelled.clone(),
+            });
+            self.job_keys.insert(id, key.clone());
+            if let Some(stream) = self.streams.get_mut(&key) {
                 stream.jobs.push(Job {
                     id,
                     blocks,
-                    prioritized: first,
                     cancelled,
                 });
             }
         }
+        dropped
     }
 
     /// Collects the decoded blocks; `true` when the mixer snapshot must be
     /// rebuilt.
     pub fn poll(&mut self) -> bool {
-        self.flush_plans();
-        let mut changed = false;
+        let mut changed = self.unplanned && self.rebalance();
         while let Ok(decoded) = self.decoded_rx.try_recv() {
             match decoded {
                 Decoded::Block {
@@ -453,13 +543,22 @@ impl MixBufferCache {
                     stream.blocks.entry(index).or_insert(samples);
                     self.unreported_blocks = true;
                 }
-                Decoded::Done { job, end, missing } => {
+                Decoded::Done {
+                    job,
+                    end,
+                    ends_before,
+                    missing,
+                } => {
                     let Some(key) = self.job_keys.remove(&job) else {
                         continue;
                     };
                     if let Some(stream) = self.streams.get_mut(&key) {
                         stream.jobs.retain(|j| j.id != job);
                         stream.end = end.or(stream.end);
+                        stream.ends_before = match (stream.ends_before, ends_before) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        };
                         stream.missing |= missing;
                     }
                     changed = true;
@@ -520,12 +619,19 @@ impl MixBufferCache {
 
 /// Every buffer is at the `sample_rate`/`channels` given to `spawn`.
 impl AudioSource for MixBufferCache {
-    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.lookup(path, stream, 0..u64::MAX, false)
+    /// The mixer always asks for frames: a whole file is never held.
+    fn file(&mut self, _path: &Path, _stream: usize) -> ClipAudio {
+        ClipAudio::Missing
     }
 
-    fn file_frames(&mut self, path: &Path, stream: usize, frames: Range<u64>) -> ClipAudio {
-        self.lookup(path, stream, frames, false)
+    fn file_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: Range<u64>,
+        plays_at: u64,
+    ) -> ClipAudio {
+        self.lookup(path, stream, frames, plays_at)
     }
 
     fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
@@ -573,6 +679,10 @@ impl AudioSource for MixBufferCache {
         ClipAudio::Pending
     }
 
+    fn last_level(&mut self, slot: AnalysisSlot) -> Option<f32> {
+        self.last_level.get(&slot).copied()
+    }
+
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
         let key = analysis.key();
         self.level_used.insert(key);
@@ -591,30 +701,10 @@ impl AudioSource for MixBufferCache {
     }
 }
 
-fn enqueue(queue: &mut VecDeque<DecodeJob>, job: DecodeJob) {
-    if job.first {
-        queue.push_front(job);
-    } else {
-        queue.push_back(job);
-    }
-}
-
-/// Sorted, with the overlapping or touching ranges joined.
-fn merge_ranges(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
-    ranges.sort_by_key(|r| r.start);
-    let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        match merged.last_mut() {
-            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
-            _ => merged.push(range),
-        }
-    }
-    merged
-}
-
-/// Decodes the blocks of `jobs` (all of `path`) in one read from the start
-/// of the file, sending each as soon as it is complete and stopping once
-/// the last job is. `false` if the receiver is gone (the worker must exit).
+/// Decodes the blocks of `jobs` (all of `path`, same blocks) in one read,
+/// seeking to them, sending each block as soon as it is complete and
+/// stopping once the last job is. `false` if the receiver is gone (the
+/// worker must exit).
 fn decode_blocks(
     path: &Path,
     jobs: &[DecodeJob],
@@ -629,27 +719,25 @@ fn decode_blocks(
     let ch = channels.max(1) as u64;
     let windows: Vec<Range<u64>> = jobs
         .iter()
-        .map(|job| {
-            job.blocks.start.saturating_mul(BLOCK_FRAMES)
-                ..job.blocks.end.saturating_mul(BLOCK_FRAMES)
-        })
+        .map(|job| job.blocks.start * BLOCK_FRAMES..job.blocks.end * BLOCK_FRAMES)
         .collect();
-    let new_block = || Vec::with_capacity((BLOCK_FRAMES * ch) as usize);
-    let mut filling: Vec<Vec<f32>> = jobs.iter().map(|_| new_block()).collect();
+    let from = windows.iter().map(|w| w.start).min().unwrap_or(0);
+    let mut filling: Vec<Vec<f32>> = jobs.iter().map(|_| new_block(ch)).collect();
+    let mut filled_to: Vec<u64> = windows.iter().map(|w| w.start).collect();
     let mut decoded = vec![0_u64; streams.len()];
     let mut remixed = Vec::new();
     let mut receiver_gone = false;
     let mut stopped_early = false;
-    let result = vv_media::decode_audio_streams_streaming(
+    let result = vv_media::decode_audio_streams_from(
         path,
         &streams,
-        Some(sample_rate),
-        |slot, src_channels, chunk| {
+        sample_rate,
+        from,
+        |slot, src_channels, at, chunk| {
             remixed.clear();
             vv_audio::mixer::remix_channels_into(chunk, src_channels, channels, &mut remixed);
-            let from = decoded[slot];
-            let to = from + remixed.len() as u64 / ch;
-            decoded[slot] = to;
+            let to = at + remixed.len() as u64 / ch;
+            decoded[slot] = decoded[slot].max(to);
             let mut finished = true;
             for (i, job) in jobs.iter().enumerate() {
                 if job.cancelled.load(Ordering::Relaxed) {
@@ -657,29 +745,38 @@ fn decode_blocks(
                 }
                 let window = &windows[i];
                 if job.stream == streams[slot] {
-                    let mut frame = window.start.max(from);
+                    // A gap in the stream plays as silence.
+                    let gap_end = at.min(window.end);
                     let until = window.end.min(to);
-                    while frame < until {
-                        let block_end = (frame / BLOCK_FRAMES + 1) * BLOCK_FRAMES;
-                        let next = until.min(block_end);
-                        filling[i].extend_from_slice(
-                            &remixed[((frame - from) * ch) as usize..((next - from) * ch) as usize],
-                        );
-                        frame = next;
-                        if frame == block_end {
-                            let block = Decoded::Block {
-                                job: job.id,
-                                index: frame / BLOCK_FRAMES - 1,
-                                samples: Arc::new(std::mem::replace(&mut filling[i], new_block())),
-                            };
-                            if decoded_tx.send(block).is_err() {
-                                receiver_gone = true;
-                                return ControlFlow::Break(());
-                            }
-                        }
+                    let sent = (filled_to[i] >= gap_end
+                        || fill(
+                            &mut filling[i],
+                            &mut filled_to[i],
+                            gap_end,
+                            None,
+                            ch,
+                            job,
+                            decoded_tx,
+                        ))
+                        && (filled_to[i] >= until || {
+                            let skip = ((filled_to[i] - at) * ch) as usize;
+                            let samples = &remixed[skip..((until - at) * ch) as usize];
+                            fill(
+                                &mut filling[i],
+                                &mut filled_to[i],
+                                until,
+                                Some(samples),
+                                ch,
+                                job,
+                                decoded_tx,
+                            )
+                        });
+                    if !sent {
+                        receiver_gone = true;
+                        return ControlFlow::Break(());
                     }
                 }
-                if decoded[slot_of(job.stream)] < window.end {
+                if filled_to[i] < window.end {
                     finished = false;
                 }
             }
@@ -698,30 +795,71 @@ fn decode_blocks(
         eprintln!("[mix_buffers] decode failed for {}: {e}", path.display());
         vec![None; streams.len()]
     });
-    for (job, last) in jobs.iter().zip(filling) {
+    for ((job, last), filled_to) in jobs.iter().zip(filling).zip(filled_to) {
         let slot = slot_of(job.stream);
         let missing = formats[slot].is_none();
-        let end = (!stopped_early && !missing).then_some(decoded[slot]);
+        let at_end = !stopped_early && !missing;
+        let end = (at_end && decoded[slot] > 0).then_some(decoded[slot]);
+        let ends_before = (at_end && decoded[slot] == 0).then_some(from);
         // The block the file ends in, shorter than the others.
         if end.is_some() && !last.is_empty() {
             let block = Decoded::Block {
                 job: job.id,
-                index: decoded[slot] / BLOCK_FRAMES,
+                index: (filled_to - 1) / BLOCK_FRAMES,
                 samples: Arc::new(last),
             };
             if decoded_tx.send(block).is_err() {
                 return false;
             }
         }
-        if decoded_tx
-            .send(Decoded::Done {
-                job: job.id,
-                end,
-                missing,
-            })
-            .is_err()
-        {
+        let done = Decoded::Done {
+            job: job.id,
+            end,
+            ends_before,
+            missing,
+        };
+        if decoded_tx.send(done).is_err() {
             return false;
+        }
+    }
+    true
+}
+
+fn new_block(ch: u64) -> Vec<f32> {
+    Vec::with_capacity((BLOCK_FRAMES * ch) as usize)
+}
+
+/// Appends frames up to `until` to the block being filled (`samples`, or
+/// silence), sending every block it completes. `false` if the receiver is gone.
+fn fill(
+    filling: &mut Vec<f32>,
+    filled_to: &mut u64,
+    until: u64,
+    samples: Option<&[f32]>,
+    ch: u64,
+    job: &DecodeJob,
+    decoded_tx: &mpsc::Sender<Decoded>,
+) -> bool {
+    let mut offset = 0;
+    while *filled_to < until {
+        let block_end = (*filled_to / BLOCK_FRAMES + 1) * BLOCK_FRAMES;
+        let next = until.min(block_end);
+        let count = ((next - *filled_to) * ch) as usize;
+        match samples {
+            Some(samples) => filling.extend_from_slice(&samples[offset..offset + count]),
+            None => filling.resize(filling.len() + count, 0.0),
+        }
+        offset += count;
+        *filled_to = next;
+        if next == block_end {
+            let block = Decoded::Block {
+                job: job.id,
+                index: next / BLOCK_FRAMES - 1,
+                samples: Arc::new(std::mem::replace(filling, new_block(ch))),
+            };
+            if decoded_tx.send(block).is_err() {
+                return false;
+            }
         }
     }
     true

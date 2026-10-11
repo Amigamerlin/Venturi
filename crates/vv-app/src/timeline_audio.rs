@@ -97,6 +97,7 @@ impl TimelineAudio {
     /// To be called every frame: rebuilds the mix snapshot if the project
     /// changed or new decoded buffers arrived.
     pub fn sync(&mut self, project: &Project, timeline_id: TimelineId, generation: u64) {
+        self.buffers.set_playhead(self.position_sample());
         let buffers_arrived = self.buffers.poll();
         if !buffers_arrived && self.synced == Some((timeline_id, generation)) {
             return;
@@ -121,7 +122,8 @@ impl TimelineAudio {
 
     /// Like `sync`, but for the preview of a media: plays all its
     /// `audio_streams` from the start of the file, without a timeline.
-    pub fn sync_media(&mut self, path: &Path, audio_streams: usize, fps: f64) {
+    pub fn sync_media(&mut self, path: &Path, audio_streams: usize, fps: f64, duration_secs: f64) {
+        self.buffers.set_playhead(self.position_sample());
         let buffers_arrived = self.buffers.poll();
         if !buffers_arrived && self.synced_media.as_deref() == Some(path) {
             return;
@@ -131,9 +133,16 @@ impl TimelineAudio {
         if self.mixer.is_none() {
             return;
         }
-        let (rate, channels) = (self.mix.sample_rate, self.mix.channels);
-        let clips: Vec<MixClip> = (0..audio_streams)
-            .filter_map(|stream| self.buffers.get_or_request_first(path, stream))
+        let rate = self.mix.sample_rate;
+        let channels = self.mix.channels;
+        let frames = 0..(duration_secs.max(0.0) * rate as f64).ceil() as u64;
+        self.buffers.begin_media_pass();
+        let buffers: Vec<_> = (0..audio_streams)
+            .filter_map(|stream| self.buffers.media_frames(path, stream, frames.clone()))
+            .collect();
+        self.buffers.sweep_unused();
+        let clips: Vec<MixClip> = buffers
+            .into_iter()
             .map(|buffer| MixClip {
                 start: 0,
                 len: buffer.end(),

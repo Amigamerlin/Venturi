@@ -692,7 +692,7 @@ struct WantedFrames(HashMap<PathBuf, Vec<(usize, std::ops::Range<u64>)>>);
 
 impl AudioSource for WantedFrames {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.file_frames(path, stream, 0..u64::MAX)
+        self.file_frames(path, stream, 0..u64::MAX, 0)
     }
 
     fn file_frames(
@@ -700,6 +700,7 @@ impl AudioSource for WantedFrames {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
+        _plays_at: u64,
     ) -> ClipAudio {
         let windows = self.0.entry(path.to_path_buf()).or_default();
         let window = (stream, frames);
@@ -719,7 +720,7 @@ struct DecodedAudio {
 
 impl AudioSource for DecodedAudio {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.file_frames(path, stream, 0..u64::MAX)
+        self.file_frames(path, stream, 0..u64::MAX, 0)
     }
 
     fn file_frames(
@@ -727,6 +728,7 @@ impl AudioSource for DecodedAudio {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
+        _plays_at: u64,
     ) -> ClipAudio {
         let start = frames.start;
         self.files

@@ -124,14 +124,6 @@ fn identity(buffer: &SampleBlocks) -> u64 {
     hasher.finish()
 }
 
-/// The whole stream, as far as decoded.
-fn whole(cache: &mut MixBufferCache, path: &Path, stream: usize) -> Option<SampleBlocks> {
-    match cache.file(path, stream) {
-        ClipAudio::Ready(buffer) | ClipAudio::Partial(buffer) => Some(buffer),
-        ClipAudio::Pending | ClipAudio::Missing => None,
-    }
-}
-
 fn sine_wav(name: &str, secs: u32) -> PathBuf {
     let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
     std::fs::create_dir_all(&dir).unwrap();
@@ -150,8 +142,14 @@ fn sine_wav(name: &str, secs: u32) -> PathBuf {
 
 const SEC: u64 = 48_000;
 
+/// Frames of stream 0 that play at their own position.
+fn read(cache: &mut MixBufferCache, path: &Path, frames: Range<u64>) -> ClipAudio {
+    let plays_at = frames.start;
+    cache.file_frames(path, 0, frames, plays_at)
+}
+
 fn ready(cache: &mut MixBufferCache, path: &Path, frames: Range<u64>) -> SampleBlocks {
-    match cache.file_frames(path, 0, frames) {
+    match read(cache, path, frames) {
         ClipAudio::Ready(buffer) => buffer,
         _ => panic!("expected every block decoded"),
     }
@@ -196,74 +194,92 @@ fn buffers_are_decoded_in_background_per_path_and_stream() {
     );
 
     let mut cache = MixBufferCache::spawn(48_000, 2);
-    assert!(whole(&mut cache, &path, 0).is_none());
-    assert!(whole(&mut cache, &path, 1).is_none());
+    let whole = 0..2 * SEC;
+    assert!(cache.media_frames(&path, 0, whole.clone()).is_none());
+    assert!(cache.media_frames(&path, 1, whole.clone()).is_none());
     wait_done(&mut cache);
 
-    let s0 = whole(&mut cache, &path, 0).expect("stream 0 ready");
-    let s1 = whole(&mut cache, &path, 1).expect("stream 1 ready");
+    let s0 = cache
+        .media_frames(&path, 0, whole.clone())
+        .expect("stream 0 ready");
+    let s1 = cache
+        .media_frames(&path, 1, whole.clone())
+        .expect("stream 1 ready");
     assert!((s0.end() as i64 - 48_000).abs() < 100, "s0={}", s0.end());
     assert!((s1.end() as i64 - 24_000).abs() < 100, "s1={}", s1.end());
-    whole(&mut cache, &path, 5);
+    cache.media_frames(&path, 5, whole.clone());
     wait_done(&mut cache);
     assert!(
-        matches!(cache.file(&path, 5), ClipAudio::Missing),
+        matches!(cache.file_frames(&path, 5, whole, 0), ClipAudio::Missing),
         "nonexistent stream"
     );
 }
 
 #[test]
-fn a_long_track_plays_its_first_blocks_before_decoding_ends() {
+fn a_long_read_plays_its_first_blocks_before_decoding_ends() {
     let path = sine_wav("long.wav", 20);
     let mut cache = MixBufferCache::spawn(48_000, 2);
-    whole(&mut cache, &path, 0);
-    let mut ends = Vec::new();
+    read(&mut cache, &path, 0..20 * SEC);
+    let mut partial = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while cache.has_pending() {
         assert!(
             std::time::Instant::now() < deadline,
             "decode never finished"
         );
-        if let Some(buffer) = whole(&mut cache, &path, 0)
-            && ends.last() != Some(&buffer.end())
-        {
-            ends.push(buffer.end());
-        }
+        partial |= matches!(read(&mut cache, &path, 0..20 * SEC), ClipAudio::Partial(_));
         std::thread::yield_now();
     }
-    let full = whole(&mut cache, &path, 0).unwrap();
+    let full = ready(&mut cache, &path, 0..20 * SEC);
     assert_eq!(full.end(), 20 * SEC);
-    assert_eq!(full.to_vec(0..full.end()).len() as u64, 20 * SEC * 2);
+    assert!(partial, "expected blocks to play before the end");
+}
+
+#[test]
+fn the_job_closest_to_the_playhead_is_decoded_first() {
+    let path = sine_wav("closest.wav", 60);
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    cache.set_playhead(40 * SEC);
+    cache.begin_pass();
+    read(&mut cache, &path, 0..60 * SEC);
+    cache.sweep_unused();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let first = loop {
+        assert!(std::time::Instant::now() < deadline, "no block arrived");
+        cache.poll();
+        let held = blocks_held(&cache, &path);
+        if !held.is_empty() {
+            break held;
+        }
+        std::thread::yield_now();
+    };
+    let playhead_block = 40 * SEC / BLOCK_FRAMES;
     assert!(
-        ends.first().is_some_and(|&first| first < full.end()),
-        "expected blocks before the end: {ends:?}"
+        first
+            .iter()
+            .all(|&index| index.abs_diff(playhead_block) <= JOB_BLOCKS),
+        "first blocks {first:?}, playhead in block {playhead_block}"
     );
 }
 
 #[test]
-fn a_priority_request_jumps_the_queue() {
-    let paths: Vec<PathBuf> = ["queue_a.wav", "queue_b.wav", "queue_c.wav"]
-        .iter()
-        .map(|name| sine_wav(name, 30))
-        .collect();
+fn over_budget_the_blocks_closest_to_the_playhead_are_kept() {
+    let path = sine_wav("budget.wav", 60);
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    cache.set_budget_bytes(4 * BLOCK_FRAMES as usize * 4);
+    let pass = |cache: &mut MixBufferCache| {
+        cache.begin_pass();
+        read(cache, &path, 0..60 * SEC);
+        cache.sweep_unused();
+        wait_done(cache);
+    };
+    cache.set_playhead(30 * SEC);
+    pass(&mut cache);
+    assert_eq!(blocks_held(&cache, &path), [20, 21, 22, 23]);
 
-    let mut cache = MixBufferCache::spawn(48_000, 2);
-    whole(&mut cache, &paths[0], 0);
-    whole(&mut cache, &paths[1], 0);
-    cache.get_or_request_first(&paths[2], 0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        assert!(std::time::Instant::now() < deadline, "decode never arrived");
-        cache.poll();
-        if whole(&mut cache, &paths[2], 0).is_some() {
-            break;
-        }
-        std::thread::yield_now();
-    }
-    assert!(
-        whole(&mut cache, &paths[1], 0).is_none(),
-        "the priority request should have jumped ahead of the queued one"
-    );
+    cache.set_playhead(50 * SEC);
+    wait_done(&mut cache);
+    assert_eq!(blocks_held(&cache, &path), [35, 36, 37, 38]);
 }
 
 #[test]
@@ -299,13 +315,14 @@ fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
 
     // The order of the decoder's messages, not a poll loop racing it: a
     // fast decode would finish before the loop looked.
+    let blocks = 0..(121 * SEC).div_ceil(BLOCK_FRAMES);
     let jobs: Vec<DecodeJob> = (0..3)
         .map(|stream| DecodeJob {
             id: stream as u64,
             path: path.clone(),
             stream,
-            blocks: 0..u64::MAX,
-            first: false,
+            blocks: blocks.clone(),
+            plays_at: 0,
             cancelled: Arc::default(),
         })
         .collect();
@@ -377,21 +394,24 @@ fn a_stretch_is_computed_in_background_and_dropped_once_unused() {
 fn only_the_blocks_read_are_decoded_with_the_same_samples_as_the_whole_file() {
     let path = sine_wav("ranged.wav", 60);
     let mut cache = MixBufferCache::spawn(48_000, 1);
-    let read = 20 * SEC..25 * SEC;
+    let frames = 20 * SEC..25 * SEC;
     assert!(matches!(
-        cache.file_frames(&path, 0, read.clone()),
+        read(&mut cache, &path, frames.clone()),
         ClipAudio::Pending
     ));
     wait_done(&mut cache);
 
-    let buffer = ready(&mut cache, &path, read.clone());
-    let (first, last) = (read.start / BLOCK_FRAMES, read.end.div_ceil(BLOCK_FRAMES));
+    let buffer = ready(&mut cache, &path, frames.clone());
+    let (first, last) = (
+        frames.start / BLOCK_FRAMES,
+        frames.end.div_ceil(BLOCK_FRAMES),
+    );
     let with_margin: Vec<u64> = (first - MARGIN_BLOCKS..last + MARGIN_BLOCKS).collect();
     assert_eq!(blocks_held(&cache, &path), with_margin);
     let whole = vv_media::decode_audio_track(&path, 0).unwrap().unwrap();
     assert_eq!(
-        buffer.to_vec(read.clone()),
-        whole.samples[read.start as usize..read.end as usize]
+        buffer.to_vec(frames.clone()),
+        whole.samples[frames.start as usize..frames.end as usize]
     );
 }
 
@@ -399,7 +419,7 @@ fn only_the_blocks_read_are_decoded_with_the_same_samples_as_the_whole_file() {
 fn a_trim_into_the_margin_is_ready_at_once() {
     let path = sine_wav("within.wav", 40);
     let mut cache = MixBufferCache::spawn(48_000, 1);
-    cache.file_frames(&path, 0, 10 * SEC..12 * SEC);
+    read(&mut cache, &path, 10 * SEC..12 * SEC);
     wait_done(&mut cache);
 
     let trimmed = 10 * SEC - BLOCK_FRAMES / 2..12 * SEC + BLOCK_FRAMES / 2;
@@ -410,12 +430,12 @@ fn a_trim_into_the_margin_is_ready_at_once() {
 fn a_longer_read_plays_the_blocks_there_while_the_others_decode() {
     let path = sine_wav("extended.wav", 40);
     let mut cache = MixBufferCache::spawn(48_000, 1);
-    cache.file_frames(&path, 0, 10 * SEC..12 * SEC);
+    read(&mut cache, &path, 10 * SEC..12 * SEC);
     wait_done(&mut cache);
 
     let held = blocks_held(&cache, &path).len();
     assert!(matches!(
-        cache.file_frames(&path, 0, 10 * SEC..30 * SEC),
+        read(&mut cache, &path, 10 * SEC..30 * SEC),
         ClipAudio::Partial(_)
     ));
     wait_done(&mut cache);
@@ -428,7 +448,7 @@ fn a_pass_frees_the_blocks_a_shortened_clip_no_longer_reads() {
     let path = sine_wav("shortened.wav", 40);
     let mut cache = MixBufferCache::spawn(48_000, 1);
     cache.begin_pass();
-    cache.file_frames(&path, 0, 0..40 * SEC);
+    read(&mut cache, &path, 0..40 * SEC);
     cache.sweep_unused();
     wait_done(&mut cache);
 
@@ -443,7 +463,7 @@ fn a_pass_frees_the_blocks_a_shortened_clip_no_longer_reads() {
 fn a_read_past_the_end_of_the_file_ends_at_it() {
     let path = sine_wav("short.wav", 10);
     let mut cache = MixBufferCache::spawn(48_000, 1);
-    cache.file_frames(&path, 0, 5 * SEC..20 * SEC);
+    read(&mut cache, &path, 5 * SEC..20 * SEC);
     wait_done(&mut cache);
 
     let buffer = ready(&mut cache, &path, 5 * SEC..20 * SEC);
@@ -455,7 +475,7 @@ fn what_a_pass_does_not_read_is_dropped() {
     let path = sine_wav("dropped.wav", 10);
     let mut cache = MixBufferCache::spawn(48_000, 1);
     cache.begin_pass();
-    cache.file_frames(&path, 0, 0..SEC);
+    read(&mut cache, &path, 0..SEC);
     cache.store_compound(
         <MediaId as vv_core::id_map::Id>::from_raw(1),
         1,

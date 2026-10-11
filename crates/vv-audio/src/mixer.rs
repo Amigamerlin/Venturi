@@ -328,7 +328,7 @@ impl MixSnapshot {
         channels: u16,
         source: &mut impl AudioSource,
     ) -> Self {
-        collect_clips(project, timeline, sample_rate, channels, source, None, 0).0
+        collect_clips(project, timeline, sample_rate, channels, source, None, 0, 0).0
     }
 
     /// Only for mixing the timeline audio frames `range`: the clips outside
@@ -344,7 +344,17 @@ impl MixSnapshot {
     ) -> Self {
         // A normalization measures the whole channel.
         let range = (!normalizes(timeline)).then_some(range);
-        collect_clips(project, timeline, sample_rate, channels, source, range, 0).0
+        collect_clips(
+            project,
+            timeline,
+            sample_rate,
+            channels,
+            source,
+            range,
+            0,
+            0,
+        )
+        .0
     }
 
     fn track(&self, index: usize) -> &Channel {
@@ -578,12 +588,15 @@ pub trait AudioSource {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio;
 
     /// `file` when only its frames `frames` are read: the buffer holds at
-    /// least those, or stops at the end of the file.
+    /// least those, or stops at the end of the file. `plays_at`: about when
+    /// the first of them plays, in samples of the timeline being mixed (of
+    /// the outermost one, for a compound clip's).
     fn file_frames(
         &mut self,
         path: &Path,
         stream: usize,
         _frames: std::ops::Range<u64>,
+        _plays_at: u64,
     ) -> ClipAudio {
         self.file(path, stream)
     }
@@ -615,6 +628,13 @@ pub trait AudioSource {
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
         LevelReading::Ready(analysis.run())
     }
+
+    /// The last level measured for `slot`, used while its audio is still
+    /// decoding: measuring part of it would be wrong, and redone at every
+    /// new block.
+    fn last_level(&mut self, _slot: AnalysisSlot) -> Option<f32> {
+        None
+    }
 }
 
 pub fn stretch_range(
@@ -643,7 +663,9 @@ enum Readiness {
     Pending,
 }
 
-/// The mix clips of `timeline`, and the least ready of them.
+/// The mix clips of `timeline`, and the least ready of them. `placement`:
+/// where its sample 0 plays in the outermost timeline, for `plays_at`.
+#[allow(clippy::too_many_arguments)]
 fn collect_clips(
     project: &Project,
     timeline: &Timeline,
@@ -652,6 +674,7 @@ fn collect_clips(
     source: &mut impl AudioSource,
     range: Option<std::ops::Range<u64>>,
     depth: u32,
+    placement: i64,
 ) -> (MixSnapshot, Readiness) {
     let fps = timeline.fps.as_f64().max(1e-9);
     let mut clips = Vec::new();
@@ -676,9 +699,26 @@ fn collect_clips(
                 continue;
             };
             let audio = if item.compound.is_some() {
-                compound_audio(project, *media_id, sample_rate, channels, source, depth)
+                // A compound used twice is mixed once: placed by its first use.
+                let nested_placement = placement + span.start as i64 - span.source_offset as i64;
+                compound_audio(
+                    project,
+                    *media_id,
+                    sample_rate,
+                    channels,
+                    source,
+                    depth,
+                    nested_placement,
+                )
             } else {
-                source.file_frames(&item.path, clip.audio_stream_index, needed.clone())
+                let into_clip = needed.start.saturating_sub(span.source_offset) as f64 / span.step;
+                let plays_at = (placement + span.start as i64 + into_clip as i64).max(0) as u64;
+                source.file_frames(
+                    &item.path,
+                    clip.audio_stream_index,
+                    needed.clone(),
+                    plays_at,
+                )
             };
             let buffer = match audio {
                 ClipAudio::Ready(buffer) => buffer,
@@ -815,13 +855,18 @@ fn resolve_chain(
                 set_level,
             } => {
                 let mut gain = |clip: Option<usize>| {
-                    let reading = source.level(LevelAnalysis {
-                        slot: slot.map(|(timeline, channel)| {
-                            (timeline, channel, inserts.len(), clip.unwrap_or(0))
-                        }),
-                        mode,
-                        snapshot: measure(&inserts, clip),
+                    let slot = slot.map(|(timeline, channel)| {
+                        (timeline, channel, inserts.len(), clip.unwrap_or(0))
                     });
+                    let reading = if *readiness == Readiness::Complete {
+                        source.level(LevelAnalysis {
+                            slot,
+                            mode,
+                            snapshot: measure(&inserts, clip),
+                        })
+                    } else {
+                        LevelReading::Pending(slot.and_then(|slot| source.last_level(slot)))
+                    };
                     normalize_gain(target_db, reading, readiness)
                 };
                 // The loudest peak of the clips is the peak of the track:
@@ -885,7 +930,7 @@ pub fn compound_mixdown(
     channels: u16,
     source: &mut impl AudioSource,
 ) -> ClipAudio {
-    compound_audio(project, media_id, sample_rate, channels, source, 0)
+    compound_audio(project, media_id, sample_rate, channels, source, 0, 0)
 }
 
 fn compound_audio(
@@ -895,6 +940,7 @@ fn compound_audio(
     channels: u16,
     source: &mut impl AudioSource,
     depth: u32,
+    placement: i64,
 ) -> ClipAudio {
     // Past the limit (only a cycle gets here) it never becomes ready: the
     // whole cycle stays silent instead of layering itself 16 times.
@@ -919,6 +965,7 @@ fn compound_audio(
         source,
         None,
         depth + 1,
+        placement,
     );
     if readiness == Readiness::Pending {
         return ClipAudio::Pending;

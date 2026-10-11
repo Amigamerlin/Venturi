@@ -236,3 +236,140 @@ fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
         "no audio stream at index 2"
     );
 }
+
+/// 20 s of seeded noise: unlike a tone, a shift of one sample shows.
+const NOISE: &str = "anoisesrc=duration=20:color=white:amplitude=0.5:seed=7:sample_rate=48000";
+
+/// A sweep, never periodic either: lossy codecs fill noise with noise of
+/// their own (AAC's PNS), different after a seek.
+const CHIRP: &str = "aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=20:sample_rate=48000";
+
+fn test_file(
+    name: &str,
+    source: &str,
+    output_args: &[&str],
+    with_video: bool,
+) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("vv-media-seek-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let mut args = vec!["-f", "lavfi", "-i", source];
+    if with_video {
+        args.extend([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=20:size=320x240:rate=30",
+            "-map",
+            "1:v",
+            "-map",
+            "0:a",
+            "-c:v",
+            "libx264",
+            "-g",
+            "120",
+        ]);
+    }
+    args.extend(["-ac", "2"]);
+    args.extend(output_args);
+    crate::test_support::ffmpeg(&args, &path);
+    path
+}
+
+/// The frames `from..from + len` of stream 0 at 48 kHz stereo, by seeking.
+fn seeked(path: &std::path::Path, from: u64, len: u64) -> Vec<f32> {
+    let mut out = vec![f32::NAN; len as usize * 2];
+    decode_audio_streams_from(path, &[0], 48_000, from, |_, channels, at, chunk| {
+        assert_eq!(channels, 2);
+        for (i, frame) in chunk.as_chunks::<2>().0.iter().enumerate() {
+            let pos = at + i as u64;
+            if (from..from + len).contains(&pos) {
+                let o = (pos - from) as usize * 2;
+                out[o..o + 2].copy_from_slice(frame);
+            }
+        }
+        if at >= from + len {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .unwrap();
+    out
+}
+
+fn assert_seek_matches_full_decode(path: &std::path::Path, tolerance: f32) {
+    let mut full = Vec::new();
+    decode_audio_streams_streaming(path, &[0], Some(48_000), |_, _, chunk| {
+        full.extend_from_slice(chunk);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    for from in [48_000 * 7 + 123, 48_000 * 13 + 7, 300] {
+        let len = 48_000;
+        let got = seeked(path, from, len);
+        let want = &full[from as usize * 2..(from + len) as usize * 2];
+        let worst = got
+            .iter()
+            .zip(want)
+            .map(|(g, w)| (g - w).abs())
+            .fold(
+                0.0f32,
+                |m, d| if d.is_nan() { f32::INFINITY } else { m.max(d) },
+            );
+        assert!(
+            worst <= tolerance,
+            "{}: from frame {from} the seeked decode differs by {worst}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_pcm() {
+    let path = test_file("pcm.wav", NOISE, &["-c:a", "pcm_s16le"], false);
+    assert_seek_matches_full_decode(&path, 0.0);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_pcm_next_to_h264() {
+    let path = test_file("obs.mkv", NOISE, &["-c:a", "pcm_s16le"], true);
+    assert_seek_matches_full_decode(&path, 0.0);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_flac() {
+    let path = test_file("noise.flac", NOISE, &["-c:a", "flac"], false);
+    assert_seek_matches_full_decode(&path, 0.0);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_aac() {
+    let path = test_file("aac.mp4", CHIRP, &["-c:a", "aac"], true);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_aac_in_mkv() {
+    let path = test_file("aac.mkv", CHIRP, &["-c:a", "aac"], true);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_opus() {
+    let path = test_file("opus.mkv", CHIRP, &["-c:a", "libopus"], true);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_mp3() {
+    let path = test_file("chirp.mp3", CHIRP, &["-c:a", "libmp3lame"], false);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_resampled_stream_is_read_from_its_start_to_stay_in_phase() {
+    let chirp_44k = "aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=20:sample_rate=44100";
+    let path = test_file("chirp44.wav", chirp_44k, &["-c:a", "pcm_s16le"], false);
+    assert_seek_matches_full_decode(&path, 0.0);
+}

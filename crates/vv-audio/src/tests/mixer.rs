@@ -1230,6 +1230,7 @@ impl AudioSource for Windowed {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
+        _plays_at: u64,
     ) -> ClipAudio {
         self.asked.push((path.to_path_buf(), frames.clone()));
         let Some(whole) = samples(path, stream) else {
@@ -1293,4 +1294,38 @@ fn a_range_mix_reads_whole_clips_for_a_normalization() {
 
     assert_eq!(out, render(&project, &tl, 100, 50));
     assert_eq!(source.asked[0].1.start, 0);
+}
+
+/// Audio still decoding, counting the measures asked for.
+#[derive(Default)]
+struct PartialLevels {
+    measured: usize,
+}
+
+impl AudioSource for PartialLevels {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Partial)
+    }
+
+    fn level(&mut self, _: LevelAnalysis) -> LevelReading {
+        self.measured += 1;
+        LevelReading::Ready(0.25)
+    }
+}
+
+#[test]
+fn a_normalization_waits_for_its_audio_to_be_decoded_before_measuring() {
+    let (project, a, _) = project();
+    let mut track = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    track.mix.effects = vec![normalize(0.0)];
+    let tl = timeline(vec![track]);
+    let mut source = PartialLevels::default();
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(
+        source.measured, 0,
+        "a part of the audio would measure wrong"
+    );
+    let mut out = vec![9.0; 50];
+    mix_range(&snap, 0, &mut out);
+    assert!(out.iter().all(|&s| s == 0.5), "unity gain meanwhile");
 }

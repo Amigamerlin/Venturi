@@ -797,7 +797,9 @@ impl VenturiApp {
         };
         if let Some(media_id) = self.browsing_media {
             if let Some(item) = self.session.project.media_pool.get(media_id) {
-                audio.sync_media(&item.path, self.browse_audio_streams, fps);
+                let duration_secs =
+                    item.meta.duration_frames as f64 / item.meta.fps.as_f64().max(1e-9);
+                audio.sync_media(&item.path, self.browse_audio_streams, fps, duration_secs);
             }
         } else if let Some(timeline_id) = self.timeline_id {
             audio.sync(
