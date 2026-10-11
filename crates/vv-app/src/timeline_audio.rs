@@ -110,6 +110,7 @@ impl TimelineAudio {
             return;
         };
         let (rate, channels) = (self.mix.sample_rate, self.mix.channels);
+        self.buffers.begin_pass();
         let mut mix =
             MixSnapshot::from_timeline(project, timeline, rate, channels, &mut self.buffers);
         mix.meters.keep_spectra_of(&self.mix.meters);

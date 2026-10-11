@@ -1,12 +1,14 @@
-//! Audio buffers already in the mixer's format, per `(path, audio_stream_index)`.
-//! Decode + resample on a dedicated thread. The buffer is published
-//! partially while it grows: the mixer plays the start of the track before
-//! the decode finishes, past the ready part there is silence.
+//! Audio buffers already in the mixer's format, per `(path, audio_stream_index)`,
+//! holding only the frames the timeline reads (`Segment`). Decode + resample
+//! on a dedicated thread. A buffer is published partially while it grows: the
+//! mixer plays its start before the decode finishes, past the ready part there
+//! is silence.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use vv_audio::{AnalysisSlot, AudioSource, ClipAudio, LevelAnalysis, LevelReading};
@@ -42,8 +44,28 @@ struct LevelJob {
 /// `None`: dropped for a newer job of the same slot.
 type LevelResult = (u64, Option<AnalysisSlot>, Option<f32>);
 
+/// The decoded frames `frames` of one stream; the buffer starts at `frames.start`.
+struct Segment {
+    id: u64,
+    frames: Range<u64>,
+    /// `None` = no samples yet, or no audio there.
+    buffer: Option<Arc<Vec<f32>>>,
+    done: bool,
+    prioritized: bool,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct DecodeJob {
+    id: u64,
+    path: PathBuf,
+    stream: usize,
+    frames: Range<u64>,
+    first: bool,
+    cancelled: Arc<AtomicBool>,
+}
+
 struct Ready {
-    key: Key,
+    id: u64,
     buffer: Option<Arc<Vec<f32>>>,
     done: bool,
 }
@@ -52,19 +74,30 @@ struct Ready {
 /// ones at every doubling, so the buffer copies cost ~2x the decode.
 const FIRST_PUBLISH_SECS: usize = 1;
 
+/// Decoded around what the clips read: a trim within it does not decode
+/// again, and clips closer than twice this share a segment.
+const SEGMENT_MARGIN_SECS: u64 = 5;
+
 pub struct MixBufferCache {
-    /// `None` = no samples yet, or no audio at that index.
-    entries: HashMap<Key, Option<Arc<Vec<f32>>>>,
-    in_progress: HashSet<Key>,
-    worker: Worker<(Key, bool)>,
+    sample_rate: u32,
+    channels: u16,
+    segments: HashMap<Key, Vec<Segment>>,
+    /// Ranges asked for and not covered, sent to the worker by `flush_plans`
+    /// so that the clips of one pass are merged into few segments.
+    plans: Vec<(Key, Vec<Range<u64>>, bool)>,
+    /// Segments read since `begin_pass`.
+    used: HashSet<u64>,
+    next_id: u64,
+    worker: Worker<DecodeJob>,
     ready_rx: mpsc::Receiver<Ready>,
     /// Mixdowns of compound clips, with the `content_hash` they were
     /// computed with (see `vv_audio::mixer::compound_mixdown`).
     compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
+    compound_used: HashSet<MediaId>,
     /// Pitch-corrected clip audio (see `AudioSource::stretched`), with the
     /// source buffer it was made from.
     stretched: HashMap<StretchKey, (Arc<Vec<f32>>, Stretch)>,
-    /// Keys asked for since the last `sweep_stretched`.
+    /// Keys asked for since the last `sweep_unused`.
     stretch_used: HashSet<StretchKey>,
     stretch_worker: Worker<StretchJob>,
     stretch_rx: mpsc::Receiver<(StretchKey, Result<Vec<f32>, String>)>,
@@ -79,9 +112,9 @@ pub struct MixBufferCache {
 impl MixBufferCache {
     pub fn spawn(sample_rate: u32, channels: u16) -> Self {
         let (ready_tx, ready_rx) = mpsc::channel::<Ready>();
-        let worker = Worker::spawn(move |job_rx: mpsc::Receiver<(Key, bool)>| {
+        let worker = Worker::spawn(move |job_rx: mpsc::Receiver<DecodeJob>| {
             let mut queue = VecDeque::new();
-            let mut done = HashSet::new();
+            let mut started = HashSet::new();
             loop {
                 if queue.is_empty() {
                     match job_rx.recv() {
@@ -92,25 +125,29 @@ impl MixBufferCache {
                 while let Ok(job) = job_rx.try_recv() {
                     enqueue(&mut queue, job);
                 }
-                let Some(key) = queue.pop_front() else {
+                let Some(job) = queue.pop_front() else {
                     continue;
                 };
-                // The other queued streams of the same file go in the
-                // same pass: they all arrive at once instead of in line.
-                let mut streams = vec![key.1];
-                queue.retain(|(path, stream)| {
-                    let same_file = *path == key.0;
-                    if same_file && !streams.contains(stream) {
-                        streams.push(*stream);
+                // The other queued segments of the same file go in the
+                // same pass: one read of the file serves them all.
+                let path = job.path.clone();
+                let mut batch = vec![job];
+                let mut rest = VecDeque::new();
+                for job in queue.drain(..) {
+                    if job.path == path {
+                        batch.push(job);
+                    } else {
+                        rest.push_back(job);
                     }
-                    !same_file
-                });
+                }
+                queue = rest;
                 // A priority request duplicates one already queued.
-                streams.retain(|&stream| done.insert((key.0.clone(), stream)));
-                if streams.is_empty() {
+                batch
+                    .retain(|job| !job.cancelled.load(Ordering::Relaxed) && started.insert(job.id));
+                if batch.is_empty() {
                     continue;
                 }
-                if !decode_progressively(&key.0, &streams, sample_rate, channels, &ready_tx) {
+                if !decode_progressively(&path, &batch, sample_rate, channels, &ready_tx) {
                     break;
                 }
             }
@@ -161,11 +198,16 @@ impl MixBufferCache {
             }
         });
         Self {
-            entries: HashMap::new(),
-            in_progress: HashSet::new(),
+            sample_rate,
+            channels,
+            segments: HashMap::new(),
+            plans: Vec::new(),
+            used: HashSet::new(),
+            next_id: 0,
             worker,
             ready_rx,
             compound: HashMap::new(),
+            compound_used: HashSet::new(),
             stretched: HashMap::new(),
             stretch_used: HashSet::new(),
             stretch_worker,
@@ -178,53 +220,210 @@ impl MixBufferCache {
         }
     }
 
-    /// Drops the stretches and levels no mix asked for since the previous
-    /// call: to be called after rebuilding the snapshot of the whole timeline.
+    /// From here to `sweep_unused`, a full mix of the timeline: what it
+    /// does not read is dropped.
+    pub fn begin_pass(&mut self) {
+        self.used.clear();
+        self.compound_used.clear();
+    }
+
+    /// Drops the buffers, mixdowns, stretches and levels no mix asked for:
+    /// to be called after rebuilding the snapshot of the whole timeline.
     pub fn sweep_unused(&mut self) {
+        self.flush_plans();
+        let used = &self.used;
+        self.segments.retain(|_, segments| {
+            segments.retain(|segment| {
+                let keep = used.contains(&segment.id);
+                if !keep {
+                    segment.cancelled.store(true, Ordering::Relaxed);
+                }
+                keep
+            });
+            !segments.is_empty()
+        });
+        let used = &self.compound_used;
+        self.compound.retain(|media_id, _| used.contains(media_id));
         let used = std::mem::take(&mut self.stretch_used);
         self.stretched.retain(|key, _| used.contains(key));
         let used = std::mem::take(&mut self.level_used);
         self.levels.retain(|key, _| used.contains(key));
     }
 
-    /// Non-blocking: if the buffer is not there it queues its decode (once
-    /// per key only). The returned buffer may be partial.
-    pub fn get_or_request(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
-        self.request(path, stream, false)
-    }
-
-    /// Like `get_or_request`, but the decode jumps ahead of the queued ones
-    /// (it does not interrupt the one in progress).
+    /// The whole of `stream` of `path`, if anything is decoded yet. Queues
+    /// its decode ahead of the others (it does not interrupt the one in
+    /// progress).
     pub fn get_or_request_first(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
-        self.request(path, stream, true)
+        let (audio, _) = self.lookup(path, stream, 0..u64::MAX, true);
+        self.flush_plans();
+        match audio {
+            ClipAudio::Ready(buffer) | ClipAudio::Partial(buffer) => Some(buffer),
+            ClipAudio::Pending | ClipAudio::Missing => None,
+        }
     }
 
-    fn request(&mut self, path: &Path, stream: usize, first: bool) -> Option<Arc<Vec<f32>>> {
-        let key = (path.to_path_buf(), stream);
-        if let Some(entry) = self.entries.get(&key) {
-            // Already queued: repeated at the front, the worker discards the duplicate.
-            if first && entry.is_none() && self.in_progress.contains(&key) {
-                self.worker.send((key.clone(), true));
-            }
-            return entry.clone();
+    #[cfg(test)]
+    pub fn get_or_request(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+        match self.lookup(path, stream, 0..u64::MAX, false).0 {
+            ClipAudio::Ready(buffer) | ClipAudio::Partial(buffer) => Some(buffer),
+            ClipAudio::Pending | ClipAudio::Missing => None,
         }
-        self.worker.send((key.clone(), first));
-        self.in_progress.insert(key.clone());
-        self.entries.insert(key, None);
-        None
+    }
+
+    /// Non-blocking: the newest complete segment holding `needed`, else
+    /// the start of it from a segment still decoding (or from an older one
+    /// while a larger one decodes). What no segment will hold is planned.
+    fn lookup(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        needed: Range<u64>,
+        first: bool,
+    ) -> (ClipAudio, u64) {
+        let key = (path.to_path_buf(), stream);
+        let segments = self
+            .segments
+            .get_mut(&key)
+            .map(Vec::as_mut_slice)
+            .unwrap_or_default();
+        let covers = |s: &Segment| s.frames.start <= needed.start && needed.end <= s.frames.end;
+        if let Some(segment) = segments
+            .iter()
+            .filter(|s| s.done && covers(s))
+            .max_by_key(|s| s.id)
+        {
+            self.used.insert(segment.id);
+            let audio = segment
+                .buffer
+                .clone()
+                .map_or(ClipAudio::Missing, ClipAudio::Ready);
+            return (audio, segment.frames.start);
+        }
+        match segments
+            .iter_mut()
+            .filter(|s| covers(s))
+            .max_by_key(|s| s.id)
+        {
+            Some(decoding) => {
+                self.used.insert(decoding.id);
+                if first && !decoding.prioritized {
+                    decoding.prioritized = true;
+                    self.worker.send(DecodeJob {
+                        id: decoding.id,
+                        path: key.0.clone(),
+                        stream,
+                        frames: decoding.frames.clone(),
+                        first,
+                        cancelled: decoding.cancelled.clone(),
+                    });
+                }
+            }
+            None => self.plan(key.clone(), needed.clone(), first),
+        }
+        let ch = self.channels.max(1) as u64;
+        let partial = self
+            .segments
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter(|s| s.frames.start <= needed.start)
+            .filter_map(|s| {
+                let buffer = s.buffer.as_ref()?;
+                let end = s.frames.start + buffer.len() as u64 / ch;
+                (end > needed.start).then_some((s, end))
+            })
+            .max_by_key(|(_, end)| *end);
+        match partial {
+            Some((segment, _)) => {
+                self.used.insert(segment.id);
+                let buffer = segment.buffer.clone().unwrap();
+                (ClipAudio::Partial(buffer), segment.frames.start)
+            }
+            None => (ClipAudio::Pending, 0),
+        }
+    }
+
+    fn plan(&mut self, key: Key, needed: Range<u64>, first: bool) {
+        let margin = SEGMENT_MARGIN_SECS * self.sample_rate as u64;
+        let range = needed.start.saturating_sub(margin)..needed.end.saturating_add(margin);
+        match self.plans.iter_mut().find(|(k, _, _)| *k == key) {
+            Some((_, ranges, prioritized)) => {
+                ranges.push(range);
+                *prioritized |= first;
+            }
+            None => self.plans.push((key, vec![range], first)),
+        }
+    }
+
+    /// Turns the plans into segments, merged with each other and with the
+    /// segments they overlap: the new one replaces those, which go at the
+    /// next `sweep_unused` once nothing reads them.
+    fn flush_plans(&mut self) {
+        for ((path, stream), mut ranges, first) in std::mem::take(&mut self.plans) {
+            let key = (path, stream);
+            let existing = self.segments.entry(key.clone()).or_default();
+            loop {
+                let merged = merge_ranges(std::mem::take(&mut ranges));
+                let absorbed: Vec<Range<u64>> = existing
+                    .iter()
+                    .filter(|s| !s.cancelled.load(Ordering::Relaxed))
+                    .map(|s| s.frames.clone())
+                    .filter(|f| {
+                        merged.iter().any(|r| r.start < f.end && f.start < r.end)
+                            && !merged.iter().any(|r| r.start <= f.start && f.end <= r.end)
+                    })
+                    .collect();
+                ranges = merged;
+                if absorbed.is_empty() {
+                    break;
+                }
+                ranges.extend(absorbed);
+            }
+            for frames in ranges {
+                let id = self.next_id;
+                self.next_id += 1;
+                let cancelled = Arc::new(AtomicBool::new(false));
+                self.worker.send(DecodeJob {
+                    id,
+                    path: key.0.clone(),
+                    stream: key.1,
+                    frames: frames.clone(),
+                    first,
+                    cancelled: cancelled.clone(),
+                });
+                self.used.insert(id);
+                existing.push(Segment {
+                    id,
+                    frames,
+                    buffer: None,
+                    done: false,
+                    prioritized: first,
+                    cancelled,
+                });
+            }
+        }
     }
 
     /// Collects the ready buffers (partial ones too); `true` if at least one
     /// arrived (the mixer snapshot must be rebuilt).
     pub fn poll(&mut self) -> bool {
+        self.flush_plans();
         let mut changed = false;
         while let Ok(ready) = self.ready_rx.try_recv() {
-            if ready.done {
-                self.in_progress.remove(&ready.key);
-            }
+            let segment = self
+                .segments
+                .values_mut()
+                .flatten()
+                .find(|s| s.id == ready.id);
+            let Some(segment) = segment else {
+                continue;
+            };
+            segment.done = ready.done;
             if ready.buffer.is_some() {
                 changed = true;
-                self.entries.insert(ready.key, ready.buffer);
+                segment.buffer = ready.buffer;
+            } else if ready.done {
+                changed = true;
             }
         }
         while let Ok((key, result)) = self.stretch_rx.try_recv() {
@@ -262,24 +461,22 @@ impl MixBufferCache {
     #[cfg(test)]
     pub fn has_pending(&mut self) -> bool {
         self.poll();
-        !self.in_progress.is_empty()
+        self.segments.values().flatten().any(|s| !s.done)
     }
 }
 
 /// Every buffer is at the `sample_rate`/`channels` given to `spawn`.
 impl AudioSource for MixBufferCache {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        let buffer = self.get_or_request(path, stream);
-        let decoding = self.in_progress.contains(&(path.to_path_buf(), stream));
-        match (buffer, decoding) {
-            (Some(buffer), false) => ClipAudio::Ready(buffer),
-            (Some(buffer), true) => ClipAudio::Partial(buffer),
-            (None, true) => ClipAudio::Pending,
-            (None, false) => ClipAudio::Missing,
-        }
+        self.file_frames(path, stream, 0..u64::MAX).0
+    }
+
+    fn file_frames(&mut self, path: &Path, stream: usize, frames: Range<u64>) -> (ClipAudio, u64) {
+        self.lookup(path, stream, frames, false)
     }
 
     fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
+        self.compound_used.insert(media_id);
         self.compound
             .get(&media_id)
             .filter(|(hash, _)| *hash == content_hash)
@@ -287,6 +484,7 @@ impl AudioSource for MixBufferCache {
     }
 
     fn store_compound(&mut self, media_id: MediaId, content_hash: u64, mixdown: Arc<Vec<f32>>) {
+        self.compound_used.insert(media_id);
         self.compound.insert(media_id, (content_hash, mixdown));
     }
 
@@ -343,48 +541,91 @@ impl AudioSource for MixBufferCache {
     }
 }
 
-fn enqueue(queue: &mut VecDeque<Key>, (key, first): (Key, bool)) {
-    if first {
-        queue.push_front(key);
+fn enqueue(queue: &mut VecDeque<DecodeJob>, job: DecodeJob) {
+    if job.first {
+        queue.push_front(job);
     } else {
-        queue.push_back(key);
+        queue.push_back(job);
     }
 }
 
-/// `false` if the receiver is gone (the worker must exit).
+/// Sorted, with the overlapping or touching ranges joined.
+fn merge_ranges(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Decodes `jobs` (all of `path`) in one read from the start of the file,
+/// stopping once the last of them is complete. `false` if the receiver is
+/// gone (the worker must exit).
 fn decode_progressively(
     path: &Path,
-    streams: &[usize],
+    jobs: &[DecodeJob],
     sample_rate: u32,
     channels: u16,
     ready_tx: &mpsc::Sender<Ready>,
 ) -> bool {
-    let key = |slot: usize| (path.to_path_buf(), streams[slot]);
+    let mut streams: Vec<usize> = jobs.iter().map(|job| job.stream).collect();
+    streams.sort_unstable();
+    streams.dedup();
+    let slot_of = |stream: usize| streams.iter().position(|&s| s == stream).unwrap();
+    let ch = channels.max(1) as u64;
     let first_publish = FIRST_PUBLISH_SECS * sample_rate as usize * channels as usize;
-    let mut buffers = vec![Vec::new(); streams.len()];
-    let mut next_publish = vec![first_publish; streams.len()];
+    let mut buffers = vec![Vec::new(); jobs.len()];
+    let mut next_publish = vec![first_publish; jobs.len()];
+    let mut decoded = vec![0_u64; streams.len()];
+    let mut remixed = Vec::new();
     let mut receiver_gone = false;
     let result = vv_media::decode_audio_streams_streaming(
         path,
-        streams,
+        &streams,
         Some(sample_rate),
         |slot, src_channels, chunk| {
-            let buffer = &mut buffers[slot];
-            vv_audio::mixer::remix_channels_into(chunk, src_channels, channels, buffer);
-            if buffer.len() < next_publish[slot] {
-                return ControlFlow::Continue(());
+            remixed.clear();
+            vv_audio::mixer::remix_channels_into(chunk, src_channels, channels, &mut remixed);
+            let from = decoded[slot];
+            let to = from + remixed.len() as u64 / ch;
+            decoded[slot] = to;
+            let mut finished = true;
+            for (i, job) in jobs.iter().enumerate() {
+                if job.cancelled.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let (a, b) = (job.frames.start.max(from), job.frames.end.min(to));
+                if job.stream == streams[slot] && a < b {
+                    let buffer = &mut buffers[i];
+                    buffer.extend_from_slice(
+                        &remixed[((a - from) * ch) as usize..((b - from) * ch) as usize],
+                    );
+                    if buffer.len() >= next_publish[i] {
+                        next_publish[i] = buffer.len() * 2;
+                        let ready = Ready {
+                            id: job.id,
+                            buffer: Some(Arc::new(buffer.clone())),
+                            done: false,
+                        };
+                        if ready_tx.send(ready).is_err() {
+                            receiver_gone = true;
+                            return ControlFlow::Break(());
+                        }
+                    }
+                }
+                if decoded[slot_of(job.stream)] < job.frames.end {
+                    finished = false;
+                }
             }
-            next_publish[slot] = buffer.len() * 2;
-            let ready = Ready {
-                key: key(slot),
-                buffer: Some(Arc::new(buffer.clone())),
-                done: false,
-            };
-            if ready_tx.send(ready).is_err() {
-                receiver_gone = true;
-                return ControlFlow::Break(());
+            if finished {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
             }
-            ControlFlow::Continue(())
         },
     );
     if receiver_gone {
@@ -394,10 +635,11 @@ fn decode_progressively(
         eprintln!("[mix_buffers] decode failed for {}: {e}", path.display());
         vec![None; streams.len()]
     });
-    for (slot, buffer) in buffers.into_iter().enumerate() {
-        let buffer = (formats[slot].is_some() && !buffer.is_empty()).then(|| Arc::new(buffer));
+    for (job, buffer) in jobs.iter().zip(buffers) {
+        let buffer = (formats[slot_of(job.stream)].is_some() && !buffer.is_empty())
+            .then(|| Arc::new(buffer));
         let ready = Ready {
-            key: key(slot),
+            id: job.id,
             buffer,
             done: true,
         };
