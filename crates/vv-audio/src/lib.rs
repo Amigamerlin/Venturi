@@ -13,6 +13,7 @@ pub mod mixer;
 pub mod recorder;
 pub mod spectrum;
 pub mod stretch;
+pub mod stretched;
 
 pub use blocks::{BLOCK_FRAMES, SampleBlocks};
 pub use levels::{LevelAnalysis, LevelSegment, Measured};
@@ -20,4 +21,5 @@ pub use mixer::{
     AnalysisSlot, AudioSource, BandMeter, ClipAudio, ClipInput, LevelReading, MixSnapshot, Mixer,
     MixerState, StretchedWindow,
 };
-pub use stretch::stretch_samples;
+pub use stretch::{Stretcher, stretch_samples};
+pub use stretched::{StretchInput, StretchRequest};

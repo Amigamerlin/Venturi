@@ -1,6 +1,6 @@
 use super::*;
 use vv_audio::MixSnapshot;
-use vv_core::Project;
+use vv_core::{MediaId, Project};
 
 fn wait_done(cache: &mut MixBufferCache) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -90,56 +90,6 @@ fn compound_project(path: &Path, secs: u32) -> (Project, MediaId, vv_core::Timel
     let mut parent = project.timelines[nested_id].clone();
     parent.tracks[0].clips = vec![compound_clip];
     (project, compound_media, parent)
-}
-
-#[test]
-fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
-    let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("compound_source.wav");
-    vv_media::test_support::ffmpeg(
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000:duration=1",
-        ],
-        &path,
-    );
-    let (project, compound_media, _) = compound_project(&path, 1);
-
-    let mut cache = MixBufferCache::spawn(48_000, 1);
-    let mixdown = |cache: &mut MixBufferCache| {
-        vv_audio::mixer::compound_mixdown(&project, compound_media, 48_000, 1, cache)
-    };
-    assert!(
-        matches!(mixdown(&mut cache), vv_audio::ClipAudio::Pending),
-        "the real media is not decoded yet: the compound clip is not ready"
-    );
-
-    wait_done(&mut cache);
-    let vv_audio::ClipAudio::Ready(buffer) = mixdown(&mut cache) else {
-        panic!("the decode is over: the mixdown must be complete");
-    };
-    assert!(
-        buffer
-            .to_vec(0..buffer.end())
-            .iter()
-            .any(|&s| s.abs() > 0.01),
-        "the sine wave must reach the mixdown"
-    );
-
-    // Same content_hash: the cached buffer, not a new mix.
-    let vv_audio::ClipAudio::Ready(cached) = mixdown(&mut cache) else {
-        panic!("a complete mixdown stays ready");
-    };
-    assert_eq!(identity(&buffer), identity(&cached));
-}
-
-fn identity(buffer: &SampleBlocks) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    buffer.hash_identity(&mut hasher);
-    hasher.finish()
 }
 
 fn sine_wav(name: &str, secs: u32) -> PathBuf {
@@ -368,18 +318,24 @@ fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
 
 #[test]
 fn a_stretch_is_computed_in_background_and_dropped_once_unused() {
+    let path = sine_wav("stretched.wav", 2);
+    let project = Project::default();
+    let request = || StretchRequest {
+        project: &project,
+        input: vv_audio::StretchInput::File {
+            path: &path,
+            stream: 0,
+        },
+        frames: 0..48_000,
+        tempo: 2.0,
+        sample_rate: 48_000,
+        channels: 1,
+        key: 1,
+    };
     let mut cache = MixBufferCache::spawn(48_000, 1);
-    let sine = SampleBlocks::contiguous(
-        Arc::new(
-            (0..96_000)
-                .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5)
-                .collect(),
-        ),
-        0,
-        1,
-    );
-    let ask = |cache: &mut MixBufferCache| cache.stretched(&sine, 0..48_000, 2.0, 48_000, 1);
+    let ask = |cache: &mut MixBufferCache| cache.stretched(request());
     assert!(matches!(ask(&mut cache), ClipAudio::Pending));
+    cache.send_jobs(&project);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let stretched = loop {
@@ -397,6 +353,10 @@ fn a_stretch_is_computed_in_background_and_dropped_once_unused() {
     };
     let secs = stretched.end() as f64 / 48_000.0;
     assert!((secs - 0.5).abs() < 0.05, "1 s at 2x lasts {secs} s");
+    assert!(
+        blocks_held(&cache, &path).is_empty(),
+        "read from the file, not the preview's blocks"
+    );
 
     cache.sweep_unused();
     assert!(matches!(ask(&mut cache), ClipAudio::Ready(_)), "still used");
@@ -494,19 +454,13 @@ fn what_a_pass_does_not_read_is_dropped() {
     let mut cache = MixBufferCache::spawn(48_000, 1);
     cache.begin_pass();
     read(&mut cache, &path, 0..SEC);
-    cache.store_compound(
-        <MediaId as vv_core::id_map::Id>::from_raw(1),
-        1,
-        Arc::new(vec![0.0; 10]),
-    );
     cache.sweep_unused();
     wait_done(&mut cache);
-    assert!(!cache.streams.is_empty() && !cache.compound.is_empty());
+    assert!(!cache.streams.is_empty());
 
     cache.begin_pass();
     cache.sweep_unused();
     assert!(cache.streams.is_empty(), "the file's audio is freed");
-    assert!(cache.compound.is_empty(), "the mixdown is freed");
 }
 
 /// Rebuilds `parent`'s mix as the preview does until nothing is pending.
@@ -524,12 +478,12 @@ fn settle(
         cache.begin_pass();
         let snapshot = MixSnapshot::from_timeline(project, parent, 48_000, 1, cache);
         cache.sweep_unused();
-        cache.send_level_jobs(project);
+        cache.send_jobs(project);
         if !cache.has_pending() {
             cache.begin_pass();
             let snapshot = MixSnapshot::from_timeline(project, parent, 48_000, 1, cache);
             cache.sweep_unused();
-            cache.send_level_jobs(project);
+            cache.send_jobs(project);
             if !cache.has_pending() {
                 return snapshot;
             }

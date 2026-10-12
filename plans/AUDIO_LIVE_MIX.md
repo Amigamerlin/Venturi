@@ -2,7 +2,7 @@
 
 **Status:** chosen over [AUDIO_GRAPH.md](AUDIO_GRAPH.md) (2026-10-12),
 which keeps the diagnosis (its §1) and the current state (its §1.3, §2).
-Steps 0–3 implemented (§4).
+Steps 0–4 implemented (§4).
 
 **Goal:** remove the known limits of the preview audio and the memory of
 the export without a generic node graph: the existing `MixSnapshot` stays
@@ -358,7 +358,18 @@ the code it replaces and the runtime measurement of AUDIO_GRAPH §9.
    shared between threads so that a compound met by two of them is
    rendered once. Cold export audio: 21.7 → 7.9 s (about 2.5 s of it the
    measure, the rest the export's own render); 280 MB peak.
-4. **Stretch on the offline render**, compounds included.
+4. **Stretch on the offline render**, compounds included. *Done.* A
+   `StretchRequest` describes the input (a file's window, or a compound's
+   timeline at its depth of nesting) with a content key; the preview's
+   worker and the export render it from the files in chunks into a
+   streaming `Stretcher` (`stretch_samples` is its whole-input case). The
+   preview no longer holds a pitch-corrected clip's whole source window,
+   and the whole-mixdown path of compounds is gone (`compound_audio`,
+   `compound_mixdown`, `cached_compound`, `store_compound`). Offline
+   renders, levels and stretches alike, run at the project format; a
+   stretch is remixed to the device's channels. Tested: a chunked
+   stretch of a file clip and of a compound with a compressor inside
+   equals the whole input stretched at once, sample for sample.
 5. **Reverse**: read mapping for file clips, materialized for compounds.
    Acceptance: a reversed clip equals the reversed samples of the forward
    clip, in preview and export.

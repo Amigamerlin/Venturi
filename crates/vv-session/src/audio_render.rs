@@ -3,9 +3,7 @@
 //! length of the timeline (plans/AUDIO_LIVE_MIX.md §3.2). The levels of
 //! the normalizations are rendered the same way, by segment (§3.3).
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
@@ -15,10 +13,12 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use vv_audio::loudness::{LOOKAHEAD_FRAMES, LevelMeter, LevelParts};
 use vv_audio::mixer::{
     AudioSource, ClipAudio, MixSnapshot, MixState, PROJECT_SAMPLE_RATE, mix_range_from,
-    remix_channels_into, stretch_range,
+    remix_channels_into,
 };
-use vv_audio::{LevelAnalysis, LevelReading, LevelSegment, SampleBlocks};
-use vv_core::{MediaId, Project, Timeline};
+use vv_audio::{
+    LevelAnalysis, LevelReading, LevelSegment, SampleBlocks, StretchRequest, Stretcher,
+};
+use vv_core::{Project, Timeline};
 
 use crate::export::{ExportError, PROJECT_CHANNELS};
 
@@ -161,11 +161,11 @@ fn measure_run(
                 .start
                 .saturating_sub(WARM_UP_FRAMES)
                 .max(range.start),
-            meter: LevelMeter::new(analysis.mode, analysis.sample_rate, analysis.channels),
+            meter: LevelMeter::new(analysis.mode, PROJECT_SAMPLE_RATE, PROJECT_CHANNELS),
             after: Vec::new(),
         })
         .collect();
-    let ch = analysis.channels.max(1) as usize;
+    let ch = PROJECT_CHANNELS as usize;
     let mut at = range.start;
     render(
         analysis.project,
@@ -203,12 +203,50 @@ struct RunMeter<'s> {
     after: Vec<f32>,
 }
 
+/// The audio `request` describes: its input rendered from the files and
+/// stretched as it goes, so only the result is ever whole. Rendered at the
+/// project's format whatever the request's, like the levels.
+pub fn stretch_offline(
+    request: &StretchRequest,
+    levels: &mut LevelCache,
+) -> Result<SampleBlocks, ExportError> {
+    let mut stretcher = Stretcher::new(PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, request.tempo)
+        .map_err(ExportError::Failed)?;
+    let mut out = Vec::new();
+    let mut failed = None;
+    render(
+        request.project,
+        Mix::Stretch(request),
+        request.frames.clone(),
+        levels,
+        |chunk| match stretcher.push(chunk, &mut out) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(e) => {
+                failed = Some(e);
+                ControlFlow::Break(())
+            }
+        },
+    )?;
+    if let Some(e) = failed {
+        return Err(ExportError::Failed(e));
+    }
+    stretcher.finish(&mut out).map_err(ExportError::Failed)?;
+    if request.channels != PROJECT_CHANNELS {
+        let mut remixed = Vec::new();
+        remix_channels_into(&out, PROJECT_CHANNELS, request.channels, &mut remixed);
+        out = remixed;
+    }
+    Ok(SampleBlocks::contiguous(Arc::new(out), 0, request.channels))
+}
+
 /// What a render mixes.
 #[derive(Clone, Copy)]
 enum Mix<'a> {
     Timeline(&'a Timeline),
     /// A normalization's input.
     Measured(&'a LevelAnalysis<'a>),
+    /// A pitch-corrected clip's input, in its own time.
+    Stretch(&'a StretchRequest<'a>),
 }
 
 impl Mix<'_> {
@@ -223,7 +261,8 @@ impl Mix<'_> {
             Mix::Timeline(timeline) => {
                 MixSnapshot::from_timeline_range(project, timeline, rate, channels, source, range)
             }
-            Mix::Measured(analysis) => analysis.snapshot(source, Some(range)),
+            Mix::Measured(analysis) => analysis.snapshot(source, Some(range), (rate, channels)),
+            Mix::Stretch(request) => request.snapshot(source, range, (rate, channels)),
         }
     }
 }
@@ -474,12 +513,9 @@ type WindowKey = (PathBuf, usize, Range<u64>);
 /// read again.
 struct StreamingAudio<'c> {
     readers: Vec<Reader>,
-    /// The windows of the current chunk; one asked again keeps its buffer,
-    /// so what was built from it (a stretch) is found again.
+    /// The windows of the current chunk; one asked again keeps its buffer.
     windows: HashMap<WindowKey, SampleBlocks>,
-    /// Mixdowns of the pitch-corrected compound clips (until plan step 4),
-    /// by media and content.
-    compounds: HashMap<(MediaId, u64), Arc<Vec<f32>>>,
+    /// By `StretchRequest::key`, while their clips play.
     stretched: HashMap<u64, SampleBlocks>,
     /// By `LevelAnalysis::key`: a normalization is asked again by every
     /// chunk.
@@ -492,7 +528,6 @@ impl<'c> StreamingAudio<'c> {
         Self {
             readers: Vec::new(),
             windows: HashMap::new(),
-            compounds: HashMap::new(),
             stretched: HashMap::new(),
             levels: HashMap::new(),
             cache,
@@ -511,25 +546,21 @@ impl<'c> StreamingAudio<'c> {
     ) -> Result<MixSnapshot, ExportError> {
         let mut wanted = Wanted {
             windows: HashSet::new(),
-            compounds: &self.compounds,
         };
         mix.collect(project, &mut wanted, range.clone());
         let windows = wanted.windows;
         self.load(windows, last)?;
         let mut provider = Provider {
             audio: self,
-            compounds_used: HashSet::new(),
             stretched_used: HashSet::new(),
             levels_used: HashSet::new(),
         };
         let snapshot = mix.collect(project, &mut provider, range);
         let Provider {
-            compounds_used,
             stretched_used,
             levels_used,
             ..
         } = provider;
-        self.compounds.retain(|key, _| compounds_used.contains(key));
         self.stretched.retain(|key, _| stretched_used.contains(key));
         self.levels.retain(|key, _| levels_used.contains(key));
         Ok(snapshot)
@@ -608,13 +639,11 @@ impl<'c> StreamingAudio<'c> {
 }
 
 /// The windows a mix reads, compound clips included, without providing any.
-struct Wanted<'a> {
+struct Wanted {
     windows: HashSet<WindowKey>,
-    /// A compound clip already mixed needs none of its sources.
-    compounds: &'a HashMap<(MediaId, u64), Arc<Vec<f32>>>,
 }
 
-impl AudioSource for Wanted<'_> {
+impl AudioSource for Wanted {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
         self.file_frames(path, stream, 0..u64::MAX, 0)
     }
@@ -624,19 +653,19 @@ impl AudioSource for Wanted<'_> {
         ClipAudio::Pending
     }
 
-    fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
-        self.compounds.get(&(media_id, content_hash)).cloned()
-    }
-
     /// Measured apart, not from these windows.
     fn level(&mut self, _: LevelAnalysis) -> LevelReading {
         LevelReading::Pending(None)
+    }
+
+    /// Rendered apart, not from these windows.
+    fn stretched(&mut self, _: StretchRequest) -> ClipAudio {
+        ClipAudio::Pending
     }
 }
 
 struct Provider<'a, 'c> {
     audio: &'a mut StreamingAudio<'c>,
-    compounds_used: HashSet<(MediaId, u64)>,
     stretched_used: HashSet<u64>,
     levels_used: HashSet<u64>,
 }
@@ -655,41 +684,21 @@ impl AudioSource for Provider<'_, '_> {
             })
     }
 
-    fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
-        let key = (media_id, content_hash);
-        let mixdown = self.audio.compounds.get(&key).cloned()?;
-        self.compounds_used.insert(key);
-        Some(mixdown)
-    }
-
-    fn store_compound(&mut self, media_id: MediaId, content_hash: u64, mixdown: Arc<Vec<f32>>) {
-        let key = (media_id, content_hash);
-        self.audio.compounds.insert(key, mixdown);
-        self.compounds_used.insert(key);
-    }
-
-    fn stretched(
-        &mut self,
-        buffer: &SampleBlocks,
-        range: Range<u64>,
-        tempo: f64,
-        sample_rate: u32,
-        channels: u16,
-    ) -> ClipAudio {
-        let mut h = DefaultHasher::new();
-        buffer.hash_identity(&mut h);
-        (range.start, range.end, tempo.to_bits()).hash(&mut h);
-        let key = h.finish();
-        self.stretched_used.insert(key);
-        if let Some(stretched) = self.audio.stretched.get(&key) {
+    fn stretched(&mut self, request: StretchRequest) -> ClipAudio {
+        self.stretched_used.insert(request.key);
+        if let Some(stretched) = self.audio.stretched.get(&request.key) {
             return ClipAudio::Ready(stretched.clone());
         }
-        let Ok(samples) = stretch_range(buffer, range, tempo, sample_rate, channels) else {
-            return ClipAudio::Missing;
-        };
-        let stretched = SampleBlocks::contiguous(Arc::new(samples), 0, channels);
-        self.audio.stretched.insert(key, stretched.clone());
-        ClipAudio::Ready(stretched)
+        match stretch_offline(&request, self.audio.cache) {
+            Ok(stretched) => {
+                self.audio.stretched.insert(request.key, stretched.clone());
+                ClipAudio::Ready(stretched)
+            }
+            Err(e) => {
+                eprintln!("[stretch] {e}");
+                ClipAudio::Missing
+            }
+        }
     }
 
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {

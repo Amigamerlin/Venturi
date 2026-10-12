@@ -126,7 +126,7 @@ impl TimelineAudio {
         mix.meters.keep_spectra_of(&self.mix.meters);
         self.mix = Arc::new(mix);
         self.buffers.sweep_unused();
-        self.buffers.send_level_jobs(project);
+        self.buffers.send_jobs(project);
         self.publish();
     }
 

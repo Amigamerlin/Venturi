@@ -19,9 +19,10 @@ use crate::effect::Effect;
 use crate::eq::EqProcessor;
 use crate::levels::{
     InputClip, LevelAnalysis, Measured, StableHasher, has_state, hash_channel, hash_inserts,
-    input_clips, inputs_have_state, level_segments,
+    input_clips, inputs_have_state, level_segments, stable_hash, timeline_key,
 };
 use crate::spectrum::SpectrumTap;
+use crate::stretched::{StretchInput, StretchRequest};
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
@@ -387,6 +388,68 @@ impl MixSnapshot {
         .0
     }
 
+    /// `timeline` as a compound clip at `depth` of nesting mixes it, over
+    /// `range` of its own time.
+    pub fn nested_range(
+        project: &Project,
+        timeline: &Timeline,
+        depth: u32,
+        sample_rate: u32,
+        channels: u16,
+        source: &mut impl AudioSource,
+        range: std::ops::Range<u64>,
+    ) -> Self {
+        collect_clips(
+            project,
+            timeline,
+            sample_rate,
+            channels,
+            source,
+            Some(range),
+            depth,
+            0,
+            None,
+        )
+        .0
+    }
+
+    /// Frames `range` of a file's `stream`, at their own time.
+    pub fn of_file(
+        sample_rate: u32,
+        channels: u16,
+        source: &mut impl AudioSource,
+        path: &Path,
+        stream: usize,
+        range: std::ops::Range<u64>,
+    ) -> Self {
+        let buffer = match source.file_frames(path, stream, range.clone(), range.start) {
+            ClipAudio::Ready(buffer) | ClipAudio::Partial(buffer) => buffer,
+            ClipAudio::Pending | ClipAudio::Missing => return Self::empty(sample_rate, channels),
+        };
+        let clip = MixClip {
+            clip: ClipId(0),
+            start: range.start,
+            len: range.end - range.start,
+            source_offset: range.start,
+            step: 1.0,
+            input: ClipInput::Blocks(buffer),
+            gain_db: Keyframed::constant(0.0),
+            track: 0,
+            clip_fps: 1.0,
+            media_offset: range.start,
+            media_step: 1.0,
+            fade_in: 0,
+            fade_out: 0,
+        };
+        Self::new(
+            sample_rate,
+            channels,
+            vec![clip],
+            Vec::new(),
+            Channel::UNITY,
+        )
+    }
+
     /// What `measured` measures over `range` (all of it with `None`): its
     /// strip up to the normalization, alone and before the fader.
     pub fn measured(
@@ -699,19 +762,16 @@ pub enum LevelReading {
 pub enum ClipAudio {
     /// Already at the snapshot's `sample_rate`/`channels`.
     Ready(SampleBlocks),
-    /// Like `Ready`, but with blocks still decoding: it plays, yet a
-    /// compound containing it is not cached.
+    /// Like `Ready`, but with blocks still decoding: they play as silence.
     Partial(SampleBlocks),
-    /// Still decoding, nothing yet: silent for now, and so is a compound
-    /// containing it.
+    /// Still decoding, nothing yet: silent for now.
     Pending,
     /// No audio there (e.g. a stream index past the file's streams).
     Missing,
 }
 
 /// The decoded audio a mix is built from. Compound clips never reach `file`:
-/// they are mixed live from their nested timeline, or stretched from its
-/// mixdown (`compound_mixdown`) when pitch-corrected.
+/// they are mixed live from their nested timeline.
 pub trait AudioSource {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio;
 
@@ -729,27 +789,14 @@ pub trait AudioSource {
         self.file(path, stream)
     }
 
-    /// A mixdown kept by `store_compound`, if still valid for `content_hash`.
-    fn cached_compound(&mut self, _media_id: MediaId, _content_hash: u64) -> Option<Arc<Vec<f32>>> {
-        None
-    }
-
-    fn store_compound(&mut self, _media_id: MediaId, _content_hash: u64, _mixdown: Arc<Vec<f32>>) {}
-
-    /// Frames `range` of `buffer` time-stretched by `tempo`, pitch
-    /// preserved, starting at frame 0. Synchronous here; the preview answers
-    /// `Pending` while it works in the background.
-    fn stretched(
-        &mut self,
-        buffer: &SampleBlocks,
-        range: std::ops::Range<u64>,
-        tempo: f64,
-        sample_rate: u32,
-        channels: u16,
-    ) -> ClipAudio {
-        stretch_range(buffer, range, tempo, sample_rate, channels).map_or(ClipAudio::Missing, |b| {
-            ClipAudio::Ready(SampleBlocks::contiguous(Arc::new(b), 0, channels))
-        })
+    /// The audio a pitch-corrected clip plays, from its first frame.
+    /// Synchronous here, whole and from this source; the preview and the
+    /// export render it from the files.
+    fn stretched(&mut self, request: StretchRequest<'_>) -> ClipAudio
+    where
+        Self: Sized,
+    {
+        request.stretch_with(self)
     }
 
     /// Synchronous here, whole and from this source; the preview and the
@@ -839,7 +886,54 @@ fn collect_clips(
             let into_clip = needed.start.saturating_sub(span.source_offset) as f64 / span.step;
             let plays_at = (placement + span.start as i64 + into_clip as i64).max(0) as u64;
             let nested_placement = placement + span.start as i64 - span.source_offset as i64;
-            let input = if item.compound.is_some() && !pitch_corrected {
+            let input = if pitch_corrected {
+                let nested = item.compound.and_then(|id| project.timelines.get(id));
+                if nested.is_some() && depth + 1 >= vv_core::MAX_COMPOUND_DEPTH {
+                    readiness = Readiness::Cyclic;
+                    continue;
+                }
+                let frames = span.source_offset
+                    ..span.source_offset + (span.len as f64 * span.step).ceil() as u64;
+                let (input, content) = match nested {
+                    Some(timeline) => (
+                        StretchInput::Nested {
+                            timeline,
+                            depth: depth + 1,
+                        },
+                        timeline_key(project, timeline, sample_rate, depth + 1),
+                    ),
+                    None => (
+                        StretchInput::File {
+                            path: &item.path,
+                            stream: clip.audio_stream_index,
+                        },
+                        stable_hash((item.content_hash, clip.audio_stream_index)),
+                    ),
+                };
+                let key = stable_hash((
+                    content,
+                    (frames.start, frames.end),
+                    span.step.to_bits(),
+                    (sample_rate, channels),
+                ));
+                let request = StretchRequest {
+                    project,
+                    input,
+                    frames,
+                    tempo: span.step,
+                    sample_rate,
+                    channels,
+                    key,
+                };
+                match source.stretched(request) {
+                    ClipAudio::Ready(stretched) => ClipInput::Blocks(stretched),
+                    ClipAudio::Pending => {
+                        readiness = readiness.max(Readiness::Pending);
+                        continue;
+                    }
+                    ClipAudio::Partial(_) | ClipAudio::Missing => continue,
+                }
+            } else if item.compound.is_some() {
                 let Some((mix, nested)) = nested_mix(
                     project,
                     *media_id,
@@ -857,33 +951,13 @@ fn collect_clips(
                 }
                 ClipInput::Nested(NestedMix { mix: Arc::new(mix) })
             } else {
-                let audio = if item.compound.is_some() {
-                    // Stretched from its whole mixdown, until the stretch
-                    // reads a live render (plans/AUDIO_LIVE_MIX.md step 4).
-                    compound_audio(
-                        project,
-                        *media_id,
-                        sample_rate,
-                        channels,
-                        source,
-                        depth,
-                        nested_placement,
-                    )
-                } else {
-                    source.file_frames(
-                        &item.path,
-                        clip.audio_stream_index,
-                        needed.clone(),
-                        plays_at,
-                    )
-                };
-                match audio {
+                match source.file_frames(
+                    &item.path,
+                    clip.audio_stream_index,
+                    needed.clone(),
+                    plays_at,
+                ) {
                     ClipAudio::Ready(buffer) => ClipInput::Blocks(buffer),
-                    // Stretching half a buffer would have to be redone anyway.
-                    ClipAudio::Partial(_) if pitch_corrected => {
-                        readiness = readiness.max(Readiness::Pending);
-                        continue;
-                    }
                     ClipAudio::Partial(buffer) => {
                         readiness = readiness.max(Readiness::Partial);
                         ClipInput::Blocks(buffer)
@@ -897,30 +971,21 @@ fn collect_clips(
             };
             let clip_fps = item.meta.fps.as_f64().max(1e-9);
             let readable_to = match &input {
-                ClipInput::Blocks(buffer) => (buffer.end() < needed.end).then_some(buffer.end()),
-                ClipInput::Nested(_) => None,
+                ClipInput::Blocks(buffer) if !pitch_corrected => {
+                    (buffer.end() < needed.end).then_some(buffer.end())
+                }
+                ClipInput::Blocks(_) | ClipInput::Nested(_) => None,
             };
             let Some(mut mix_clip) = mix_clip_from(clip, &span, clip_fps, input, readable_to)
             else {
                 continue;
             };
             mix_clip.track = track_index;
-            if pitch_corrected && let ClipInput::Blocks(buffer) = &mix_clip.input {
-                let from = mix_clip.source_offset;
-                let range = from..from + (mix_clip.len as f64 * mix_clip.step).ceil() as u64;
-                match source.stretched(buffer, range, mix_clip.step, sample_rate, channels) {
-                    ClipAudio::Ready(stretched) => {
-                        mix_clip.len = mix_clip.len.min(stretched.end());
-                        mix_clip.input = ClipInput::Blocks(stretched);
-                        mix_clip.source_offset = 0;
-                        mix_clip.step = 1.0;
-                    }
-                    ClipAudio::Pending => {
-                        readiness = readiness.max(Readiness::Pending);
-                        continue;
-                    }
-                    ClipAudio::Partial(_) | ClipAudio::Missing => continue,
-                }
+            if pitch_corrected && let ClipInput::Blocks(stretched) = &mix_clip.input {
+                // Already at the clip's speed, from its first frame.
+                mix_clip.len = mix_clip.len.min(stretched.end());
+                mix_clip.source_offset = 0;
+                mix_clip.step = 1.0;
             }
             clips.push(mix_clip);
         }
@@ -1130,67 +1195,6 @@ fn normalize_gain(target_db: f32, reading: LevelReading, readiness: &mut Readine
     level
         .filter(|level| *level > 1e-6)
         .map(|level| (db_to_linear(target_db) / level).min(db_to_linear(vv_core::GAIN_DB_MAX)))
-}
-
-/// The mixdown of the nested timeline of compound clip `media_id`, at
-/// `sample_rate`/`channels`. `Pending` while a clip in it (at any depth) has
-/// nothing yet, `Partial` while one is still decoding: only a complete one is
-/// cached, or the missing piece would stay missing until `content_hash`
-/// changes again.
-pub fn compound_mixdown(
-    project: &Project,
-    media_id: MediaId,
-    sample_rate: u32,
-    channels: u16,
-    source: &mut impl AudioSource,
-) -> ClipAudio {
-    compound_audio(project, media_id, sample_rate, channels, source, 0, 0)
-}
-
-fn compound_audio(
-    project: &Project,
-    media_id: MediaId,
-    sample_rate: u32,
-    channels: u16,
-    source: &mut impl AudioSource,
-    depth: u32,
-    placement: i64,
-) -> ClipAudio {
-    let Some(item) = project.media_pool.get(media_id) else {
-        return ClipAudio::Missing;
-    };
-    let blocks = |mixdown| SampleBlocks::contiguous(mixdown, 0, channels);
-    if let Some(mixdown) = source.cached_compound(media_id, item.content_hash) {
-        return ClipAudio::Ready(blocks(mixdown));
-    }
-    let Some((snapshot, readiness)) = nested_mix(
-        project,
-        media_id,
-        (sample_rate, channels),
-        source,
-        None,
-        depth,
-        placement,
-    ) else {
-        return ClipAudio::Missing;
-    };
-    if readiness >= Readiness::Pending {
-        return ClipAudio::Pending;
-    }
-    let len = snapshot
-        .clips
-        .iter()
-        .map(|c| c.start + c.len)
-        .max()
-        .unwrap_or(0);
-    let mut mixdown = vec![0.0f32; len as usize * channels.max(1) as usize];
-    mix_range(&snapshot, 0, &mut mixdown);
-    let mixdown = Arc::new(mixdown);
-    if readiness == Readiness::Partial {
-        return ClipAudio::Partial(blocks(mixdown));
-    }
-    source.store_compound(media_id, item.content_hash, mixdown.clone());
-    ClipAudio::Ready(blocks(mixdown))
 }
 
 /// The nested timeline of compound clip `media_id`, ready to be mixed in

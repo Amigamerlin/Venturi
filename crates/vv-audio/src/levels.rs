@@ -38,7 +38,7 @@ impl Hasher for StableHasher {
     }
 }
 
-fn stable_hash(value: impl Hash) -> u64 {
+pub(crate) fn stable_hash(value: impl Hash) -> u64 {
     let mut h = StableHasher::default();
     value.hash(&mut h);
     h.finish()
@@ -87,18 +87,20 @@ impl LevelAnalysis<'_> {
     }
 
     /// What the measure mixes over `range` (all of it with `None`):
-    /// the strip up to the normalization, before its fader.
+    /// the strip up to the normalization, before its fader, at
+    /// `sample_rate`/`channels`.
     pub fn snapshot(
         &self,
         source: &mut impl AudioSource,
         range: Option<Range<u64>>,
+        (sample_rate, channels): (u32, u16),
     ) -> MixSnapshot {
         MixSnapshot::measured(
             self.project,
             self.timeline,
             self.measured,
-            self.sample_rate,
-            self.channels,
+            sample_rate,
+            channels,
             source,
             range,
         )
@@ -111,7 +113,7 @@ impl LevelAnalysis<'_> {
         let (Some(first), Some(last)) = (self.segments.first(), self.segments.last()) else {
             return 0.0;
         };
-        let snapshot = self.snapshot(source, None);
+        let snapshot = self.snapshot(source, None, (self.sample_rate, self.channels));
         let ch = self.channels.max(1) as usize;
         let mut out = vec![0.0f32; CHUNK_FRAMES as usize * ch];
         let mut state = MixState::new(&snapshot);
@@ -196,7 +198,12 @@ fn input_clips_at(
 }
 
 /// The content of a compound clip's timeline, in its own time.
-fn timeline_key(project: &Project, timeline: &Timeline, sample_rate: u32, depth: u32) -> u64 {
+pub(crate) fn timeline_key(
+    project: &Project,
+    timeline: &Timeline,
+    sample_rate: u32,
+    depth: u32,
+) -> u64 {
     if depth >= vv_core::MAX_COMPOUND_DEPTH {
         return 0;
     }

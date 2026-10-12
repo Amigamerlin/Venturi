@@ -5,7 +5,6 @@
 //! closest to the playhead first; every block plays as soon as it is decoded.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::Hasher;
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,24 +15,55 @@ use std::time::{Duration, Instant};
 use vv_audio::{
     AnalysisSlot, AudioSource, BLOCK_FRAMES, ClipAudio, LevelAnalysis, LevelReading, SampleBlocks,
 };
-use vv_audio::{LevelSegment, Measured};
-use vv_core::{MediaId, NormalizeMode, Project, Timeline};
-use vv_session::audio_render::{LevelCache, measure_level};
+use vv_audio::{LevelSegment, Measured, StretchInput, StretchRequest};
+use vv_core::{NormalizeMode, Project, Timeline};
+use vv_session::audio_render::{LevelCache, measure_level, stretch_offline};
 
 use crate::worker::Worker;
 
 type Key = (PathBuf, usize);
 
-/// Identity of the source blocks over the range, range, tempo bits.
-type StretchKey = (u64, u64, u64, u64);
+/// A `StretchRequest` owning what it borrows, but the project (as
+/// `OwnedAnalysis`).
+struct OwnedStretch {
+    key: u64,
+    input: OwnedInput,
+    frames: Range<u64>,
+    tempo: f64,
+    format: (u32, u16),
+}
+
+enum OwnedInput {
+    File(PathBuf, usize),
+    Nested(Timeline, u32),
+}
+
+impl OwnedStretch {
+    fn request<'a>(&'a self, project: &'a Project) -> StretchRequest<'a> {
+        StretchRequest {
+            project,
+            input: match &self.input {
+                OwnedInput::File(path, stream) => StretchInput::File {
+                    path,
+                    stream: *stream,
+                },
+                OwnedInput::Nested(timeline, depth) => StretchInput::Nested {
+                    timeline,
+                    depth: *depth,
+                },
+            },
+            frames: self.frames.clone(),
+            tempo: self.tempo,
+            sample_rate: self.format.0,
+            channels: self.format.1,
+            key: self.key,
+        }
+    }
+}
 
 struct StretchJob {
-    key: StretchKey,
-    source: SampleBlocks,
-    range: Range<u64>,
-    tempo: f64,
-    sample_rate: u32,
-    channels: u16,
+    project: Arc<Project>,
+    stretch: OwnedStretch,
 }
 
 enum Stretch {
@@ -43,7 +73,7 @@ enum Stretch {
 }
 
 /// A `LevelAnalysis` owning what it borrows, but the project: one copy of
-/// it serves every analysis a pass asks for (`send_level_jobs`).
+/// it serves every analysis a pass asks for (`send_jobs`).
 struct OwnedAnalysis {
     key: u64,
     slot: Option<AnalysisSlot>,
@@ -175,15 +205,13 @@ pub struct MixBufferCache {
     last_block_report: Option<Instant>,
     /// Whole mixdowns of the pitch-corrected compound clips, with the
     /// `content_hash` they were computed with.
-    compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
-    compound_used: HashSet<MediaId>,
-    /// Pitch-corrected clip audio (see `AudioSource::stretched`), with the
-    /// source blocks it was made from: they keep its key unique.
-    stretched: HashMap<StretchKey, (SampleBlocks, Stretch)>,
+    /// Pitch-corrected clip audio by `StretchRequest::key`.
+    stretched: HashMap<u64, Stretch>,
     /// Keys asked for since the last `sweep_unused`.
-    stretch_used: HashSet<StretchKey>,
+    stretch_used: HashSet<u64>,
+    queued_stretches: Vec<OwnedStretch>,
     stretch_worker: Worker<StretchJob>,
-    stretch_rx: mpsc::Receiver<(StretchKey, Result<Vec<f32>, String>)>,
+    stretch_rx: mpsc::Receiver<(u64, Result<SampleBlocks, String>)>,
     /// Normalization levels by `LevelAnalysis::key`; `None` while measuring.
     levels: HashMap<u64, Option<f32>>,
     last_level: HashMap<AnalysisSlot, f32>,
@@ -231,15 +259,12 @@ impl MixBufferCache {
         });
         let (stretch_tx, stretch_rx) = mpsc::channel();
         let stretch_worker = Worker::spawn(move |jobs: mpsc::Receiver<StretchJob>| {
-            for job in jobs {
-                let result = vv_audio::mixer::stretch_range(
-                    &job.source,
-                    job.range,
-                    job.tempo,
-                    job.sample_rate,
-                    job.channels,
-                );
-                if stretch_tx.send((job.key, result)).is_err() {
+            let mut cache = LevelCache::on_disk();
+            cache.threads = 1;
+            for StretchJob { project, stretch } in jobs {
+                let result = stretch_offline(&stretch.request(&project), &mut cache)
+                    .map_err(|e| e.to_string());
+                if stretch_tx.send((stretch.key, result)).is_err() {
                     break;
                 }
             }
@@ -298,10 +323,9 @@ impl MixBufferCache {
             decoded_rx,
             unreported_blocks: false,
             last_block_report: None,
-            compound: HashMap::new(),
-            compound_used: HashSet::new(),
             stretched: HashMap::new(),
             stretch_used: HashSet::new(),
+            queued_stretches: Vec::new(),
             stretch_worker,
             stretch_rx,
             levels: HashMap::new(),
@@ -353,9 +377,6 @@ impl MixBufferCache {
             stream.asked = false;
             stream.wanted.clear();
         }
-        if !media_pass {
-            self.compound_used.clear();
-        }
     }
 
     /// Drops the blocks, mixdowns, stretches and levels the pass did not
@@ -386,8 +407,6 @@ impl MixBufferCache {
         if self.media_pass {
             return;
         }
-        let used = &self.compound_used;
-        self.compound.retain(|media_id, _| used.contains(media_id));
         let used = std::mem::take(&mut self.stretch_used);
         self.stretched.retain(|key, _| used.contains(key));
         let used = std::mem::take(&mut self.level_used);
@@ -617,13 +636,9 @@ impl MixBufferCache {
             self.last_block_report = Some(now);
         }
         while let Ok((key, result)) = self.stretch_rx.try_recv() {
-            if let Some((_, entry)) = self.stretched.get_mut(&key) {
+            if let Some(entry) = self.stretched.get_mut(&key) {
                 *entry = match result {
-                    Ok(samples) => Stretch::Ready(SampleBlocks::contiguous(
-                        Arc::new(samples),
-                        0,
-                        self.channels,
-                    )),
+                    Ok(stretched) => Stretch::Ready(stretched),
                     Err(e) => {
                         eprintln!("[mix_buffers] stretch failed: {e}");
                         Stretch::Failed
@@ -652,10 +667,10 @@ impl MixBufferCache {
         changed
     }
 
-    /// Hands the levels the pass asked for to the worker, with a copy of
-    /// `project` to render them from.
-    pub fn send_level_jobs(&mut self, project: &Project) {
-        if self.queued_levels.is_empty() {
+    /// Hands the levels and stretches the pass asked for to their workers,
+    /// with a copy of `project` to render them from.
+    pub fn send_jobs(&mut self, project: &Project) {
+        if self.queued_levels.is_empty() && self.queued_stretches.is_empty() {
             return;
         }
         let project = Arc::new(project.clone());
@@ -665,6 +680,12 @@ impl MixBufferCache {
                 analysis,
             });
         }
+        for stretch in self.queued_stretches.drain(..) {
+            self.stretch_worker.send(StretchJob {
+                project: project.clone(),
+                stretch,
+            });
+        }
     }
 
     #[cfg(test)]
@@ -672,6 +693,10 @@ impl MixBufferCache {
         self.poll();
         self.streams.values().any(|stream| !stream.jobs.is_empty())
             || self.levels.values().any(Option::is_none)
+            || self
+                .stretched
+                .values()
+                .any(|stretch| matches!(stretch, Stretch::Pending))
     }
 }
 
@@ -692,48 +717,28 @@ impl AudioSource for MixBufferCache {
         self.lookup(path, stream, frames, plays_at)
     }
 
-    fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
-        self.compound_used.insert(media_id);
-        self.compound
-            .get(&media_id)
-            .filter(|(hash, _)| *hash == content_hash)
-            .map(|(_, mixdown)| mixdown.clone())
-    }
-
-    fn store_compound(&mut self, media_id: MediaId, content_hash: u64, mixdown: Arc<Vec<f32>>) {
-        self.compound_used.insert(media_id);
-        self.compound.insert(media_id, (content_hash, mixdown));
-    }
-
-    fn stretched(
-        &mut self,
-        buffer: &SampleBlocks,
-        range: Range<u64>,
-        tempo: f64,
-        sample_rate: u32,
-        channels: u16,
-    ) -> ClipAudio {
-        let mut identity = std::collections::hash_map::DefaultHasher::new();
-        buffer.hash_identity(&mut identity);
-        let key = (identity.finish(), range.start, range.end, tempo.to_bits());
-        self.stretch_used.insert(key);
-        if let Some((_, entry)) = self.stretched.get(&key) {
+    fn stretched(&mut self, request: StretchRequest) -> ClipAudio {
+        self.stretch_used.insert(request.key);
+        if let Some(entry) = self.stretched.get(&request.key) {
             return match entry {
                 Stretch::Pending => ClipAudio::Pending,
                 Stretch::Ready(samples) => ClipAudio::Ready(samples.clone()),
                 Stretch::Failed => ClipAudio::Missing,
             };
         }
-        self.stretch_worker.send(StretchJob {
-            key,
-            source: buffer.clone(),
-            range,
-            tempo,
-            sample_rate,
-            channels,
+        self.queued_stretches.push(OwnedStretch {
+            key: request.key,
+            input: match request.input {
+                StretchInput::File { path, stream } => OwnedInput::File(path.to_path_buf(), stream),
+                StretchInput::Nested { timeline, depth } => {
+                    OwnedInput::Nested(timeline.clone(), depth)
+                }
+            },
+            frames: request.frames,
+            tempo: request.tempo,
+            format: (request.sample_rate, request.channels),
         });
-        self.stretched
-            .insert(key, (buffer.clone(), Stretch::Pending));
+        self.stretched.insert(request.key, Stretch::Pending);
         ClipAudio::Pending
     }
 

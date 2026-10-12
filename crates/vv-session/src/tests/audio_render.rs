@@ -2,8 +2,8 @@ use super::*;
 use vv_audio::mixer::ClipInput;
 use vv_audio::mixer::{mix_range, timeline_frame_to_sample};
 use vv_core::{
-    AudioEffect, AudioEffectKind, Clip, ClipId, ClipSource, Equalizer, MediaItem, MediaMeta,
-    MultibandCompressor, NormalizeMode, Rational, SetLevel, Track, TrackKind,
+    AudioEffect, AudioEffectKind, Clip, ClipId, ClipSource, Equalizer, MediaId, MediaItem,
+    MediaMeta, MultibandCompressor, NormalizeMode, Rational, SetLevel, Track, TrackKind,
 };
 
 const FPS: u64 = 25;
@@ -180,7 +180,6 @@ fn a_range_reads_only_the_windows_near_it() {
     let tl = timeline(vec![audio_track(vec![clip(1, file, 0, 500, 0)])]);
     let mut wanted = Wanted {
         windows: HashSet::new(),
-        compounds: &HashMap::new(),
     };
     let range = samples(100..110);
     MixSnapshot::from_timeline_range(
@@ -584,4 +583,44 @@ fn a_level_measured_on_several_threads_reads_as_on_one() {
     };
     let (one, several) = (measure(1), measure(4));
     assert!(db(one, several).abs() < 0.1, "{one} vs {several}");
+}
+
+/// Rendered from the files in chunks and stretched as it goes, it equals the
+/// whole input stretched at once, a compound clip with an effect inside
+/// included.
+#[test]
+fn a_pitch_corrected_clip_rendered_in_chunks_equals_its_whole_stretch() {
+    let mut project = Project::default();
+    let file = media(&mut project, chirp("stretch.wav", 48_000, 20), 48_000, 1);
+    let mut nested_track = audio_track(vec![clip(1, file, 0, 300, 0)]);
+    nested_track.mix.effects = vec![effect(AudioEffectKind::MultibandCompressor(
+        MultibandCompressor::DEFAULT,
+    ))];
+    let nested = project.timelines.insert(timeline(vec![nested_track]));
+    let compound = project.media_pool.insert(MediaItem {
+        compound: Some(nested),
+        ..project.media_pool[file].clone()
+    });
+    let stretched = |id, media| {
+        let mut clip = Clip::new(
+            ClipId(id),
+            ClipSource::Media(media),
+            0,
+            10,
+            200,
+            Rational::one(),
+            Rational::new(5, 4),
+        );
+        clip.pitch_correction = true;
+        clip
+    };
+    let tl = timeline(vec![
+        audio_track(vec![stretched(2, file)]),
+        audio_track(vec![stretched(3, compound)]),
+    ]);
+    let range = samples(0..220);
+    assert!(samples(0..250).end > CHUNK_FRAMES, "the input spans chunks");
+    let whole = mixed_whole(&project, &tl, range.clone());
+    assert_eq!(rendered(&project, &tl, range), whole);
+    assert!(whole.iter().any(|s| s.abs() > 0.1));
 }

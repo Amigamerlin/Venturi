@@ -272,8 +272,8 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   timeline's audio does not fit). A missing block plays as silence.
 - **Compound clips** are mixed live in the same pass as their parent
   (`ClipInput::Nested`): the mix state is a tree, each compound clip with
-  its own effects' state, carried across snapshots by track and clip id. A
-  pitch-corrected one still stretches its whole mixdown. Design in
+  its own effects' state, carried across snapshots by track and clip id.
+  Design in
   [plans/AUDIO_LIVE_MIX.md](plans/AUDIO_LIVE_MIX.md).
 - **Channel strips**: every audio track and the timeline master have a
   `ChannelStrip` (gain, pan, an insert chain before the fader): 6-band
@@ -290,9 +290,12 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   and merged. An edit measures again only the segments it touches, a ripple
   none. In the preview the level worker of `mix_buffers.rs` measures them;
   until a level is ready the last one keeps playing.
-- **Clip speed with pitch correction**: the clip's source range is stretched
-  with `rubberband` by a third `mix_buffers` worker, silent until ready;
-  synchronous on export.
+- **Clip speed with pitch correction**: described rather than read
+  (`vv_audio::StretchRequest`: a file's window or a compound clip's
+  timeline, keyed by content): its input is rendered from the files like
+  the export and fed to `rubberband` as it comes (`stretch_offline`), by a
+  third `mix_buffers` worker in the preview, silent until ready;
+  synchronous on export. Only the stretched result is held whole.
 - **Clock**: the mixer position, in timeline samples, is the playhead
   (`drive_playback`); the video chases it. A gap is just silence, the clock
   keeps advancing. With no audio device the clock is wall-clock.
