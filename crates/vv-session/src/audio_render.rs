@@ -49,36 +49,122 @@ pub fn render_offline(
 }
 
 /// The level `analysis` describes, from the measures of its segments:
-/// the ones in `levels` are not rendered again.
+/// the ones in `levels` are not rendered again, the others are rendered in
+/// runs of neighbours, the runs on `LevelCache::threads` threads.
 pub fn measure_level(
     analysis: &LevelAnalysis,
     levels: &mut LevelCache,
 ) -> Result<f32, ExportError> {
-    let mut parts = Vec::with_capacity(analysis.segments.len());
-    for segment in &analysis.segments {
-        let part = match levels.get(segment.key) {
-            Some(part) => part,
-            None => {
-                let part = measure_segment(analysis, segment, levels)?;
-                levels.put(segment.key, &part);
-                part
-            }
-        };
-        parts.push(part);
+    let (mine, theirs) = levels.claim(&analysis.segments);
+    let runs = runs(&mine, levels.threads);
+    let measured = if levels.threads <= 1 || runs.len() <= 1 {
+        runs.iter()
+            .try_for_each(|run| measure_run(analysis, run, levels))
+    } else {
+        measure_in_parallel(analysis, runs, levels)
+    };
+    if measured.is_err() {
+        levels.release(&mine);
     }
+    measured?;
+    levels.wait_for(&theirs);
+    let parts: Option<Vec<LevelParts>> = analysis
+        .segments
+        .iter()
+        .map(|segment| levels.get(segment.key))
+        .collect();
+    let parts = parts.ok_or_else(|| ExportError::Failed("a segment was not measured".into()))?;
     Ok(LevelParts::merge(&parts))
 }
 
-fn measure_segment(
+fn measure_in_parallel(
     analysis: &LevelAnalysis,
-    segment: &LevelSegment,
+    runs: Vec<Vec<&LevelSegment>>,
     levels: &mut LevelCache,
-) -> Result<LevelParts, ExportError> {
-    let frames = &segment.frames;
-    let warm_up = segment.preroll.max(WARM_UP_FRAMES).min(frames.start);
-    let range = frames.start - warm_up..frames.end + LOOKAHEAD_FRAMES;
-    let mut meter = LevelMeter::new(analysis.mode, analysis.sample_rate, analysis.channels);
-    let mut after = Vec::new();
+) -> Result<(), ExportError> {
+    let queue = std::sync::Mutex::new(runs);
+    let measured = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..levels.threads)
+            .map(|_| {
+                let mut own = levels.for_thread();
+                let queue = &queue;
+                scope.spawn(move || {
+                    loop {
+                        // Not in a `while let`: its guard would hold the
+                        // lock through the render.
+                        let next = queue.lock().unwrap().pop();
+                        let Some(run) = next else {
+                            break;
+                        };
+                        measure_run(analysis, &run, &mut own)?;
+                    }
+                    Ok::<_, ExportError>(own)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("level thread panicked"))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    for own in measured {
+        levels.absorb(own);
+    }
+    Ok(())
+}
+
+/// Rendered through rather than seeking past: a gap this short between two
+/// segments to measure costs less than a new run.
+const RUN_GAP_FRAMES: u64 = 2 * PROJECT_SAMPLE_RATE as u64;
+
+/// `segments` (in order) grouped into runs rendered in one go each, cut so
+/// that `threads` threads get about the same length to render.
+fn runs<'s>(segments: &[&'s LevelSegment], threads: usize) -> Vec<Vec<&'s LevelSegment>> {
+    let total: u64 = segments.iter().map(|s| s.frames.end - s.frames.start).sum();
+    let share = total.div_ceil(threads.max(1) as u64).max(1);
+    let mut runs: Vec<Vec<&LevelSegment>> = Vec::new();
+    let mut length = 0;
+    for &segment in segments {
+        let joins = runs
+            .last()
+            .and_then(|run| run.last())
+            .is_some_and(|last| segment.frames.start <= last.frames.end + RUN_GAP_FRAMES);
+        if joins && length < share {
+            runs.last_mut().unwrap().push(segment);
+        } else {
+            runs.push(vec![segment]);
+            length = 0;
+        }
+        length += segment.frames.end - segment.frames.start;
+    }
+    runs
+}
+
+/// One render over `run`, each segment measured by its own meter: its
+/// warm-up and the frames after it are the real neighbouring audio.
+fn measure_run(
+    analysis: &LevelAnalysis,
+    run: &[&LevelSegment],
+    levels: &mut LevelCache,
+) -> Result<(), ExportError> {
+    let (Some(first), Some(last)) = (run.first(), run.last()) else {
+        return Ok(());
+    };
+    let first_warm_up = first.preroll.max(WARM_UP_FRAMES).min(first.frames.start);
+    let range = first.frames.start - first_warm_up..last.frames.end + LOOKAHEAD_FRAMES;
+    let mut meters: Vec<RunMeter> = run
+        .iter()
+        .map(|segment| RunMeter {
+            segment,
+            warm_from: segment
+                .frames
+                .start
+                .saturating_sub(WARM_UP_FRAMES)
+                .max(range.start),
+            meter: LevelMeter::new(analysis.mode, analysis.sample_rate, analysis.channels),
+            after: Vec::new(),
+        })
+        .collect();
     let ch = analysis.channels.max(1) as usize;
     let mut at = range.start;
     render(
@@ -87,17 +173,34 @@ fn measure_segment(
         range,
         levels,
         |chunk| {
-            let len = (chunk.len() / ch) as u64;
-            let split = |frame: u64| ((frame.clamp(at, at + len) - at) as usize) * ch;
-            let (start, end) = (split(frames.start), split(frames.end));
-            meter.warm_up(&chunk[..start]);
-            meter.push(&chunk[start..end]);
-            after.extend_from_slice(&chunk[end..]);
-            at += len;
+            let end = at + (chunk.len() / ch) as u64;
+            let part = |frames: Range<u64>| {
+                let (a, b) = (frames.start.clamp(at, end), frames.end.clamp(at, end));
+                &chunk[(a - at) as usize * ch..(b - at) as usize * ch]
+            };
+            for m in &mut meters {
+                let frames = &m.segment.frames;
+                m.meter.warm_up(part(m.warm_from..frames.start));
+                m.meter.push(part(frames.clone()));
+                m.after
+                    .extend_from_slice(part(frames.end..frames.end + LOOKAHEAD_FRAMES));
+            }
+            at = end;
             ControlFlow::Continue(())
         },
     )?;
-    Ok(meter.into_parts(&after))
+    for m in meters {
+        let part = m.meter.into_parts(&m.after);
+        levels.put(m.segment.key, &part);
+    }
+    Ok(())
+}
+
+struct RunMeter<'s> {
+    segment: &'s LevelSegment,
+    warm_from: u64,
+    meter: LevelMeter,
+    after: Vec<f32>,
 }
 
 /// What a render mixes.
@@ -158,12 +261,42 @@ fn render(
 
 /// Measured segments by key, kept in memory and in
 /// `$XDG_CACHE_HOME/venturi/levels`.
-#[derive(Default)]
 pub struct LevelCache {
-    parts: HashMap<u64, LevelParts>,
+    /// With the threads of a measure, and with the measures they nest.
+    shared: Arc<SharedLevels>,
     dir: Option<PathBuf>,
+    /// Audio streams of each file, for every render through this cache.
+    streams: HashMap<PathBuf, usize>,
+    /// For the segments of one measure.
+    pub threads: usize,
     /// Segments rendered, not found.
     pub rendered: usize,
+}
+
+#[derive(Default)]
+struct SharedLevels {
+    state: std::sync::Mutex<LevelsState>,
+    measured: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct LevelsState {
+    parts: HashMap<u64, LevelParts>,
+    /// Being measured by a thread: another one waits for them instead of
+    /// rendering them too (two threads meeting the same compound clip).
+    measuring: HashSet<u64>,
+}
+
+impl Default for LevelCache {
+    fn default() -> Self {
+        Self {
+            shared: Arc::default(),
+            dir: None,
+            streams: HashMap::new(),
+            threads: std::thread::available_parallelism().map_or(1, usize::from),
+            rendered: 0,
+        }
+    }
 }
 
 impl LevelCache {
@@ -174,12 +307,33 @@ impl LevelCache {
         }
     }
 
+    /// For a thread of a measure: a measure it nests renders on it alone.
+    fn for_thread(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            dir: self.dir.clone(),
+            streams: self.streams.clone(),
+            threads: 1,
+            rendered: 0,
+        }
+    }
+
+    fn absorb(&mut self, other: LevelCache) {
+        self.streams.extend(other.streams);
+        self.rendered += other.rendered;
+    }
+
     fn path(&self, key: u64) -> Option<PathBuf> {
         Some(self.dir.as_ref()?.join(format!("{key:016x}.level")))
     }
 
-    fn get(&mut self, key: u64) -> Option<LevelParts> {
-        if let Some(part) = self.parts.get(&key) {
+    fn get(&self, key: u64) -> Option<LevelParts> {
+        let mut state = self.shared.state.lock().unwrap();
+        self.get_locked(&mut state, key)
+    }
+
+    fn get_locked(&self, state: &mut LevelsState, key: u64) -> Option<LevelParts> {
+        if let Some(part) = state.parts.get(&key) {
             return Some(part.clone());
         }
         let mut bytes = Vec::new();
@@ -187,19 +341,59 @@ impl LevelCache {
             .and_then(|mut file| file.read_to_end(&mut bytes))
             .ok()?;
         let part = decode_parts(&bytes)?;
-        self.parts.insert(key, part.clone());
+        state.parts.insert(key, part.clone());
         Some(part)
+    }
+
+    /// The segments to measure here, and those another thread is measuring;
+    /// the ones already measured are neither.
+    fn claim<'s>(&mut self, segments: &'s [LevelSegment]) -> (Vec<&'s LevelSegment>, Vec<u64>) {
+        let mut state = self.shared.state.lock().unwrap();
+        let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+        for segment in segments {
+            if self.get_locked(&mut state, segment.key).is_some() {
+                continue;
+            }
+            if state.measuring.insert(segment.key) {
+                mine.push(segment);
+            } else if !theirs.contains(&segment.key) {
+                theirs.push(segment.key);
+            }
+        }
+        (mine, theirs)
+    }
+
+    /// Claimed and not measured: whoever waits for them stops waiting.
+    fn release(&mut self, segments: &[&LevelSegment]) {
+        let mut state = self.shared.state.lock().unwrap();
+        for segment in segments {
+            state.measuring.remove(&segment.key);
+        }
+        self.shared.measured.notify_all();
+    }
+
+    fn wait_for(&self, keys: &[u64]) {
+        let mut state = self.shared.state.lock().unwrap();
+        while keys.iter().any(|key| state.measuring.contains(key)) {
+            state = self.shared.measured.wait(state).unwrap();
+        }
     }
 
     fn put(&mut self, key: u64, part: &LevelParts) {
         self.rendered += 1;
-        self.parts.insert(key, part.clone());
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.parts.insert(key, part.clone());
+            state.measuring.remove(&key);
+            self.shared.measured.notify_all();
+        }
         let Some(path) = self.path(key) else {
             return;
         };
         // Best effort: without it the level is measured again next time.
         let written = std::fs::create_dir_all(path.parent().unwrap_or(&path)).and_then(|()| {
-            let tmp = path.with_extension("tmp");
+            // Per process: the preview and an export may write it at once.
+            let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
             std::fs::File::create(&tmp)?.write_all(&encode_parts(part))?;
             std::fs::rename(&tmp, &path)
         });
@@ -280,8 +474,6 @@ type WindowKey = (PathBuf, usize, Range<u64>);
 /// read again.
 struct StreamingAudio<'c> {
     readers: Vec<Reader>,
-    /// Audio streams of each file.
-    streams: HashMap<PathBuf, usize>,
     /// The windows of the current chunk; one asked again keeps its buffer,
     /// so what was built from it (a stretch) is found again.
     windows: HashMap<WindowKey, SampleBlocks>,
@@ -299,7 +491,6 @@ impl<'c> StreamingAudio<'c> {
     fn new(cache: &'c mut LevelCache) -> Self {
         Self {
             readers: Vec::new(),
-            streams: HashMap::new(),
             windows: HashMap::new(),
             compounds: HashMap::new(),
             stretched: HashMap::new(),
@@ -384,7 +575,7 @@ impl<'c> StreamingAudio<'c> {
                             p == path && f.start <= frames.start + READ_AHEAD_FRAMES
                         })
                         .map(|(_, s, _)| *s)
-                        .filter(|s| *s < self.streams[path])
+                        .filter(|s| *s < self.cache.streams[path])
                         .collect();
                     streams.sort_unstable();
                     streams.dedup();
@@ -405,13 +596,13 @@ impl<'c> StreamingAudio<'c> {
     }
 
     fn stream_count(&mut self, path: &Path) -> Result<usize, ExportError> {
-        if let Some(count) = self.streams.get(path) {
+        if let Some(count) = self.cache.streams.get(path) {
             return Ok(*count);
         }
         let count = vv_media::probe::audio_streams(path)
             .map_err(ExportError::failed)?
             .len();
-        self.streams.insert(path.to_path_buf(), count);
+        self.cache.streams.insert(path.to_path_buf(), count);
         Ok(count)
     }
 }

@@ -545,3 +545,43 @@ fn a_new_cache_reads_the_measures_from_disk() {
     assert_eq!(both_measures(&project, &tl, &mut reopened), measured);
     assert_eq!(reopened.rendered, 0);
 }
+
+fn segment(frames: Range<u64>) -> LevelSegment {
+    LevelSegment {
+        frames,
+        preroll: 0,
+        key: 0,
+    }
+}
+
+#[test]
+fn neighbouring_segments_render_as_one_run_split_between_the_threads() {
+    let sec = PROJECT_SAMPLE_RATE as u64;
+    let segments = [
+        segment(0..10 * sec),
+        segment(10 * sec..20 * sec),
+        segment(21 * sec..30 * sec),
+        segment(30 * sec..40 * sec),
+        segment(100 * sec..110 * sec),
+    ];
+    let refs: Vec<&LevelSegment> = segments.iter().collect();
+    let lengths = |threads| -> Vec<usize> { runs(&refs, threads).iter().map(Vec::len).collect() };
+    assert_eq!(lengths(1), [4, 1], "a short gap is rendered through");
+    assert_eq!(lengths(2), [3, 1, 1], "about half each");
+}
+
+#[test]
+fn a_level_measured_on_several_threads_reads_as_on_one() {
+    let mut project = Project::default();
+    let mut tl = edited_timeline(&mut project, "threads.wav");
+    tl.master.effects = vec![normalize(NormalizeMode::Loudness)];
+    let measure = |threads| {
+        let mut cache = LevelCache {
+            threads,
+            ..LevelCache::default()
+        };
+        both_measures(&project, &tl, &mut cache)[0].0
+    };
+    let (one, several) = (measure(1), measure(4));
+    assert!(db(one, several).abs() < 0.1, "{one} vs {several}");
+}

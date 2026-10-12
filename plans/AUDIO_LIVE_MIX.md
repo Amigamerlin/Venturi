@@ -352,6 +352,12 @@ the code it replaces and the runtime measurement of AUDIO_GRAPH §9.
    GB. Cold (no cached level): 20 s, 101 segments (the master's and the
    nested normalization of chapter "09-cc"); warm: 6 s, none; a clip's gain
    edited inside a chapter: 2 segments measured again.
+   Then: neighbouring segments rendered in one run with a meter each (the
+   93 segments of "09-cc": 6.4 → 0.65 s), the runs split across threads
+   (all cores for an export, half in the preview), segments being measured
+   shared between threads so that a compound met by two of them is
+   rendered once. Cold export audio: 21.7 → 7.9 s (about 2.5 s of it the
+   measure, the rest the export's own render); 280 MB peak.
 4. **Stretch on the offline render**, compounds included.
 5. **Reverse**: read mapping for file clips, materialized for compounds.
    Acceptance: a reversed clip equals the reversed samples of the forward

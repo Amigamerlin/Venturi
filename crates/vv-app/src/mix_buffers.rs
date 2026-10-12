@@ -246,7 +246,9 @@ impl MixBufferCache {
         });
         let (level_tx, level_rx) = mpsc::channel::<LevelResult>();
         let level_worker = Worker::spawn(move |jobs: mpsc::Receiver<LevelJob>| {
+            // Half the cores: the playback's decodes need the rest.
             let mut cache = LevelCache::on_disk();
+            cache.threads = cache.threads.div_ceil(2);
             while let Ok(first) = jobs.recv() {
                 let mut batch = vec![first];
                 // A drag queues one job per frame: only the newest of each

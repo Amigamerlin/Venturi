@@ -45,11 +45,10 @@ impl LevelMeter {
         match &mut self.kind {
             Kind::SamplePeak(_) => {}
             Kind::TruePeak(meter) => {
-                let keep = ((LOOKAHEAD - 1) * meter.channels).min(samples.len());
-                meter.pending.clear();
-                meter
-                    .pending
-                    .extend_from_slice(&samples[samples.len() - keep..]);
+                meter.pending.extend_from_slice(samples);
+                let keep = (LOOKAHEAD - 1) * meter.channels;
+                let drop = meter.pending.len().saturating_sub(keep);
+                meter.pending.drain(..drop);
             }
             Kind::Loudness(meter) => {
                 let (energy, frames, segments) = (meter.energy, meter.frames, meter.segments.len());
