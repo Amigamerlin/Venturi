@@ -56,18 +56,31 @@ pub fn measure_level(
     levels: &mut LevelCache,
 ) -> Result<f32, ExportError> {
     let (mine, theirs) = levels.claim(&analysis.segments);
-    let runs = runs(&mine, levels.threads);
+    // Waiting while a measure this one is nested in holds claims can wait on
+    // itself, or on a thread waiting on it: render the others' segments too.
+    let (to_measure, to_wait) = if levels.holding {
+        let mut all = mine.clone();
+        all.extend(theirs.iter().copied());
+        all.sort_by_key(|segment| segment.frames.start);
+        (all, Vec::new())
+    } else {
+        (mine.clone(), theirs)
+    };
+    let runs = runs(&to_measure, levels.threads);
+    let holding = std::mem::replace(&mut levels.holding, true);
     let measured = if levels.threads <= 1 || runs.len() <= 1 {
         runs.iter()
             .try_for_each(|run| measure_run(analysis, run, levels))
     } else {
         measure_in_parallel(analysis, runs, levels)
     };
+    levels.holding = holding;
     if measured.is_err() {
         levels.release(&mine);
     }
     measured?;
-    levels.wait_for(&theirs);
+    let to_wait: Vec<u64> = to_wait.iter().map(|segment| segment.key).collect();
+    levels.wait_for(&to_wait);
     let parts: Option<Vec<LevelParts>> = analysis
         .segments
         .iter()
@@ -167,7 +180,8 @@ fn measure_run(
         .collect();
     let ch = PROJECT_CHANNELS as usize;
     let mut at = range.start;
-    render(
+    let outer_reads = std::mem::take(&mut levels.reads);
+    let rendered = render(
         analysis.project,
         Mix::Measured(analysis),
         range,
@@ -188,12 +202,47 @@ fn measure_run(
             at = end;
             ControlFlow::Continue(())
         },
-    )?;
+    );
+    let read = std::mem::replace(&mut levels.reads, outer_reads);
+    levels.reads.extend(read.iter().cloned());
+    rendered?;
+    let sources = stamps(&read);
     for m in meters {
         let part = m.meter.into_parts(&m.after);
-        levels.put(m.segment.key, &part);
+        levels.put(m.segment.key, &part, sources.as_deref());
     }
     Ok(())
+}
+
+/// A file as a measure read it: one changed since is measured again.
+#[derive(Debug, Clone, PartialEq)]
+struct Stamp {
+    path: PathBuf,
+    len: u64,
+    modified_nanos: u64,
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    // Written as UTF-8.
+    path.to_str()?;
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let modified_nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as u64;
+    Some(Stamp {
+        path: path.to_path_buf(),
+        len: metadata.len(),
+        modified_nanos,
+    })
+}
+
+/// `None` if one cannot be stamped: its measure is not kept on disk.
+fn stamps(paths: &HashSet<PathBuf>) -> Option<Vec<Stamp>> {
+    let mut paths: Vec<&PathBuf> = paths.iter().collect();
+    paths.sort_unstable();
+    paths.into_iter().map(|path| stamp(path)).collect()
 }
 
 struct RunMeter<'s> {
@@ -306,8 +355,12 @@ pub struct LevelCache {
     dir: Option<PathBuf>,
     /// Audio streams of each file, for every render through this cache.
     streams: HashMap<PathBuf, usize>,
+    /// The files read by the renders through it, for `Stamp`.
+    reads: HashSet<PathBuf>,
     /// For the segments of one measure.
     pub threads: usize,
+    /// A measure this render is nested in holds claimed segments.
+    holding: bool,
     /// Segments rendered, not found.
     pub rendered: usize,
 }
@@ -332,7 +385,9 @@ impl Default for LevelCache {
             shared: Arc::default(),
             dir: None,
             streams: HashMap::new(),
+            reads: HashSet::new(),
             threads: std::thread::available_parallelism().map_or(1, usize::from),
+            holding: false,
             rendered: 0,
         }
     }
@@ -352,13 +407,16 @@ impl LevelCache {
             shared: self.shared.clone(),
             dir: self.dir.clone(),
             streams: self.streams.clone(),
+            reads: HashSet::new(),
             threads: 1,
+            holding: self.holding,
             rendered: 0,
         }
     }
 
     fn absorb(&mut self, other: LevelCache) {
         self.streams.extend(other.streams);
+        self.reads.extend(other.reads);
         self.rendered += other.rendered;
     }
 
@@ -379,24 +437,33 @@ impl LevelCache {
         std::fs::File::open(self.path(key)?)
             .and_then(|mut file| file.read_to_end(&mut bytes))
             .ok()?;
-        let part = decode_parts(&bytes)?;
+        let (sources, part) = decode_parts(&bytes)?;
+        if sources
+            .iter()
+            .any(|source| stamp(&source.path).as_ref() != Some(source))
+        {
+            return None;
+        }
         state.parts.insert(key, part.clone());
         Some(part)
     }
 
     /// The segments to measure here, and those another thread is measuring;
     /// the ones already measured are neither.
-    fn claim<'s>(&mut self, segments: &'s [LevelSegment]) -> (Vec<&'s LevelSegment>, Vec<u64>) {
+    fn claim<'s>(
+        &mut self,
+        segments: &'s [LevelSegment],
+    ) -> (Vec<&'s LevelSegment>, Vec<&'s LevelSegment>) {
         let mut state = self.shared.state.lock().unwrap();
-        let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+        let (mut mine, mut theirs) = (Vec::new(), Vec::<&LevelSegment>::new());
         for segment in segments {
             if self.get_locked(&mut state, segment.key).is_some() {
                 continue;
             }
             if state.measuring.insert(segment.key) {
                 mine.push(segment);
-            } else if !theirs.contains(&segment.key) {
-                theirs.push(segment.key);
+            } else if !theirs.iter().any(|other| other.key == segment.key) {
+                theirs.push(segment);
             }
         }
         (mine, theirs)
@@ -418,7 +485,8 @@ impl LevelCache {
         }
     }
 
-    fn put(&mut self, key: u64, part: &LevelParts) {
+    /// Kept on disk only with the `sources` it was measured from.
+    fn put(&mut self, key: u64, part: &LevelParts, sources: Option<&[Stamp]>) {
         self.rendered += 1;
         {
             let mut state = self.shared.state.lock().unwrap();
@@ -426,14 +494,14 @@ impl LevelCache {
             state.measuring.remove(&key);
             self.shared.measured.notify_all();
         }
-        let Some(path) = self.path(key) else {
+        let (Some(path), Some(sources)) = (self.path(key), sources) else {
             return;
         };
         // Best effort: without it the level is measured again next time.
         let written = std::fs::create_dir_all(path.parent().unwrap_or(&path)).and_then(|()| {
             // Per process: the preview and an export may write it at once.
             let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-            std::fs::File::create(&tmp)?.write_all(&encode_parts(part))?;
+            std::fs::File::create(&tmp)?.write_all(&encode_parts(sources, part))?;
             std::fs::rename(&tmp, &path)
         });
         if let Err(e) = written {
@@ -443,11 +511,21 @@ impl LevelCache {
 }
 
 const PARTS_MAGIC: &[u8; 4] = b"VVLV";
-const PARTS_VERSION: u32 = 1;
+/// Raised when the format or what a measure computes changes: older files
+/// are measured again.
+const PARTS_VERSION: u32 = 2;
 
-fn encode_parts(part: &LevelParts) -> Vec<u8> {
+fn encode_parts(sources: &[Stamp], part: &LevelParts) -> Vec<u8> {
     let mut bytes = PARTS_MAGIC.to_vec();
     bytes.extend_from_slice(&PARTS_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(sources.len() as u64).to_le_bytes());
+    for source in sources {
+        let path = source.path.to_str().unwrap_or_default().as_bytes();
+        bytes.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(path);
+        bytes.extend_from_slice(&source.len.to_le_bytes());
+        bytes.extend_from_slice(&source.modified_nanos.to_le_bytes());
+    }
     match part {
         LevelParts::Peak(peak) => {
             bytes.push(0);
@@ -472,38 +550,54 @@ fn encode_parts(part: &LevelParts) -> Vec<u8> {
 }
 
 /// `None` for anything but a file of this version, whole.
-fn decode_parts(bytes: &[u8]) -> Option<LevelParts> {
+fn decode_parts(bytes: &[u8]) -> Option<(Vec<Stamp>, LevelParts)> {
     let rest = bytes.strip_prefix(PARTS_MAGIC)?;
     let (version, rest) = rest.split_first_chunk::<4>()?;
     if u32::from_le_bytes(*version) != PARTS_VERSION {
         return None;
     }
-    let (&kind, mut rest) = rest.split_first()?;
-    let mut u64_at = || {
-        let (value, tail) = rest.split_first_chunk::<8>()?;
-        rest = tail;
-        Some(*value)
-    };
-    match kind {
-        0 => {
-            let peak = bytes.get(9..13)?.try_into().ok()?;
-            (bytes.len() == 13).then(|| LevelParts::Peak(f32::from_le_bytes(peak)))
-        }
+    let mut reader = BytesReader(rest);
+    let count = reader.u64()?;
+    let mut sources = Vec::new();
+    for _ in 0..count {
+        let path_len = usize::try_from(reader.u64()?).ok()?;
+        let path = std::str::from_utf8(reader.take(path_len)?).ok()?;
+        sources.push(Stamp {
+            path: PathBuf::from(path),
+            len: reader.u64()?,
+            modified_nanos: reader.u64()?,
+        });
+    }
+    let part = match reader.take(1)?[0] {
+        0 => LevelParts::Peak(f32::from_le_bytes(reader.take(4)?.try_into().ok()?)),
         1 => {
-            let segment_frames = u64::from_le_bytes(u64_at()?) as usize;
-            let count = u64::from_le_bytes(u64_at()?);
+            let segment_frames = reader.u64()? as usize;
+            let count = reader.u64()?;
             let segments = (0..count)
-                .map(|_| u64_at().map(f64::from_le_bytes))
+                .map(|_| reader.u64().map(f64::from_bits))
                 .collect::<Option<Vec<f64>>>()?;
-            let energy = f64::from_le_bytes(u64_at()?);
-            let frames = u64::from_le_bytes(u64_at()?) as usize;
-            u64_at().is_none().then_some(LevelParts::Loudness {
+            LevelParts::Loudness {
                 segment_frames,
                 segments,
-                tail: (energy, frames),
-            })
+                tail: (f64::from_bits(reader.u64()?), reader.u64()? as usize),
+            }
         }
-        _ => None,
+        _ => return None,
+    };
+    reader.0.is_empty().then_some((sources, part))
+}
+
+struct BytesReader<'b>(&'b [u8]);
+
+impl BytesReader<'_> {
+    fn take(&mut self, n: usize) -> Option<&[u8]> {
+        let (value, rest) = self.0.split_at_checked(n)?;
+        self.0 = rest;
+        Some(value)
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
 }
 
@@ -573,6 +667,9 @@ impl<'c> StreamingAudio<'c> {
         let mut previous = std::mem::take(&mut self.windows);
         let mut to_read = Vec::new();
         for key in wanted {
+            if !self.cache.reads.contains(&key.0) {
+                self.cache.reads.insert(key.0.clone());
+            }
             match previous.remove_entry(&key) {
                 Some((key, samples)) => {
                     self.windows.insert(key, samples);

@@ -497,9 +497,14 @@ fn measured_parts_survive_the_disk() {
             tail: (0.75, 1200),
         },
     ];
+    let sources = [Stamp {
+        path: PathBuf::from("/media/voice.wav"),
+        len: 1234,
+        modified_nanos: 5678,
+    }];
     for part in parts {
-        let bytes = encode_parts(&part);
-        assert_eq!(decode_parts(&bytes), Some(part));
+        let bytes = encode_parts(&sources, &part);
+        assert_eq!(decode_parts(&bytes), Some((sources.to_vec(), part)));
         assert_eq!(decode_parts(&bytes[..bytes.len() - 1]), None);
     }
 }
@@ -543,6 +548,35 @@ fn a_new_cache_reads_the_measures_from_disk() {
     let mut reopened = on_disk();
     assert_eq!(both_measures(&project, &tl, &mut reopened), measured);
     assert_eq!(reopened.rendered, 0);
+}
+
+/// The project keeps the fingerprint taken at import: the file is checked
+/// again when its measure comes from disk.
+#[test]
+fn a_file_changed_on_disk_is_measured_again() {
+    let dir = std::env::temp_dir().join("vv-audio-render-test-changed");
+    let _ = std::fs::remove_dir_all(&dir);
+    let on_disk = || LevelCache {
+        dir: Some(dir.clone()),
+        ..LevelCache::default()
+    };
+    let path = chirp("changed.wav", 48_000, 10);
+    let mut project = Project::default();
+    let file = media(&mut project, path.clone(), 48_000, 1);
+    let mut tl = timeline(vec![audio_track(vec![clip(1, file, 0, 200, 0)])]);
+    tl.master.effects = vec![normalize(NormalizeMode::Loudness)];
+    let before = both_measures(&project, &tl, &mut on_disk());
+
+    let quieter = "aevalsrc=0.1*sin(300*t*t):sample_rate=48000:duration=10";
+    vv_media::test_support::ffmpeg(&["-f", "lavfi", "-i", quieter], &path);
+    let mut reopened = on_disk();
+    let after = both_measures(&project, &tl, &mut reopened);
+    assert!(reopened.rendered > 0);
+    assert_eq!(
+        after,
+        both_measures(&project, &tl, &mut LevelCache::default())
+    );
+    assert_ne!(after, before);
 }
 
 fn segment(frames: Range<u64>) -> LevelSegment {
@@ -623,4 +657,47 @@ fn a_pitch_corrected_clip_rendered_in_chunks_equals_its_whole_stretch() {
     let whole = mixed_whole(&project, &tl, range.clone());
     assert_eq!(rendered(&project, &tl, range), whole);
     assert!(whole.iter().any(|s| s.abs() > 0.1));
+}
+
+#[test]
+fn a_compound_measuring_a_segment_its_parent_claimed_does_not_wait_on_itself() {
+    let mut project = Project::default();
+    let file = media(&mut project, chirp("self_wait.wav", 48_000, 70), 48_000, 1);
+    let chain = || {
+        vec![
+            effect(AudioEffectKind::MultibandCompressor(
+                MultibandCompressor::DEFAULT,
+            )),
+            normalize(NormalizeMode::Loudness),
+        ]
+    };
+    // The same first clip bare and inside the compound: one segment key.
+    let mut nested = timeline(vec![audio_track(vec![
+        clip(1, file, 0, 150, 0),
+        clip(2, file, 200, 1200, 150),
+    ])]);
+    nested.master.effects = chain();
+    let nested = project.timelines.insert(nested);
+    let compound = project.media_pool.insert(MediaItem {
+        compound: Some(nested),
+        ..project.media_pool[file].clone()
+    });
+    let mut tl = timeline(vec![audio_track(vec![
+        clip(1, file, 0, 150, 0),
+        clip(2, compound, 0, 1350, 150),
+    ])]);
+    tl.master.effects = chain();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut cache = LevelCache {
+            threads: 8,
+            ..LevelCache::default()
+        };
+        let rendered = render_offline(&project, &tl, samples(0..1500), &mut cache, |_| {
+            ControlFlow::Continue(())
+        });
+        let _ = tx.send(rendered.is_ok());
+    });
+    let rendered = rx.recv_timeout(std::time::Duration::from_secs(60));
+    assert_eq!(rendered, Ok(true), "the render hung or failed");
 }
