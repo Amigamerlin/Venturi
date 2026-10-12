@@ -24,12 +24,12 @@ forward's thread per frame.
   import-time `content_hash`.
 - **Pitch-corrected compound containing itself.** The stretch path drops
   `Readiness::Cyclic`: up to `MAX_COMPOUND_DEPTH` layered copies and one
-  stretch job per depth instead of silence. Only if a cycle can be built.
+  stretch job per depth instead of silence. Only from a hand-edited
+  project: `Project::would_create_a_cycle` prevents building one.
 - **`MixSnapshot::is_ready`** is true while a pitch-corrected clip's stretch
   is pending (the clip is skipped, not counted).
 - **Failures cached forever.** A decode error marks the stream `missing`
-  until it leaves the timeline; `reads_from_start` caches its probe; a
-  failed level measure is `Ready(0.0)`, i.e. unity gain, with only an
+  until it leaves the timeline; a failed level measure is `Ready(0.0)`, i.e. unity gain, with only an
   `eprintln`. A `recv` error in the export reader reads as end of file.
 - **`SampleBlocks::to_vec`** loops forever on a block whose length is not a
   multiple of `channels` (no producer does that today; add `.max(1)`).
