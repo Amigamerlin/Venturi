@@ -59,7 +59,6 @@ impl EqProcessor {
     }
 }
 
-/// The frequency response of an equalizer, for drawing it.
 impl crate::effect::Effect for EqProcessor {
     fn process(&mut self, samples: &mut [f32]) -> Option<crate::dynamics::BandActivity> {
         EqProcessor::process(self, samples);
@@ -81,6 +80,7 @@ impl crate::effect::Effect for EqProcessor {
     }
 }
 
+/// The frequency response of an equalizer, for drawing it.
 pub struct EqResponse {
     filters: [Option<Biquad>; BANDS],
     sample_rate: f32,

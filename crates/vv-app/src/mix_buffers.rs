@@ -219,8 +219,6 @@ pub struct MixBufferCache {
     /// Blocks arrived and not yet reported by `poll`, and when it last did.
     unreported_blocks: bool,
     last_block_report: Option<Instant>,
-    /// Whole mixdowns of the pitch-corrected compound clips, with the
-    /// `content_hash` they were computed with.
     /// Pitch-corrected clip audio by `StretchRequest::key`.
     stretched: HashMap<u64, Stretch>,
     /// Keys asked for since the last `sweep_unused`.

@@ -845,19 +845,10 @@ impl<F: FnMut(&Path, usize) -> Option<SampleBlocks>> AudioSource for F {
     }
 }
 
-/// How much of a timeline's audio was ready.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Readiness {
-    Complete,
-    Partial,
-    Pending,
-    /// A compound clip containing itself: the whole cycle stays silent
-    /// instead of layering itself `MAX_COMPOUND_DEPTH` times.
-    Cyclic,
-}
-
-/// The mix clips of `timeline`, and the least ready of them. `placement`:
-/// where its sample 0 plays in the outermost timeline, for `plays_at`.
+/// The mix clips of `timeline`, and whether it contains itself through a
+/// compound clip: the whole cycle stays silent instead of layering itself
+/// `MAX_COMPOUND_DEPTH` times. `placement`: where its sample 0 plays in the
+/// outermost timeline, for `plays_at`.
 #[allow(clippy::too_many_arguments)]
 fn collect_clips(
     project: &Project,
@@ -869,10 +860,10 @@ fn collect_clips(
     depth: u32,
     placement: i64,
     measuring: Option<Measured>,
-) -> (MixSnapshot, Readiness) {
+) -> (MixSnapshot, bool) {
     let fps = timeline.fps.as_f64().max(1e-9);
     let mut clips = Vec::new();
-    let mut readiness = Readiness::Complete;
+    let mut cyclic = false;
     for (track_index, track) in timeline.audible_tracks() {
         for clip in track
             .clips
@@ -907,7 +898,7 @@ fn collect_clips(
             let input = if pitch_corrected {
                 let nested = item.compound.and_then(|id| project.timelines.get(id));
                 if nested.is_some() && depth + 1 >= vv_core::MAX_COMPOUND_DEPTH {
-                    readiness = Readiness::Cyclic;
+                    cyclic = true;
                     continue;
                 }
                 let mut frames = span.source_offset
@@ -954,14 +945,10 @@ fn collect_clips(
                 };
                 match source.stretched(request) {
                     ClipAudio::Ready(stretched) => ClipInput::Blocks(stretched),
-                    ClipAudio::Pending => {
-                        readiness = readiness.max(Readiness::Pending);
-                        continue;
-                    }
-                    ClipAudio::Partial(_) | ClipAudio::Missing => continue,
+                    ClipAudio::Pending | ClipAudio::Partial(_) | ClipAudio::Missing => continue,
                 }
             } else if item.compound.is_some() {
-                let Some((mix, nested)) = nested_mix(
+                let Some((mix, nested_cyclic)) = nested_mix(
                     project,
                     *media_id,
                     (sample_rate, channels),
@@ -972,8 +959,8 @@ fn collect_clips(
                 ) else {
                     continue;
                 };
-                readiness = readiness.max(nested);
-                if nested == Readiness::Cyclic {
+                if nested_cyclic {
+                    cyclic = true;
                     continue;
                 }
                 ClipInput::Nested(NestedMix { mix: Arc::new(mix) })
@@ -984,16 +971,10 @@ fn collect_clips(
                     needed.clone(),
                     plays_at,
                 ) {
-                    ClipAudio::Ready(buffer) => ClipInput::Blocks(buffer),
-                    ClipAudio::Partial(buffer) => {
-                        readiness = readiness.max(Readiness::Partial);
+                    ClipAudio::Ready(buffer) | ClipAudio::Partial(buffer) => {
                         ClipInput::Blocks(buffer)
                     }
-                    ClipAudio::Pending => {
-                        readiness = readiness.max(Readiness::Pending);
-                        continue;
-                    }
-                    ClipAudio::Missing => continue,
+                    ClipAudio::Pending | ClipAudio::Missing => continue,
                 }
             };
             let clip_fps = item.meta.fps.as_f64().max(1e-9);
@@ -1077,7 +1058,6 @@ fn collect_clips(
             !track_inputs.is_empty(),
             &track_clips,
             analyze,
-            &mut readiness,
         );
         // Measured before the fader.
         let bus = match stop {
@@ -1122,14 +1102,7 @@ fn collect_clips(
                 segments,
             })
         };
-        let inserts = resolve_chain(
-            &timeline.master,
-            stop,
-            !all.is_empty(),
-            &[],
-            analyze,
-            &mut readiness,
-        );
+        let inserts = resolve_chain(&timeline.master, stop, !all.is_empty(), &[], analyze);
         let bus = match stop {
             Some(_) => Bus::UNITY,
             None => Bus::from_strip(&timeline.master),
@@ -1137,7 +1110,7 @@ fn collect_clips(
         Channel { inserts, bus }
     };
     let snapshot = MixSnapshot::new(sample_rate, channels, clips, tracks, master);
-    (snapshot, readiness)
+    (snapshot, cyclic)
 }
 
 /// What every segment of a normalization shares: the mode, the format and
@@ -1160,7 +1133,6 @@ fn resolve_chain(
     has_audio: bool,
     clips: &[(ClipId, u64)],
     mut analyze: impl FnMut(&[Insert], Option<(usize, ClipId)>, NormalizeMode) -> LevelReading,
-    readiness: &mut Readiness,
 ) -> Vec<Insert> {
     let mut inserts = Vec::new();
     for effect in strip.effects.iter().take(stop.unwrap_or(usize::MAX)) {
@@ -1177,7 +1149,7 @@ fn resolve_chain(
             } => {
                 let mut gain = |clip: Option<(usize, ClipId)>| {
                     let reading = analyze(&inserts, clip, mode);
-                    normalize_gain(target_db, reading, readiness)
+                    normalize_gain(target_db, reading)
                 };
                 // The loudest peak of the clips is the peak of the track:
                 // measured in one go.
@@ -1214,16 +1186,12 @@ fn resolve_chain(
     inserts
 }
 
-/// A reading still on its way leaves the mix `Partial`, so a compound
-/// containing it is not cached with the wrong gain. `None` for silence,
+/// A reading still on its way plays the last one. `None` for silence,
 /// which stays silence instead of getting the maximum gain.
-fn normalize_gain(target_db: f32, reading: LevelReading, readiness: &mut Readiness) -> Option<f32> {
+fn normalize_gain(target_db: f32, reading: LevelReading) -> Option<f32> {
     let level = match reading {
         LevelReading::Ready(level) => Some(level),
-        LevelReading::Pending(last) => {
-            *readiness = (*readiness).max(Readiness::Partial);
-            last
-        }
+        LevelReading::Pending(last) => last,
     };
     level
         .filter(|level| *level > 1e-6)
@@ -1241,9 +1209,9 @@ fn nested_mix(
     frames: Option<std::ops::Range<u64>>,
     depth: u32,
     placement: i64,
-) -> Option<(MixSnapshot, Readiness)> {
+) -> Option<(MixSnapshot, bool)> {
     if depth >= vv_core::MAX_COMPOUND_DEPTH {
-        return Some((MixSnapshot::empty(sample_rate, channels), Readiness::Cyclic));
+        return Some((MixSnapshot::empty(sample_rate, channels), true));
     }
     let item = project.media_pool.get(media_id)?;
     let nested = item.compound.and_then(|id| project.timelines.get(id))?;
