@@ -215,3 +215,16 @@ fn effect_presets_are_saved_and_a_broken_one_is_dropped_alone() {
     assert!(!loaded.kinetic_scroll, "the rest of the file still reads");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn an_audio_budget_out_of_range_in_the_file_is_clamped() {
+    let path = std::env::temp_dir()
+        .join(format!("vv-settings-audio-{}", std::process::id()))
+        .join("settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for (mb, bytes) in [(0, 100_000_000), (99_999, 32_000_000_000)] {
+        std::fs::write(&path, format!(r#"{{"audio_budget_mb": {mb}}}"#)).unwrap();
+        assert_eq!(Settings::load(&path).audio_budget_bytes, bytes);
+    }
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

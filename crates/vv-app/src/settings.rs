@@ -524,6 +524,10 @@ impl Default for PanelLayout {
     }
 }
 
+/// Of `audio_budget_bytes`: 0, from a hand-edited file, would play the
+/// timeline silent.
+pub const AUDIO_BUDGET_MB: std::ops::RangeInclusive<u32> = 100..=32000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub keymap: Keymap,
@@ -735,7 +739,9 @@ impl Settings {
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
         settings.audio_budget_bytes = file
             .audio_budget_mb
-            .map_or(settings.audio_budget_bytes, |mb| mb as usize * 1_000_000);
+            .map_or(settings.audio_budget_bytes, |mb| {
+                mb.clamp(*AUDIO_BUDGET_MB.start(), *AUDIO_BUDGET_MB.end()) as usize * 1_000_000
+            });
         settings.hw_decode = file
             .hw_decode
             .as_deref()

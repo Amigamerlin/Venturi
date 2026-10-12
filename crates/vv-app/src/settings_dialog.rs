@@ -566,7 +566,7 @@ fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             if ui
                 .add(
                     egui::DragValue::new(&mut budget_mb)
-                        .range(100..=32000)
+                        .range(crate::settings::AUDIO_BUDGET_MB)
                         .suffix(" MB"),
                 )
                 .on_hover_text(t!("settings.audio_cache_hint"))
