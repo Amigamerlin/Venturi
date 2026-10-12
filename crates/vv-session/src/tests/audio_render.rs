@@ -1,8 +1,9 @@
 use super::*;
+use vv_audio::mixer::ClipInput;
 use vv_audio::mixer::{mix_range, timeline_frame_to_sample};
 use vv_core::{
     AudioEffect, AudioEffectKind, Clip, ClipId, ClipSource, Equalizer, MediaItem, MediaMeta,
-    MultibandCompressor, Rational, Track, TrackKind,
+    MultibandCompressor, NormalizeMode, Rational, SetLevel, Track, TrackKind,
 };
 
 const FPS: u64 = 25;
@@ -75,33 +76,35 @@ fn samples(frames: std::ops::Range<u64>) -> Range<u64> {
     frames.start * FRAME_SAMPLES..frames.end * FRAME_SAMPLES
 }
 
-/// The mix of `range` in one call, every file decoded whole from its start.
+fn decoded_whole(path: &Path, stream: usize) -> Option<SampleBlocks> {
+    let mut samples = Vec::new();
+    let formats = vv_media::decode_audio_streams_streaming(
+        path,
+        &[stream],
+        Some(PROJECT_SAMPLE_RATE),
+        |_, channels, chunk| {
+            remix_channels_into(chunk, channels, PROJECT_CHANNELS, &mut samples);
+            ControlFlow::Continue(())
+        },
+    )
+    .ok()?;
+    formats[0]?;
+    Some(SampleBlocks::contiguous(
+        Arc::new(samples),
+        0,
+        PROJECT_CHANNELS,
+    ))
+}
+
+/// The mix of `range` in one call, every file decoded whole from its start
+/// and every level measured whole from them.
 fn mixed_whole(project: &Project, tl: &Timeline, range: Range<u64>) -> Vec<f32> {
-    let mut decode = |path: &Path, stream: usize| -> Option<SampleBlocks> {
-        let mut samples = Vec::new();
-        let formats = vv_media::decode_audio_streams_streaming(
-            path,
-            &[stream],
-            Some(PROJECT_SAMPLE_RATE),
-            |_, channels, chunk| {
-                remix_channels_into(chunk, channels, PROJECT_CHANNELS, &mut samples);
-                ControlFlow::Continue(())
-            },
-        )
-        .ok()?;
-        formats[0]?;
-        Some(SampleBlocks::contiguous(
-            Arc::new(samples),
-            0,
-            PROJECT_CHANNELS,
-        ))
-    };
     let snapshot = MixSnapshot::from_timeline(
         project,
         tl,
         PROJECT_SAMPLE_RATE,
         PROJECT_CHANNELS,
-        &mut decode,
+        &mut decoded_whole,
     );
     let mut out = vec![0.0; (range.end - range.start) as usize * PROJECT_CHANNELS as usize];
     mix_range(&snapshot, range.start, &mut out);
@@ -110,7 +113,7 @@ fn mixed_whole(project: &Project, tl: &Timeline, range: Range<u64>) -> Vec<f32> 
 
 fn rendered(project: &Project, tl: &Timeline, range: Range<u64>) -> Vec<f32> {
     let mut out = Vec::new();
-    render_offline(project, tl, range, |chunk| {
+    render_offline(project, tl, range, &mut LevelCache::default(), |chunk| {
         out.extend_from_slice(chunk);
         ControlFlow::Continue(())
     })
@@ -202,13 +205,16 @@ fn the_render_holds_only_the_audio_near_where_it_is() {
     let mut project = Project::default();
     let file = media(&mut project, chirp("long.wav", 48_000, 60), 48_000, 1);
     let tl = timeline(vec![audio_track(vec![clip(1, file, 0, 1500, 0)])]);
-    let mut audio = StreamingAudio::default();
+    let mut cache = LevelCache::default();
+    let mut audio = StreamingAudio::new(&mut cache);
     let end = samples(0..1500).end;
     let bound = (2 * CHUNK_FRAMES + READ_AHEAD_FRAMES) as usize * PROJECT_CHANNELS as usize;
     let mut at = 0;
     while at < end {
         let chunk = at..(at + CHUNK_FRAMES).min(end);
-        audio.snapshot(&project, &tl, chunk.clone(), false).unwrap();
+        audio
+            .snapshot(&project, Mix::Timeline(&tl), chunk.clone(), false)
+            .unwrap();
         // The windows share the readers' blocks.
         let held: usize = audio
             .readers
@@ -251,9 +257,10 @@ fn the_streams_of_a_file_read_at_the_same_place_share_one_decode() {
         audio_track(vec![clip(1, file, 0, 300, 0)]),
         audio_track(vec![second]),
     ]);
-    let mut audio = StreamingAudio::default();
+    let mut cache = LevelCache::default();
+    let mut audio = StreamingAudio::new(&mut cache);
     audio
-        .snapshot(&project, &tl, 0..CHUNK_FRAMES, false)
+        .snapshot(&project, Mix::Timeline(&tl), 0..CHUNK_FRAMES, false)
         .unwrap();
     assert_eq!(audio.readers.len(), 1);
     assert_eq!(audio.readers[0].streams, [0, 1]);
@@ -282,10 +289,16 @@ fn a_break_from_the_sink_stops_the_render() {
     let file = media(&mut project, chirp("stop.wav", 48_000, 20), 48_000, 1);
     let tl = timeline(vec![audio_track(vec![clip(1, file, 0, 500, 0)])]);
     let mut chunks = 0;
-    render_offline(&project, &tl, samples(0..500), |_| {
-        chunks += 1;
-        ControlFlow::Break(())
-    })
+    render_offline(
+        &project,
+        &tl,
+        samples(0..500),
+        &mut LevelCache::default(),
+        |_| {
+            chunks += 1;
+            ControlFlow::Break(())
+        },
+    )
     .unwrap();
     assert_eq!(chunks, 1);
 }
@@ -338,4 +351,197 @@ fn a_compound_rendered_in_chunks_equals_one_mix() {
     let whole = mixed_whole(&project, &tl, range.clone());
     assert_eq!(rendered(&project, &tl, range), whole);
     assert!(whole.iter().any(|s| s.abs() > 0.1));
+}
+
+/// Every level asked for, measured by segment through `cache` and whole
+/// from the decoded files.
+struct BothMeasures<'c> {
+    cache: &'c mut LevelCache,
+    /// By segments, whole.
+    levels: Vec<(f32, f32)>,
+}
+
+impl AudioSource for BothMeasures<'_> {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        decoded_whole(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
+    }
+
+    fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
+        let by_segment = measure_level(&analysis, self.cache).unwrap();
+        let whole = analysis.measure_with(&mut decoded_whole);
+        self.levels.push((by_segment, whole));
+        LevelReading::Ready(whole)
+    }
+}
+
+fn both_measures(project: &Project, tl: &Timeline, cache: &mut LevelCache) -> Vec<(f32, f32)> {
+    let mut source = BothMeasures {
+        cache,
+        levels: Vec::new(),
+    };
+    MixSnapshot::from_timeline(
+        project,
+        tl,
+        PROJECT_SAMPLE_RATE,
+        PROJECT_CHANNELS,
+        &mut source,
+    );
+    source.levels
+}
+
+fn normalize(mode: NormalizeMode) -> AudioEffect {
+    effect(AudioEffectKind::Normalize {
+        target_db: -1.0,
+        mode,
+        set_level: SetLevel::Relative,
+    })
+}
+
+/// Two tracks cut in several places, measured on the master.
+fn edited_timeline(project: &mut Project, name: &str) -> Timeline {
+    let file = media(project, chirp(name, 48_000, 20), 48_000, 1);
+    let quiet = media(
+        project,
+        chirp(&format!("quiet-{name}"), 44_100, 20),
+        44_100,
+        1,
+    );
+    let mut voice = audio_track(vec![
+        clip(1, file, 0, 60, 0),
+        clip(2, file, 100, 45, 70),
+        clip(3, file, 200, 80, 130),
+    ]);
+    voice.mix.gain_db = -3.0;
+    let mut music = audio_track(vec![clip(4, quiet, 0, 150, 40)]);
+    music.mix.gain_db = -18.0;
+    timeline(vec![voice, music])
+}
+
+fn db(a: f32, b: f32) -> f32 {
+    20.0 * (a / b).log10()
+}
+
+#[test]
+fn a_level_measured_by_segment_reads_as_the_whole_measure() {
+    let mut project = Project::default();
+    let mut tl = edited_timeline(&mut project, "segments.wav");
+    for mode in NormalizeMode::ALL {
+        tl.master.effects = vec![normalize(mode)];
+        let levels = both_measures(&project, &tl, &mut LevelCache::default());
+        let [(by_segment, whole)] = levels[..] else {
+            panic!("{levels:?}");
+        };
+        assert!(whole > 0.01);
+        let tolerance = if mode == NormalizeMode::SamplePeak {
+            1e-6
+        } else {
+            0.1
+        };
+        assert!(
+            db(by_segment, whole).abs() < tolerance,
+            "{mode:?}: {by_segment} vs {whole}"
+        );
+    }
+}
+
+#[test]
+fn a_level_after_a_compressor_reads_as_the_whole_measure() {
+    let mut project = Project::default();
+    let mut tl = edited_timeline(&mut project, "compressed.wav");
+    tl.tracks[0].mix.effects = vec![effect(AudioEffectKind::MultibandCompressor(
+        MultibandCompressor::DEFAULT,
+    ))];
+    tl.master.effects = vec![
+        effect(AudioEffectKind::Equalizer(boosting_eq())),
+        normalize(NormalizeMode::Loudness),
+    ];
+    let levels = both_measures(&project, &tl, &mut LevelCache::default());
+    let [(by_segment, whole)] = levels[..] else {
+        panic!("{levels:?}");
+    };
+    assert!(db(by_segment, whole).abs() < 0.1, "{by_segment} vs {whole}");
+}
+
+/// The point of the segments: a ripple measures nothing again, an edit
+/// only what it touches.
+#[test]
+fn an_edit_measures_again_only_the_segments_it_touches() {
+    let mut project = Project::default();
+    let mut tl = edited_timeline(&mut project, "edits.wav");
+    tl.tracks.truncate(1);
+    tl.master.effects = vec![normalize(NormalizeMode::Loudness)];
+    let mut cache = LevelCache::default();
+    both_measures(&project, &tl, &mut cache);
+    assert_eq!(cache.rendered, 3, "one segment per clip");
+
+    both_measures(&project, &tl, &mut cache);
+    assert_eq!(cache.rendered, 3, "measured already");
+
+    for clip in &mut tl.tracks[0].clips[1..] {
+        clip.timeline_start -= 10;
+    }
+    both_measures(&project, &tl, &mut cache);
+    assert_eq!(cache.rendered, 3, "a ripple moves the segments, unchanged");
+
+    tl.tracks[0].clips[1].effects.gain_db = vv_core::Keyframed::constant(-6.0);
+    both_measures(&project, &tl, &mut cache);
+    assert_eq!(cache.rendered, 4, "only the clip edited");
+}
+
+#[test]
+fn measured_parts_survive_the_disk() {
+    let parts = [
+        LevelParts::Peak(0.25),
+        LevelParts::Loudness {
+            segment_frames: 4800,
+            segments: vec![0.5, 1.5, 3.0],
+            tail: (0.75, 1200),
+        },
+    ];
+    for part in parts {
+        let bytes = encode_parts(&part);
+        assert_eq!(decode_parts(&bytes), Some(part));
+        assert_eq!(decode_parts(&bytes[..bytes.len() - 1]), None);
+    }
+}
+
+/// A normalizing timeline was collected whole until its levels were
+/// measured apart.
+#[test]
+fn a_normalizing_timeline_renders_in_chunks() {
+    let mut project = Project::default();
+    let file = media(&mut project, chirp("normalized.wav", 48_000, 60), 48_000, 1);
+    let mut tl = timeline(vec![audio_track(vec![clip(1, file, 0, 1500, 0)])]);
+    tl.master.effects = vec![normalize(NormalizeMode::Loudness)];
+    let mut cache = LevelCache::default();
+    let mut audio = StreamingAudio::new(&mut cache);
+    let snapshot = audio
+        .snapshot(&project, Mix::Timeline(&tl), 0..CHUNK_FRAMES, false)
+        .unwrap();
+    let ClipInput::Blocks(window) = &snapshot.clips[0].input else {
+        panic!("a file clip");
+    };
+    assert!(window.end() < 2 * CHUNK_FRAMES, "{}", window.end());
+    assert_eq!(snapshot.master.inserts.len(), 1);
+}
+
+/// Reopening a project: the levels measured the last time come from disk.
+#[test]
+fn a_new_cache_reads_the_measures_from_disk() {
+    let dir = std::env::temp_dir().join("vv-audio-render-test-levels");
+    let _ = std::fs::remove_dir_all(&dir);
+    let on_disk = || LevelCache {
+        dir: Some(dir.clone()),
+        ..LevelCache::default()
+    };
+    let mut project = Project::default();
+    let mut tl = edited_timeline(&mut project, "reopened.wav");
+    tl.master.effects = vec![normalize(NormalizeMode::Loudness)];
+    let mut first = on_disk();
+    let measured = both_measures(&project, &tl, &mut first);
+    assert!(first.rendered > 0);
+
+    let mut reopened = on_disk();
+    assert_eq!(both_measures(&project, &tl, &mut reopened), measured);
+    assert_eq!(reopened.rendered, 0);
 }

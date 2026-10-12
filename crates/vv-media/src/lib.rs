@@ -45,7 +45,7 @@ pub enum MediaError {
 
 /// Global cache directory `$XDG_CACHE_HOME/venturi/<name>` (or
 /// `~/.cache/...`, or the system temp dir without `HOME`).
-pub(crate) fn cache_dir(name: &str) -> std::path::PathBuf {
+pub fn cache_dir(name: &str) -> std::path::PathBuf {
     use std::path::PathBuf;
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)

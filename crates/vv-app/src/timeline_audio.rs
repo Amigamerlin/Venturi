@@ -126,6 +126,7 @@ impl TimelineAudio {
         mix.meters.keep_spectra_of(&self.mix.meters);
         self.mix = Arc::new(mix);
         self.buffers.sweep_unused();
+        self.buffers.send_level_jobs(project);
         self.publish();
     }
 
@@ -153,6 +154,7 @@ impl TimelineAudio {
         let clips: Vec<MixClip> = buffers
             .into_iter()
             .map(|buffer| MixClip {
+                clip: vv_core::ClipId(0),
                 start: 0,
                 len: buffer.end(),
                 source_offset: 0,

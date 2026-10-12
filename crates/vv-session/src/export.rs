@@ -13,7 +13,7 @@ use vv_core::{Clip, ClipId, FrameIdx, Project, Timeline, TimelineId, TrackKind};
 
 use vv_audio::mixer::{PROJECT_SAMPLE_RATE, timeline_frame_to_sample};
 
-use crate::audio_render::render_offline;
+use crate::audio_render::{LevelCache, render_offline};
 
 use crate::frame_provider::{
     FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at,
@@ -372,7 +372,8 @@ pub fn export_timeline(
             let samples = audio_samples(timeline, range.clone());
             // Stops once the encoder side is gone.
             scope.spawn(move || {
-                render_offline(project, timeline, samples, |chunk| {
+                let levels = &mut LevelCache::on_disk();
+                render_offline(project, timeline, samples, levels, |chunk| {
                     match audio_tx.send(chunk.to_vec()) {
                         Ok(()) => ControlFlow::Continue(()),
                         Err(_) => ControlFlow::Break(()),
@@ -625,10 +626,16 @@ pub(crate) fn mix_audio_track(
     let samples = audio_samples(timeline, range);
     let mut mixed =
         Vec::with_capacity((samples.end - samples.start) as usize * PROJECT_CHANNELS as usize);
-    render_offline(project, timeline, samples, |chunk| {
-        mixed.extend_from_slice(chunk);
-        ControlFlow::Continue(())
-    })?;
+    render_offline(
+        project,
+        timeline,
+        samples,
+        &mut LevelCache::on_disk(),
+        |chunk| {
+            mixed.extend_from_slice(chunk);
+            ControlFlow::Continue(())
+        },
+    )?;
     Ok(mixed)
 }
 

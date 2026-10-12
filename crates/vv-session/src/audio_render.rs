@@ -1,20 +1,23 @@
 //! A timeline's mix rendered start to end in chunks, its sources decoded by
 //! seeking and freed as the render moves on: memory does not grow with the
-//! length of the timeline (plans/AUDIO_LIVE_MIX.md §3.2).
+//! length of the timeline (plans/AUDIO_LIVE_MIX.md §3.2). The levels of
+//! the normalizations are rendered the same way, by segment (§3.3).
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::io::{Read, Write};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-use vv_audio::SampleBlocks;
+use vv_audio::loudness::{LOOKAHEAD_FRAMES, LevelMeter, LevelParts};
 use vv_audio::mixer::{
-    AudioSource, ClipAudio, LevelAnalysis, LevelReading, MixSnapshot, MixState,
-    PROJECT_SAMPLE_RATE, mix_range_from, normalizes, remix_channels_into, stretch_range,
+    AudioSource, ClipAudio, MixSnapshot, MixState, PROJECT_SAMPLE_RATE, mix_range_from,
+    remix_channels_into, stretch_range,
 };
+use vv_audio::{LevelAnalysis, LevelReading, LevelSegment, SampleBlocks};
 use vv_core::{MediaId, Project, Timeline};
 
 use crate::export::{ExportError, PROJECT_CHANNELS};
@@ -29,6 +32,9 @@ const READ_AHEAD_FRAMES: u64 = 10 * PROJECT_SAMPLE_RATE as u64;
 const BLOCK_FRAMES: u64 = 1 << 13;
 /// Decoded packets a reader may be ahead of the render.
 const READER_QUEUE: usize = 64;
+/// Rendered before every segment of a measure: the loudness filters settle
+/// in it, the true peak interpolates from it.
+const WARM_UP_FRAMES: u64 = PROJECT_SAMPLE_RATE as u64 / 4;
 
 /// Hands `sink` the mix of the timeline audio frames `range`, in order, at
 /// `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`; `Break` stops the render.
@@ -36,50 +42,243 @@ pub fn render_offline(
     project: &Project,
     timeline: &Timeline,
     range: Range<u64>,
+    levels: &mut LevelCache,
+    sink: impl FnMut(&[f32]) -> ControlFlow<()>,
+) -> Result<(), ExportError> {
+    render(project, Mix::Timeline(timeline), range, levels, sink)
+}
+
+/// The level `analysis` describes, from the measures of its segments:
+/// the ones in `levels` are not rendered again.
+pub fn measure_level(
+    analysis: &LevelAnalysis,
+    levels: &mut LevelCache,
+) -> Result<f32, ExportError> {
+    let mut parts = Vec::with_capacity(analysis.segments.len());
+    for segment in &analysis.segments {
+        let part = match levels.get(segment.key) {
+            Some(part) => part,
+            None => {
+                let part = measure_segment(analysis, segment, levels)?;
+                levels.put(segment.key, &part);
+                part
+            }
+        };
+        parts.push(part);
+    }
+    Ok(LevelParts::merge(&parts))
+}
+
+fn measure_segment(
+    analysis: &LevelAnalysis,
+    segment: &LevelSegment,
+    levels: &mut LevelCache,
+) -> Result<LevelParts, ExportError> {
+    let frames = &segment.frames;
+    let warm_up = segment.preroll.max(WARM_UP_FRAMES).min(frames.start);
+    let range = frames.start - warm_up..frames.end + LOOKAHEAD_FRAMES;
+    let mut meter = LevelMeter::new(analysis.mode, analysis.sample_rate, analysis.channels);
+    let mut after = Vec::new();
+    let ch = analysis.channels.max(1) as usize;
+    let mut at = range.start;
+    render(
+        analysis.project,
+        Mix::Measured(analysis),
+        range,
+        levels,
+        |chunk| {
+            let len = (chunk.len() / ch) as u64;
+            let split = |frame: u64| ((frame.clamp(at, at + len) - at) as usize) * ch;
+            let (start, end) = (split(frames.start), split(frames.end));
+            meter.warm_up(&chunk[..start]);
+            meter.push(&chunk[start..end]);
+            after.extend_from_slice(&chunk[end..]);
+            at += len;
+            ControlFlow::Continue(())
+        },
+    )?;
+    Ok(meter.into_parts(&after))
+}
+
+/// What a render mixes.
+#[derive(Clone, Copy)]
+enum Mix<'a> {
+    Timeline(&'a Timeline),
+    /// A normalization's input.
+    Measured(&'a LevelAnalysis<'a>),
+}
+
+impl Mix<'_> {
+    fn collect(
+        self,
+        project: &Project,
+        source: &mut impl AudioSource,
+        range: Range<u64>,
+    ) -> MixSnapshot {
+        let (rate, channels) = (PROJECT_SAMPLE_RATE, PROJECT_CHANNELS);
+        match self {
+            Mix::Timeline(timeline) => {
+                MixSnapshot::from_timeline_range(project, timeline, rate, channels, source, range)
+            }
+            Mix::Measured(analysis) => analysis.snapshot(source, Some(range)),
+        }
+    }
+}
+
+fn render(
+    project: &Project,
+    mix: Mix,
+    range: Range<u64>,
+    levels: &mut LevelCache,
     mut sink: impl FnMut(&[f32]) -> ControlFlow<()>,
 ) -> Result<(), ExportError> {
     let ch = PROJECT_CHANNELS as usize;
-    // Until the analyses stream (plan step 3), a normalizing timeline is
-    // collected once, whole.
-    let collect_frames = if normalizes(timeline) {
-        (range.end - range.start).max(1)
-    } else {
-        CHUNK_FRAMES
-    };
-    let mut audio = StreamingAudio::default();
+    let mut audio = StreamingAudio::new(levels);
     let mut state: Option<MixState> = None;
     let mut out = Vec::new();
     let mut at = range.start;
     while at < range.end {
-        let collected = at..(at + collect_frames).min(range.end);
-        let last = collected.end == range.end;
-        let snapshot = audio.snapshot(project, timeline, collected.clone(), last)?;
+        let chunk = at..(at + CHUNK_FRAMES).min(range.end);
+        let last = chunk.end == range.end;
+        let snapshot = audio.snapshot(project, mix, chunk.clone(), last)?;
         let mut next = MixState::new(&snapshot);
         if let Some(previous) = &state {
             next.continue_from(previous);
         }
         let state = state.insert(next);
-        let mut from = collected.start;
-        while from < collected.end {
-            let frames = (collected.end - from).min(CHUNK_FRAMES);
-            out.resize(frames as usize * ch, 0.0);
-            mix_range_from(&snapshot, state, from, &mut out);
-            if sink(&out).is_break() {
-                return Ok(());
-            }
-            from += frames;
+        out.resize((chunk.end - chunk.start) as usize * ch, 0.0);
+        mix_range_from(&snapshot, state, chunk.start, &mut out);
+        if sink(&out).is_break() {
+            return Ok(());
         }
-        at = collected.end;
+        at = chunk.end;
     }
     Ok(())
+}
+
+/// Measured segments by key, kept in memory and in
+/// `$XDG_CACHE_HOME/venturi/levels`.
+#[derive(Default)]
+pub struct LevelCache {
+    parts: HashMap<u64, LevelParts>,
+    dir: Option<PathBuf>,
+    /// Segments rendered, not found.
+    pub rendered: usize,
+}
+
+impl LevelCache {
+    pub fn on_disk() -> Self {
+        Self {
+            dir: Some(vv_media::cache_dir("levels")),
+            ..Self::default()
+        }
+    }
+
+    fn path(&self, key: u64) -> Option<PathBuf> {
+        Some(self.dir.as_ref()?.join(format!("{key:016x}.level")))
+    }
+
+    fn get(&mut self, key: u64) -> Option<LevelParts> {
+        if let Some(part) = self.parts.get(&key) {
+            return Some(part.clone());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(self.path(key)?)
+            .and_then(|mut file| file.read_to_end(&mut bytes))
+            .ok()?;
+        let part = decode_parts(&bytes)?;
+        self.parts.insert(key, part.clone());
+        Some(part)
+    }
+
+    fn put(&mut self, key: u64, part: &LevelParts) {
+        self.rendered += 1;
+        self.parts.insert(key, part.clone());
+        let Some(path) = self.path(key) else {
+            return;
+        };
+        // Best effort: without it the level is measured again next time.
+        let written = std::fs::create_dir_all(path.parent().unwrap_or(&path)).and_then(|()| {
+            let tmp = path.with_extension("tmp");
+            std::fs::File::create(&tmp)?.write_all(&encode_parts(part))?;
+            std::fs::rename(&tmp, &path)
+        });
+        if let Err(e) = written {
+            eprintln!("[levels] {}: {e}", path.display());
+        }
+    }
+}
+
+const PARTS_MAGIC: &[u8; 4] = b"VVLV";
+const PARTS_VERSION: u32 = 1;
+
+fn encode_parts(part: &LevelParts) -> Vec<u8> {
+    let mut bytes = PARTS_MAGIC.to_vec();
+    bytes.extend_from_slice(&PARTS_VERSION.to_le_bytes());
+    match part {
+        LevelParts::Peak(peak) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&peak.to_le_bytes());
+        }
+        LevelParts::Loudness {
+            segment_frames,
+            segments,
+            tail,
+        } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(*segment_frames as u64).to_le_bytes());
+            bytes.extend_from_slice(&(segments.len() as u64).to_le_bytes());
+            for energy in segments {
+                bytes.extend_from_slice(&energy.to_le_bytes());
+            }
+            bytes.extend_from_slice(&tail.0.to_le_bytes());
+            bytes.extend_from_slice(&(tail.1 as u64).to_le_bytes());
+        }
+    }
+    bytes
+}
+
+/// `None` for anything but a file of this version, whole.
+fn decode_parts(bytes: &[u8]) -> Option<LevelParts> {
+    let rest = bytes.strip_prefix(PARTS_MAGIC)?;
+    let (version, rest) = rest.split_first_chunk::<4>()?;
+    if u32::from_le_bytes(*version) != PARTS_VERSION {
+        return None;
+    }
+    let (&kind, mut rest) = rest.split_first()?;
+    let mut u64_at = || {
+        let (value, tail) = rest.split_first_chunk::<8>()?;
+        rest = tail;
+        Some(*value)
+    };
+    match kind {
+        0 => {
+            let peak = bytes.get(9..13)?.try_into().ok()?;
+            (bytes.len() == 13).then(|| LevelParts::Peak(f32::from_le_bytes(peak)))
+        }
+        1 => {
+            let segment_frames = u64::from_le_bytes(u64_at()?) as usize;
+            let count = u64::from_le_bytes(u64_at()?);
+            let segments = (0..count)
+                .map(|_| u64_at().map(f64::from_le_bytes))
+                .collect::<Option<Vec<f64>>>()?;
+            let energy = f64::from_le_bytes(u64_at()?);
+            let frames = u64::from_le_bytes(u64_at()?) as usize;
+            u64_at().is_none().then_some(LevelParts::Loudness {
+                segment_frames,
+                segments,
+                tail: (energy, frames),
+            })
+        }
+        _ => None,
+    }
 }
 
 type WindowKey = (PathBuf, usize, Range<u64>);
 
 /// The sources of the chunk being rendered, and what the next one may
 /// read again.
-#[derive(Default)]
-struct StreamingAudio {
+struct StreamingAudio<'c> {
     readers: Vec<Reader>,
     /// Audio streams of each file.
     streams: HashMap<PathBuf, usize>,
@@ -90,35 +289,40 @@ struct StreamingAudio {
     /// by media and content.
     compounds: HashMap<(MediaId, u64), Arc<Vec<f32>>>,
     stretched: HashMap<u64, SampleBlocks>,
-    /// By `LevelAnalysis::key`: a nested normalization is asked again by
-    /// every chunk its compound clip plays in.
+    /// By `LevelAnalysis::key`: a normalization is asked again by every
+    /// chunk.
     levels: HashMap<u64, f32>,
+    cache: &'c mut LevelCache,
 }
 
-impl StreamingAudio {
+impl<'c> StreamingAudio<'c> {
+    fn new(cache: &'c mut LevelCache) -> Self {
+        Self {
+            readers: Vec::new(),
+            streams: HashMap::new(),
+            windows: HashMap::new(),
+            compounds: HashMap::new(),
+            stretched: HashMap::new(),
+            levels: HashMap::new(),
+            cache,
+        }
+    }
+
     /// Twice through the timeline: once to learn the windows the chunk
     /// reads, once with them decoded. `last`: no chunk follows, so nothing
     /// is kept for one.
     fn snapshot(
         &mut self,
         project: &Project,
-        timeline: &Timeline,
+        mix: Mix,
         range: Range<u64>,
         last: bool,
     ) -> Result<MixSnapshot, ExportError> {
-        let (rate, channels) = (PROJECT_SAMPLE_RATE, PROJECT_CHANNELS);
         let mut wanted = Wanted {
             windows: HashSet::new(),
             compounds: &self.compounds,
         };
-        MixSnapshot::from_timeline_range(
-            project,
-            timeline,
-            rate,
-            channels,
-            &mut wanted,
-            range.clone(),
-        );
+        mix.collect(project, &mut wanted, range.clone());
         let windows = wanted.windows;
         self.load(windows, last)?;
         let mut provider = Provider {
@@ -127,14 +331,7 @@ impl StreamingAudio {
             stretched_used: HashSet::new(),
             levels_used: HashSet::new(),
         };
-        let snapshot = MixSnapshot::from_timeline_range(
-            project,
-            timeline,
-            rate,
-            channels,
-            &mut provider,
-            range,
-        );
+        let snapshot = mix.collect(project, &mut provider, range);
         let Provider {
             compounds_used,
             stretched_used,
@@ -239,16 +436,21 @@ impl AudioSource for Wanted<'_> {
     fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
         self.compounds.get(&(media_id, content_hash)).cloned()
     }
+
+    /// Measured apart, not from these windows.
+    fn level(&mut self, _: LevelAnalysis) -> LevelReading {
+        LevelReading::Pending(None)
+    }
 }
 
-struct Provider<'a> {
-    audio: &'a mut StreamingAudio,
+struct Provider<'a, 'c> {
+    audio: &'a mut StreamingAudio<'c>,
     compounds_used: HashSet<(MediaId, u64)>,
     stretched_used: HashSet<u64>,
     levels_used: HashSet<u64>,
 }
 
-impl AudioSource for Provider<'_> {
+impl AudioSource for Provider<'_, '_> {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
         self.file_frames(path, stream, 0..u64::MAX, 0)
     }
@@ -302,11 +504,15 @@ impl AudioSource for Provider<'_> {
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
         let key = analysis.key();
         self.levels_used.insert(key);
-        let level = *self
-            .audio
-            .levels
-            .entry(key)
-            .or_insert_with(|| analysis.run());
+        if let Some(level) = self.audio.levels.get(&key) {
+            return LevelReading::Ready(*level);
+        }
+        // Unity gain rather than a failed render.
+        let level = measure_level(&analysis, self.audio.cache).unwrap_or_else(|e| {
+            eprintln!("[levels] {e}");
+            0.0
+        });
+        self.audio.levels.insert(key, level);
         LevelReading::Ready(level)
     }
 }

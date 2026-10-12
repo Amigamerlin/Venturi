@@ -524,10 +524,12 @@ fn settle(
         cache.begin_pass();
         let snapshot = MixSnapshot::from_timeline(project, parent, 48_000, 1, cache);
         cache.sweep_unused();
+        cache.send_level_jobs(project);
         if !cache.has_pending() {
             cache.begin_pass();
             let snapshot = MixSnapshot::from_timeline(project, parent, 48_000, 1, cache);
             cache.sweep_unused();
+            cache.send_level_jobs(project);
             if !cache.has_pending() {
                 return snapshot;
             }
@@ -553,6 +555,29 @@ fn a_compound_mixed_live_plays_as_over_whole_files() {
     vv_audio::mixer::mix_range(&snapshot, 0, &mut got);
     vv_audio::mixer::mix_range(&reference, 0, &mut want);
     assert_eq!(got, want);
+}
+
+/// Over budget the preview holds part of the audio: the level is measured
+/// from the files all the same (it used to wait for all of it, forever).
+#[test]
+fn a_master_normalization_is_measured_over_budget() {
+    let path = sine_wav("normalized_over_budget.wav", 6);
+    let (project, _, mut parent) = compound_project(&path, 6);
+    parent.master.effects = vec![vv_core::AudioEffect::new(
+        vv_core::AudioEffectKind::Normalize {
+            target_db: 0.0,
+            mode: vv_core::NormalizeMode::SamplePeak,
+            set_level: vv_core::SetLevel::Relative,
+        },
+    )];
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    cache.set_budget_bytes(BLOCK_FRAMES as usize * 4);
+    let snapshot = settle(&mut cache, &project, &parent);
+    assert!(cache.over_budget());
+    let vv_audio::mixer::Insert::Gain(gain) = snapshot.master.inserts[0] else {
+        panic!("{:?}", snapshot.master.inserts);
+    };
+    assert!(gain > 1.01, "measured: {gain}");
 }
 
 fn job(id: u64, path: &str, stream: usize, blocks: Range<u64>, plays_at: u64) -> DecodeJob {

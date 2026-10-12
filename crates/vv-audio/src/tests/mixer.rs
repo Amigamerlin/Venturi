@@ -4,9 +4,11 @@ use vv_core::{Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track
 
 const RATE: u32 = 100;
 
+/// Ids unique like a project's: a clip measured alone is found by its id.
 fn clip_at(media: vv_core::MediaId, start: FrameIdx, source_in: FrameIdx, len: FrameIdx) -> Clip {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Clip::from_source_range(
-        ClipId(0),
+        ClipId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
         ClipSource::Media(media),
         source_in,
         source_in + len,
@@ -674,6 +676,7 @@ fn db_to_linear_matches_known_reference_points() {
 
 fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
     MixClip {
+        clip: ClipId(0),
         start: 0,
         len: 1000,
         source_offset: 0,
@@ -946,7 +949,7 @@ impl AudioSource for LevelByStart {
     }
 
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
-        let start = analysis.snapshot.clips[0].start;
+        let start = analysis.segments[0].frames.start;
         let level = self.0.iter().find(|(s, _)| *s == start).map(|(_, l)| *l);
         LevelReading::Ready(level.unwrap())
     }
@@ -1274,7 +1277,7 @@ fn a_range_mix_reads_only_its_frames_and_matches_the_whole_mix() {
 }
 
 #[test]
-fn a_range_mix_reads_whole_clips_for_a_normalization() {
+fn a_range_mix_of_a_normalizing_timeline_reads_only_its_frames() {
     let (project, _, b) = project();
     let mut tl = timeline(vec![audio_track(vec![clip_at(b, 0, 0, 50)])]);
     tl.master.effects.push(vv_core::AudioEffect {
@@ -1291,7 +1294,35 @@ fn a_range_mix_reads_whole_clips_for_a_normalization() {
     mix_range(&snap, 100, &mut out);
 
     assert_eq!(out, render(&project, &tl, 100, 50));
-    assert_eq!(source.asked[0].1.start, 0);
+    let ClipInput::Blocks(buffer) = &snap.clips[0].input else {
+        panic!("a file clip");
+    };
+    assert!(buffer.start() >= 100, "its level is measured apart");
+}
+
+/// `Windowed`, its levels measured elsewhere: what it is asked for is what
+/// the mix reads.
+#[derive(Default)]
+struct MeasuredApart(Windowed);
+
+impl AudioSource for MeasuredApart {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.0.file(path, stream)
+    }
+
+    fn file_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: std::ops::Range<u64>,
+        plays_at: u64,
+    ) -> ClipAudio {
+        self.0.file_frames(path, stream, frames, plays_at)
+    }
+
+    fn level(&mut self, _: LevelAnalysis) -> LevelReading {
+        LevelReading::Ready(0.5)
+    }
 }
 
 /// Audio still decoding, counting the measures asked for.
@@ -1311,21 +1342,19 @@ impl AudioSource for PartialLevels {
     }
 }
 
+/// The level is measured from the files, not from what is decoded yet.
 #[test]
-fn a_normalization_waits_for_its_audio_to_be_decoded_before_measuring() {
+fn a_normalization_is_measured_while_its_audio_decodes() {
     let (project, a, _) = project();
     let mut track = audio_track(vec![clip_at(a, 0, 0, 5)]);
     track.mix.effects = vec![normalize(0.0)];
     let tl = timeline(vec![track]);
     let mut source = PartialLevels::default();
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
-    assert_eq!(
-        source.measured, 0,
-        "a part of the audio would measure wrong"
-    );
+    assert_eq!(source.measured, 1);
     let mut out = vec![9.0; 50];
     mix_range(&snap, 0, &mut out);
-    assert!(out.iter().all(|&s| s == 0.5), "unity gain meanwhile");
+    assert!(out.iter().all(|&s| s == 2.0), "0.5 at four times 0.25");
 }
 
 /// `project()` plus a compound clip whose nested timeline plays the ramp
@@ -1464,20 +1493,18 @@ fn a_new_snapshot_carries_on_a_compounds_effects() {
 }
 
 #[test]
-fn a_compound_whose_timeline_normalizes_reads_all_of_it() {
+fn a_compound_whose_timeline_normalizes_reads_only_what_plays() {
     let (mut project, compound) = project_with_long_compound();
     let nested = project.media_pool[compound].compound.unwrap();
     project.timelines[nested].master.effects = vec![normalize(0.0)];
     let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 60)])]);
-    let mut source = Windowed::default();
+    let mut source = MeasuredApart::default();
     MixSnapshot::from_timeline_range(&project, &tl, RATE, 1, &mut source, 300..310);
     let ramp = source
+        .0
         .asked
         .iter()
         .find(|(path, _)| path.as_os_str() == "b.wav");
     let frames = &ramp.unwrap().1;
-    assert!(
-        frames.start == 100 && frames.end >= 700,
-        "a part would measure only itself: {frames:?}"
-    );
+    assert!(frames.end - frames.start < 50, "{frames:?}");
 }

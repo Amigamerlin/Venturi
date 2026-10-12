@@ -36,12 +36,109 @@ impl LevelMeter {
     /// Linear, so that a target over it is the gain: a loudness of L LUFS
     /// reads `10^(L/20)`. Silence reads 0.
     pub fn finish(self) -> f32 {
+        LevelParts::merge(&[self.into_parts(&[])])
+    }
+
+    /// The signal before the part measured: it sets the filters' state and
+    /// what the true peak interpolates from, without being measured.
+    pub fn warm_up(&mut self, samples: &[f32]) {
+        match &mut self.kind {
+            Kind::SamplePeak(_) => {}
+            Kind::TruePeak(meter) => {
+                let keep = ((LOOKAHEAD - 1) * meter.channels).min(samples.len());
+                meter.pending.clear();
+                meter
+                    .pending
+                    .extend_from_slice(&samples[samples.len() - keep..]);
+            }
+            Kind::Loudness(meter) => {
+                let (energy, frames, segments) = (meter.energy, meter.frames, meter.segments.len());
+                meter.push(samples);
+                meter.segments.truncate(segments);
+                (meter.energy, meter.frames) = (energy, frames);
+            }
+        }
+    }
+
+    /// What `finish` reads, kept apart so that the measures of consecutive
+    /// parts of one signal merge into the measure of all of it. `after`: the
+    /// signal after the part (`LOOKAHEAD_FRAMES` of it), interpolated across
+    /// the edge instead of silence.
+    pub fn into_parts(self, after: &[f32]) -> LevelParts {
         match self.kind {
-            Kind::SamplePeak(peak) => peak,
-            Kind::TruePeak(meter) => meter.finish(),
-            Kind::Loudness(meter) => meter
-                .finish()
-                .map_or(0.0, |lufs| 10f64.powf(lufs / 20.0) as f32),
+            Kind::SamplePeak(peak) => LevelParts::Peak(peak),
+            Kind::TruePeak(mut meter) if !after.is_empty() => {
+                meter.push(after);
+                LevelParts::Peak(meter.peak)
+            }
+            Kind::TruePeak(meter) => LevelParts::Peak(meter.finish()),
+            Kind::Loudness(meter) => LevelParts::Loudness {
+                segment_frames: meter.segment_frames,
+                segments: meter.segments,
+                tail: (meter.energy, meter.frames),
+            },
+        }
+    }
+}
+
+/// A level measured over one part of a signal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LevelParts {
+    /// Sample or true peak. A true peak measured in parts misses what the
+    /// interpolation sees across their edges.
+    Peak(f32),
+    /// The weighted energy of each 100 ms segment, and of the frames after
+    /// the last one. Merged, a part's tail counts as one more segment of the
+    /// same power: the gating blocks shift by less than a segment at each
+    /// edge.
+    Loudness {
+        segment_frames: usize,
+        segments: Vec<f64>,
+        tail: (f64, usize),
+    },
+}
+
+impl LevelParts {
+    /// The level of the parts in order, as `LevelMeter::finish` reads it.
+    /// Parts of different modes are not merged: the first one's wins.
+    pub fn merge(parts: &[LevelParts]) -> f32 {
+        let Some(first) = parts.first() else {
+            return 0.0;
+        };
+        match first {
+            LevelParts::Peak(_) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    LevelParts::Peak(peak) => Some(*peak),
+                    LevelParts::Loudness { .. } => None,
+                })
+                .fold(0.0, f32::max),
+            &LevelParts::Loudness { segment_frames, .. } => {
+                let loudness: Vec<(&[f64], (f64, usize))> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        LevelParts::Loudness { segments, tail, .. } => {
+                            Some((segments.as_slice(), *tail))
+                        }
+                        LevelParts::Peak(_) => None,
+                    })
+                    .collect();
+                let mut segments = Vec::new();
+                for (i, (part, tail)) in loudness.iter().enumerate() {
+                    segments.extend_from_slice(part);
+                    // At its own power, as if a whole segment.
+                    if i + 1 < loudness.len() && tail.1 > 0 {
+                        segments.push(tail.0 * segment_frames as f64 / tail.1 as f64);
+                    }
+                }
+                let last_tail = loudness.last().map_or((0.0, 0), |(_, tail)| *tail);
+                let frames = loudness
+                    .iter()
+                    .map(|(part, tail)| part.len() * segment_frames + tail.1)
+                    .sum();
+                gated_loudness(&segments, segment_frames, last_tail.0, frames)
+                    .map_or(0.0, |lufs| 10f64.powf(lufs / 20.0) as f32)
+            }
         }
     }
 }
@@ -51,6 +148,9 @@ const OVERSAMPLING: usize = 4;
 const TAPS: usize = 12;
 /// Frames of the window after the one being interpolated.
 const LOOKAHEAD: usize = TAPS / 2;
+/// The signal around a part that its measure reads (`LevelMeter::warm_up`,
+/// `LevelMeter::into_parts`).
+pub const LOOKAHEAD_FRAMES: u64 = LOOKAHEAD as u64;
 
 struct TruePeak {
     channels: usize,
@@ -177,35 +277,36 @@ impl Loudness {
             }
         }
     }
+}
 
-    /// `None` for silence.
-    fn finish(self) -> Option<f64> {
-        let block_frames = (self.segment_frames * SEGMENTS_PER_BLOCK) as f64;
-        let mut blocks: Vec<f64> = self
-            .segments
-            .windows(SEGMENTS_PER_BLOCK)
-            .map(|w| w.iter().sum::<f64>() / block_frames)
-            .collect();
-        // Shorter than a block: the whole of it is the one block.
-        if blocks.is_empty() {
-            let frames = self.segments.len() * self.segment_frames + self.frames;
-            if frames > 0 {
-                let energy = self.segments.iter().sum::<f64>() + self.energy;
-                blocks.push(energy / frames as f64);
-            }
-        }
-        let loudness = |mean_square: f64| -0.691 + 10.0 * mean_square.log10();
-        let gated_mean = |gate: f64| {
-            let above: Vec<f64> = blocks
-                .iter()
-                .copied()
-                .filter(|&b| b > 0.0 && loudness(b) > gate)
-                .collect();
-            (!above.is_empty()).then(|| above.iter().sum::<f64>() / above.len() as f64)
-        };
-        let relative_gate = loudness(gated_mean(ABSOLUTE_GATE_LUFS)?) + RELATIVE_GATE_LU;
-        gated_mean(relative_gate.max(ABSOLUTE_GATE_LUFS)).map(loudness)
+/// Integrated loudness of the 100 ms `segments` followed by `tail_energy`,
+/// `frames` long in all; `None` for silence.
+fn gated_loudness(
+    segments: &[f64],
+    segment_frames: usize,
+    tail_energy: f64,
+    frames: usize,
+) -> Option<f64> {
+    let block_frames = (segment_frames * SEGMENTS_PER_BLOCK) as f64;
+    let mut blocks: Vec<f64> = segments
+        .windows(SEGMENTS_PER_BLOCK)
+        .map(|w| w.iter().sum::<f64>() / block_frames)
+        .collect();
+    // Shorter than a block: the whole of it is the one block.
+    if blocks.is_empty() && frames > 0 {
+        blocks.push((segments.iter().sum::<f64>() + tail_energy) / frames as f64);
     }
+    let loudness = |mean_square: f64| -0.691 + 10.0 * mean_square.log10();
+    let gated_mean = |gate: f64| {
+        let above: Vec<f64> = blocks
+            .iter()
+            .copied()
+            .filter(|&b| b > 0.0 && loudness(b) > gate)
+            .collect();
+        (!above.is_empty()).then(|| above.iter().sum::<f64>() / above.len() as f64)
+    };
+    let relative_gate = loudness(gated_mean(ABSOLUTE_GATE_LUFS)?) + RELATIVE_GATE_LU;
+    gated_mean(relative_gate.max(ABSOLUTE_GATE_LUFS)).map(loudness)
 }
 
 /// Direct form I.

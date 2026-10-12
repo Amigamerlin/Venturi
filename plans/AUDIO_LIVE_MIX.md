@@ -2,7 +2,7 @@
 
 **Status:** chosen over [AUDIO_GRAPH.md](AUDIO_GRAPH.md) (2026-10-12),
 which keeps the diagnosis (its §1) and the current state (its §1.3, §2).
-Steps 0–2 implemented (§4).
+Steps 0–3 implemented (§4).
 
 **Goal:** remove the known limits of the preview audio and the memory of
 the export without a generic node graph: the existing `MixSnapshot` stays
@@ -325,6 +325,33 @@ the code it replaces and the runtime measurement of AUDIO_GRAPH §9.
    normalization); a master normalization measured on the reference
    project at a 256 MB budget (today never); a ripple delete re-measures
    only the touched segments; reopening reads levels from disk.
+   *Done*, with these choices:
+   - `LevelAnalysis` (`vv-audio/src/levels.rs`) describes the measure
+     (project, timeline, `Measured { channel, insert, clip }`, mode) and
+     its segments, built from the model, not from decoded audio: no
+     `Readiness` gate, no need for the timeline to be collected whole, so
+     a normalizing timeline renders in chunks like any other.
+     `MixSnapshot::measured` collects a timeline stopped before the
+     measured effect (the `stop_before` of §3.2).
+   - Segment keys: FNV-1a (`StableHasher`, pinned by a test), the clips
+     playing with their position relative to the segment, their source
+     (`content_hash` + stream, or the nested timeline's key) and every
+     field that shapes them, the track's resolved chain and bus (master
+     measures), the chain before the measure. With an effect that keeps a
+     state, or a compound clip, before the measure: a 2 s preroll and the
+     previous segment's content in the key.
+   - Each segment is rendered with 0.25 s of warm-up (loudness filters,
+     true-peak interpolation) and a few frames after; that context is not
+     in the key, an approximation at the edges only. A part's loudness
+     tail merges as one more 100 ms segment at its own power. Tested: merged
+     parts within 0.1 dB of the whole, sample peak exact.
+   - Preview: misses queue an owned analysis; `send_level_jobs` copies the
+     project once per pass that has any, the level worker measures with
+     the disk cache.
+   Reference project, whole master timeline audio: peak RSS 0.89 → 0.13
+   GB. Cold (no cached level): 20 s, 101 segments (the master's and the
+   nested normalization of chapter "09-cc"); warm: 6 s, none; a clip's gain
+   edited inside a chapter: 2 segments measured again.
 4. **Stretch on the offline render**, compounds included.
 5. **Reverse**: read mapping for file clips, materialized for compounds.
    Acceptance: a reversed clip equals the reversed samples of the forward

@@ -251,6 +251,11 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
 - Preview and export use the same `mix_range`: export mixes to 2 channels,
   preview to the device's native channels (asking for others makes PipeWire
   insert a remix that adds latency).
+- **Export** (`vv-session/src/audio_render.rs`, `render_offline`): the mix
+  rendered start to end in chunks with the effects' state carried across
+  them; each file decoded by seeking on its own thread, blocked on a bounded
+  channel so it decodes only as far as the render reads, and freed behind
+  it. Memory does not grow with the timeline's length.
 - **Preview** (`vv-app/src/timeline_audio.rs`, `TimelineAudio`): a single
   `cpal` stream opened at startup and never reopened (`vv_audio::Mixer`).
   The UI thread builds an immutable snapshot of the clips (`MixSnapshot`,
@@ -264,10 +269,12 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   all their queued jobs), the job closest to the playhead first, within a
   budget that keeps the blocks closest to it (Settings > Playback > Audio
   cache, 1 GB by default; the toolbar shows "Audio cache full" when the
-  timeline's audio does not fit). Compound clips are mixed
-  by block with a 2 s preroll (whole when their timeline normalizes). A
-  missing block plays as silence. Redesign planned in
-  [plans/AUDIO_GRAPH.md](plans/AUDIO_GRAPH.md).
+  timeline's audio does not fit). A missing block plays as silence.
+- **Compound clips** are mixed live in the same pass as their parent
+  (`ClipInput::Nested`): the mix state is a tree, each compound clip with
+  its own effects' state, carried across snapshots by track and clip id. A
+  pitch-corrected one still stretches its whole mixdown. Design in
+  [plans/AUDIO_LIVE_MIX.md](plans/AUDIO_LIVE_MIX.md).
 - **Channel strips**: every audio track and the timeline master have a
   `ChannelStrip` (gain, pan, an insert chain before the fader): 6-band
   equalizer, 3-band multiband compressor, mono and normalization. The mix is
@@ -275,9 +282,14 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
 - **Normalization**: brings a channel to a target measured as sample peak,
   true peak (BS.1770) or integrated loudness (EBU R128); per clip
   (`SetLevel::Independent`) or one gain for all the clips of the track
-  (`Relative`). The levels are measured off the audio thread by the level
-  worker in `mix_buffers.rs` (`LevelAnalysis`); until a level is ready the
-  last one keeps playing.
+  (`Relative`). A `LevelAnalysis` describes what to measure (the strip up
+  to the effect, `vv_audio::levels`), cut into segments at the edit points
+  of its input, each keyed by its content in its own time; the segments are
+  rendered from the files like the export (`measure_level`), never from the
+  preview's buffers, cached in memory and in `$XDG_CACHE_HOME/venturi/levels`,
+  and merged. An edit measures again only the segments it touches, a ripple
+  none. In the preview the level worker of `mix_buffers.rs` measures them;
+  until a level is ready the last one keeps playing.
 - **Clip speed with pitch correction**: the clip's source range is stretched
   with `rubberband` by a third `mix_buffers` worker, silent until ready;
   synchronous on export.

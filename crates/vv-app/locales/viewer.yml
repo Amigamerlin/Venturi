@@ -16,8 +16,8 @@ toolbar.audio_budget:
   en: "Audio cache full"
   it: "Cache audio piena"
 toolbar.audio_budget_hint:
-  en: "The timeline's audio does not fit the audio cache: only the audio around the playhead is kept, the rest is decoded again when needed. Effects that measure a whole track or timeline (Normalize) may not be applied in the preview, and a compound clip that normalizes inside may play silent. Raise the audio cache in Settings > Playback. Export is not affected."
-  it: "L'audio della timeline non entra nella cache audio: si tiene solo l'audio intorno alla testina, il resto viene ridecodificato quando serve. Gli effetti che misurano un'intera traccia o timeline (Normalizzazione) potrebbero non essere applicati nell'anteprima, e un compound clip che normalizza al suo interno potrebbe restare muto. Aumenta la cache audio in Impostazioni > Playback. L'export non ne risente."
+  en: "The timeline's audio does not fit the audio cache: only the audio around the playhead is kept, the rest is decoded again when needed, so after a jump the audio may take a moment to start. Raise the audio cache in Settings > Playback. Export is not affected."
+  it: "L'audio della timeline non entra nella cache audio: si tiene solo l'audio intorno alla testina, il resto viene ridecodificato quando serve, quindi dopo un salto l'audio può metterci un attimo a partire. Aumenta la cache audio in Impostazioni > Playback. L'export non ne risente."
 toolbar.mcp_connected:
   en: "An AI agent is connected (MCP)"
   it: "Un agente AI è collegato (MCP)"

@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use vv_audio::{
     AnalysisSlot, AudioSource, BLOCK_FRAMES, ClipAudio, LevelAnalysis, LevelReading, SampleBlocks,
 };
-use vv_core::MediaId;
+use vv_audio::{LevelSegment, Measured};
+use vv_core::{MediaId, NormalizeMode, Project, Timeline};
+use vv_session::audio_render::{LevelCache, measure_level};
 
 use crate::worker::Worker;
 
@@ -40,9 +42,36 @@ enum Stretch {
     Failed,
 }
 
-struct LevelJob {
+/// A `LevelAnalysis` owning what it borrows, but the project: one copy of
+/// it serves every analysis a pass asks for (`send_level_jobs`).
+struct OwnedAnalysis {
     key: u64,
-    analysis: LevelAnalysis,
+    slot: Option<AnalysisSlot>,
+    timeline: Timeline,
+    measured: Measured,
+    mode: NormalizeMode,
+    format: (u32, u16),
+    segments: Vec<LevelSegment>,
+}
+
+impl OwnedAnalysis {
+    fn analysis<'a>(&'a self, project: &'a Project) -> LevelAnalysis<'a> {
+        LevelAnalysis {
+            slot: self.slot,
+            project,
+            timeline: &self.timeline,
+            measured: self.measured,
+            mode: self.mode,
+            sample_rate: self.format.0,
+            channels: self.format.1,
+            segments: self.segments.clone(),
+        }
+    }
+}
+
+struct LevelJob {
+    project: Arc<Project>,
+    analysis: OwnedAnalysis,
 }
 
 /// `None`: dropped for a newer job of the same slot.
@@ -159,6 +188,7 @@ pub struct MixBufferCache {
     levels: HashMap<u64, Option<f32>>,
     last_level: HashMap<AnalysisSlot, f32>,
     level_used: HashSet<u64>,
+    queued_levels: Vec<OwnedAnalysis>,
     level_worker: Worker<LevelJob>,
     level_rx: mpsc::Receiver<LevelResult>,
 }
@@ -216,6 +246,7 @@ impl MixBufferCache {
         });
         let (level_tx, level_rx) = mpsc::channel::<LevelResult>();
         let level_worker = Worker::spawn(move |jobs: mpsc::Receiver<LevelJob>| {
+            let mut cache = LevelCache::on_disk();
             while let Ok(first) = jobs.recv() {
                 let mut batch = vec![first];
                 // A drag queues one job per frame: only the newest of each
@@ -225,7 +256,7 @@ impl MixBufferCache {
                     let older =
                         slot.and_then(|s| batch.iter().position(|j| j.analysis.slot == Some(s)));
                     if let Some(older) = older {
-                        let dropped = std::mem::replace(&mut batch[older], job);
+                        let dropped = std::mem::replace(&mut batch[older], job).analysis;
                         if level_tx.send((dropped.key, slot, None)).is_err() {
                             return;
                         }
@@ -233,10 +264,15 @@ impl MixBufferCache {
                         batch.push(job);
                     }
                 }
-                for job in batch {
-                    let level = job.analysis.run();
+                for LevelJob { project, analysis } in batch {
+                    // Unity gain rather than a failed measure.
+                    let level = measure_level(&analysis.analysis(&project), &mut cache)
+                        .unwrap_or_else(|e| {
+                            eprintln!("[mix_buffers] level: {e}");
+                            0.0
+                        });
                     if level_tx
-                        .send((job.key, job.analysis.slot, Some(level)))
+                        .send((analysis.key, analysis.slot, Some(level)))
                         .is_err()
                     {
                         return;
@@ -269,6 +305,7 @@ impl MixBufferCache {
             levels: HashMap::new(),
             last_level: HashMap::new(),
             level_used: HashSet::new(),
+            queued_levels: Vec::new(),
             level_worker,
             level_rx,
         }
@@ -282,7 +319,7 @@ impl MixBufferCache {
     }
 
     /// The mix reads more than the budget holds: only the blocks closest to
-    /// the playhead are kept, and what measures a whole timeline cannot.
+    /// the playhead are kept.
     pub fn over_budget(&self) -> bool {
         self.over_budget
     }
@@ -613,10 +650,26 @@ impl MixBufferCache {
         changed
     }
 
+    /// Hands the levels the pass asked for to the worker, with a copy of
+    /// `project` to render them from.
+    pub fn send_level_jobs(&mut self, project: &Project) {
+        if self.queued_levels.is_empty() {
+            return;
+        }
+        let project = Arc::new(project.clone());
+        for analysis in self.queued_levels.drain(..) {
+            self.level_worker.send(LevelJob {
+                project: project.clone(),
+                analysis,
+            });
+        }
+    }
+
     #[cfg(test)]
     pub fn has_pending(&mut self) -> bool {
         self.poll();
         self.streams.values().any(|stream| !stream.jobs.is_empty())
+            || self.levels.values().any(Option::is_none)
     }
 }
 
@@ -682,10 +735,6 @@ impl AudioSource for MixBufferCache {
         ClipAudio::Pending
     }
 
-    fn last_level(&mut self, slot: AnalysisSlot) -> Option<f32> {
-        self.last_level.get(&slot).copied()
-    }
-
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
         let key = analysis.key();
         self.level_used.insert(key);
@@ -696,7 +745,15 @@ impl AudioSource for MixBufferCache {
             Some(Some(level)) => LevelReading::Ready(*level),
             Some(None) => LevelReading::Pending(last),
             None => {
-                self.level_worker.send(LevelJob { key, analysis });
+                self.queued_levels.push(OwnedAnalysis {
+                    key,
+                    slot: analysis.slot,
+                    timeline: analysis.timeline.clone(),
+                    measured: analysis.measured,
+                    mode: analysis.mode,
+                    format: (analysis.sample_rate, analysis.channels),
+                    segments: analysis.segments,
+                });
                 self.levels.insert(key, None);
                 LevelReading::Pending(last)
             }
