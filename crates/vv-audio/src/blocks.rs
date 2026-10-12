@@ -2,7 +2,6 @@
 //! a long file is decoded, published and freed a block at a time, never
 //! copied whole.
 
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -100,10 +99,16 @@ impl SampleBlocks {
         let mut frame = range.start;
         while frame < to {
             let frames = match self.run(frame) {
-                Run::Samples(samples) => {
+                Run::Samples(samples) if samples.len() >= self.channels => {
                     let frames = ((samples.len() / self.channels) as u64).min(to - frame);
                     out.extend_from_slice(&samples[..frames as usize * self.channels]);
                     frames
+                }
+                // Less than a frame left in a block cut mid-frame: one frame
+                // of silence, or the loop would stall.
+                Run::Samples(_) => {
+                    out.resize(out.len() + self.channels, 0.0);
+                    1
                 }
                 Run::Silence(frames) => {
                     let frames = frames.min(to - frame);
@@ -131,14 +136,6 @@ impl SampleBlocks {
         let first = ((from - self.start) / self.block_frames) as usize;
         let last = ((to - 1 - self.start) / self.block_frames) as usize;
         (first..=last).all(|index| self.blocks.get(index).is_some_and(Option::is_some))
-    }
-
-    /// Same blocks over the same frames, same identity.
-    pub fn hash_identity(&self, state: &mut impl Hasher) {
-        (self.start, self.end, self.block_frames).hash(state);
-        for block in &self.blocks {
-            block.as_ref().map(|b| Arc::as_ptr(b) as usize).hash(state);
-        }
     }
 }
 

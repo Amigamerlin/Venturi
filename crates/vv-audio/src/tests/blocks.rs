@@ -57,3 +57,16 @@ fn holds_tells_whether_the_blocks_of_a_range_are_there() {
     assert!(!blocks.holds(10..14));
     assert!(blocks.holds(16..30), "past the end nothing is missing");
 }
+
+/// No producer cuts a block mid-frame today; `to_vec` used to loop forever
+/// on one.
+#[test]
+fn a_block_cut_mid_frame_reads_its_last_frame_as_silence() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let cut = SampleBlocks::new(0, 2, 2, vec![Some(Arc::new(vec![1.0, 2.0, 3.0]))], 2);
+        let _ = tx.send(cut.to_vec(0..2));
+    });
+    let read = rx.recv_timeout(std::time::Duration::from_secs(5));
+    assert_eq!(read, Ok(vec![1.0, 2.0, 0.0, 0.0]));
+}
