@@ -3,8 +3,9 @@
 Open items from the review of the `audio-blocks` branch (2026-10-12).
 Fixed: items 1–4 of that review (level-measure deadlock, decode priority,
 compound fade-out, stale on-disk levels), timestamp gaps, seeking in
-resampled files, stale stretch jobs, the shutdown wait and the fast
-forward's thread per frame.
+resampled files, stale stretch jobs, the shutdown wait, the fast
+forward's thread per frame, an export that kept encoding after its audio
+mix failed, the per-run test fixture dirs and the unclamped audio budget.
 
 ## Audio: correctness
 
@@ -33,7 +34,7 @@ forward's thread per frame.
   `eprintln`. A `recv` error in the export reader reads as end of file.
 - **Weak seek anchor**: when none of the first `MAX_ORIGIN_PACKETS` packets
   gives two frames, the fallback anchor ignores priming and pre-skip (off by
-  up to a frame). Log it at least.
+  up to a frame). Only logged.
 
 ## Audio: performance
 
@@ -52,8 +53,6 @@ forward's thread per frame.
 
 - `rebalance` counts wanted blocks, not bytes held: a job kept for one
   block inserts all 8. Stretched clips are not counted.
-- `audio_budget_mb` is not clamped when read from the settings file: 0
-  plays the timeline silent.
 
 ## Audio: cleanup
 
@@ -65,9 +64,9 @@ forward's thread per frame.
 
 ## Audio: tests
 
-- Seek tests have no multi-stream or VBR MP3 case, and share a fixed
-  fixture dir between concurrent runs.
-- `stretch_bench_window` is timing-based and flaky under load.
+- Seek tests have no multi-stream or VBR MP3 case.
+- `stretch_bench_window` is timing-based, so `#[ignore]`d: run it by hand
+  with `--ignored` after touching the stretcher.
 
 ## Audio: behaviour to keep in mind
 

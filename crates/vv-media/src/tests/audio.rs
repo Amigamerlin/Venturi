@@ -4,7 +4,7 @@ use super::*;
 /// with "Input changed".
 #[test]
 fn decode_audio_track_handles_unspecified_channel_layout() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("pcm_unknown_layout.mkv");
 
@@ -31,7 +31,7 @@ fn decode_audio_track_handles_unspecified_channel_layout() {
 
 #[test]
 fn decode_audio_track_reads_correct_length_and_is_not_silent() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sample.mp4");
 
@@ -67,7 +67,7 @@ fn decode_audio_track_reads_correct_length_and_is_not_silent() {
 
 #[test]
 fn streaming_decode_resamples_continuously_in_many_chunks() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("streaming_44k.wav");
     crate::test_support::ffmpeg(
@@ -107,7 +107,7 @@ fn streaming_decode_resamples_continuously_in_many_chunks() {
 
 #[test]
 fn streaming_decode_stops_when_the_callback_breaks() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("streaming_break.wav");
     crate::test_support::ffmpeg(
@@ -131,7 +131,7 @@ fn streaming_decode_stops_when_the_callback_breaks() {
 
 #[test]
 fn streaming_decode_delivers_every_requested_stream_in_one_pass() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("streaming_three.mkv");
     crate::test_support::ffmpeg(
@@ -197,7 +197,7 @@ fn streaming_decode_delivers_every_requested_stream_in_one_pass() {
 /// without spectral analysis.
 #[test]
 fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("two_streams.mp4");
 
@@ -250,7 +250,7 @@ fn test_file(
     output_args: &[&str],
     with_video: bool,
 ) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("vv-media-seek-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-seek-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     let mut args = vec!["-f", "lavfi", "-i", source];

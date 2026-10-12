@@ -437,7 +437,7 @@ pub fn export_timeline(
         let mut audio = audio_mix
             .is_some()
             .then(|| AudioInterleaver::new(timeline, range.start, audio_rx));
-        for frame in range.clone() {
+        let encoded = range.clone().try_for_each(|frame| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ExportError::Cancelled);
             }
@@ -460,12 +460,15 @@ pub fn export_timeline(
             if p.startup.is_none() {
                 p.startup = Some(p.elapsed);
             }
-        }
+            Ok(())
+        });
         drop(audio);
-        match audio_mix {
+        let mixed = match audio_mix {
             Some(handle) => handle.join().expect("audio mix thread panicked"),
             None => Ok(()),
-        }
+        };
+        // A mix that failed stops the encoder too: its error is the cause.
+        mixed.and(encoded)
     })?;
 
     encoder.finish().map_err(ExportError::failed)?;
@@ -583,7 +586,7 @@ impl AudioInterleaver {
     }
 
     /// Writes the samples up to the start of `frame` (exclusive), waiting
-    /// for the mix to get there; less if it stopped before.
+    /// for the mix to get there.
     fn write_until(
         &mut self,
         encoder: &mut vv_media::Encoder,
@@ -594,7 +597,7 @@ impl AudioInterleaver {
         while self.written < end {
             if self.taken == self.chunk.len() {
                 let Ok(chunk) = self.chunks.recv() else {
-                    return Ok(());
+                    return Err(ExportError::failed("the audio mix stopped early"));
                 };
                 self.chunk = chunk;
                 self.taken = 0;

@@ -446,6 +446,10 @@ fn seek(
         let stream = ictx.stream(*index).ok_or(ffmpeg::Error::StreamNotFound)?;
         let mut fresh = StreamDecoder::open(&stream, out_rate)?;
         fresh.anchor = anchor(frames).or_else(|| {
+            eprintln!(
+                "audio seek: no anchor frames in stream {index}, \
+                 placing from its start time (may be off by up to a frame)"
+            );
             Some(Anchor {
                 ts: stream.start_time().max(0),
                 position: 0,
