@@ -275,7 +275,7 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   never out of sync.
 - **Compound clips** are mixed live in the same pass as their parent
   (`ClipInput::Nested`): the mix state is a tree, each compound clip with
-  its own effects' state, carried across snapshots by track and clip id.
+  its own effects' state, carried across snapshots by clip id.
   Design in
   [plans/AUDIO_LIVE_MIX.md](plans/AUDIO_LIVE_MIX.md).
 - **Channel strips**: every audio track and the timeline master have a

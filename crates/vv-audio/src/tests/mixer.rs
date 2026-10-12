@@ -1466,6 +1466,30 @@ fn a_new_snapshot_carries_on_a_compounds_effects() {
     assert_eq!(first, whole);
 }
 
+/// A track inserted above it moves the compound to another track index:
+/// its compressor carries on all the same.
+#[test]
+fn a_compound_moved_to_another_track_carries_on_its_effects() {
+    let (project, compound) = project_with_long_compound();
+    let clip = clip_at(compound, 0, 0, 60);
+    let before = timeline(vec![audio_track(vec![clip.clone()])]);
+    let after = timeline(vec![audio_track(Vec::new()), audio_track(vec![clip])]);
+    let next = MixSnapshot::from_timeline(&project, &after, RATE, 1, &mut buffers);
+    let mut whole = vec![0.0; 600];
+    mix_range(&next, 0, &mut whole);
+
+    let snap = MixSnapshot::from_timeline(&project, &before, RATE, 1, &mut buffers);
+    let mut state = MixState::new(&snap);
+    let mut first = vec![0.0; 250];
+    mix_range_from(&snap, &mut state, 0, &mut first);
+    let mut next_state = MixState::new(&next);
+    next_state.continue_from(&state);
+    let mut second = vec![0.0; 350];
+    mix_range_from(&next, &mut next_state, 250, &mut second);
+    first.extend(second);
+    assert_eq!(first, whole);
+}
+
 #[test]
 fn a_compound_whose_timeline_normalizes_reads_only_what_plays() {
     let (mut project, compound) = project_with_long_compound();

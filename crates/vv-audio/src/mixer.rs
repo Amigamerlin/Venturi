@@ -603,8 +603,9 @@ impl MixState {
 /// The live mix of a compound clip: its timeline's state, and the frames
 /// rendered last, which a varispeed read interpolates across calls.
 struct NestedState {
-    /// Track and clip, to find it again in the next snapshot.
-    key: (usize, ClipId),
+    /// To find it again in the next snapshot. Unique in the project: not
+    /// with the track, which a move or a track inserted above changes.
+    key: ClipId,
     state: MixState,
     rendered: Vec<f32>,
     /// Nested frame of `rendered[0]`.
@@ -618,7 +619,7 @@ impl NestedState {
         // What one mixer block reads, so the callback never allocates.
         let frames = (MIX_BLOCK_FRAMES as f64 * clip.step).ceil() as usize + clip.step as usize + 3;
         Self {
-            key: (clip.track, clip.clip),
+            key: clip.clip,
             state: MixState::new(&nested.mix),
             rendered: Vec::with_capacity(frames * ch),
             from: 0,

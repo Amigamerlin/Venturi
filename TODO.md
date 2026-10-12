@@ -71,8 +71,10 @@ forward's thread per frame.
 
 ## Audio: behaviour to keep in mind
 
-- Nested effect state is matched by (track, clip id): moving a compound
-  clip to another track restarts its compressor/EQ (possible click).
+- A track's effect state passes to the next snapshot by track index
+  (already on master): inserting, deleting or reordering a track while
+  playing hands each track below the state of the one that was at its
+  index, for a moment. Tracks have no stable id to match them by.
 - After a seek into a compound clip its nested compressor starts from
   silence (master ran it from the compound's start).
 - Split level-measure runs restart effect state with a 2 s preroll: the

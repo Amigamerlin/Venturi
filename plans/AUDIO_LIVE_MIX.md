@@ -117,8 +117,9 @@ pub enum ClipInput {
   scratch buffers in `MixState::new` (the callback does not allocate).
   The same compound used twice is two uses with two states: its effects
   run once per use, as they would on two real tracks. `continue_from`
-  matches nested states by `(track, clip id)`, so an edit elsewhere does
-  not restart a compound's compressor; `MixClip` gains the clip id.
+  matches nested states by clip id, unique in the project, so an edit
+  elsewhere, a move to another track or a track inserted above does not
+  restart a compound's compressor; `MixClip` gains the clip id.
 - Normalizations inside the compound resolve like those of the outer
   timeline (§3.3): the nested snapshot carries their gains as `Insert`s.
 - Cycles: `MAX_COMPOUND_DEPTH` stays; past it the clip is silent, as
