@@ -274,7 +274,7 @@ impl MixBufferCache {
         let stretch_busy = Arc::new(AtomicUsize::new(0));
         let worker_stretch_busy = stretch_busy.clone();
         let stretch_worker = Worker::spawn(move |jobs: mpsc::Receiver<StretchJob>| {
-            let mut cache = LevelCache::on_disk();
+            let mut cache = worker_levels();
             cache.threads = 1;
             for StretchJob { project, stretch } in jobs {
                 cache.cancel = Some(stretch.cancelled.clone());
@@ -297,7 +297,7 @@ impl MixBufferCache {
         let worker_closing = closing.clone();
         let level_worker = Worker::spawn(move |jobs: mpsc::Receiver<LevelJob>| {
             // Half the cores: the playback's decodes need the rest.
-            let mut cache = LevelCache::on_disk();
+            let mut cache = worker_levels();
             cache.threads = cache.threads.div_ceil(2);
             cache.cancel = Some(worker_closing.clone());
             while let Ok(first) = jobs.recv() {
@@ -763,6 +763,15 @@ impl MixBufferCache {
                 .stretched
                 .values()
                 .any(|stretch| matches!(stretch, Stretch::Pending(_)))
+    }
+}
+
+/// In memory in this crate's tests: they would fill the user's cache.
+fn worker_levels() -> LevelCache {
+    if cfg!(test) {
+        LevelCache::default()
+    } else {
+        LevelCache::on_disk()
     }
 }
 

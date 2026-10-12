@@ -401,9 +401,10 @@ impl Default for LevelCache {
 }
 
 impl LevelCache {
+    /// In memory in this crate's tests: they would fill the user's cache.
     pub fn on_disk() -> Self {
         Self {
-            dir: Some(vv_media::cache_dir("levels")),
+            dir: (!cfg!(test)).then(|| vv_media::cache_dir("levels")),
             ..Self::default()
         }
     }

@@ -77,8 +77,6 @@ forward's thread per frame.
 
 - Seek tests have no multi-stream or VBR MP3 case, and share a fixed
   fixture dir between concurrent runs.
-- `export::mix_audio_track` uses `LevelCache::on_disk()`: tests write to the
-  real cache dir, with fixtures sharing `content_hash: 1`.
 - `stretch_bench_window` is timing-based and flaky under load.
 
 ## Audio: behaviour to keep in mind
