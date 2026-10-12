@@ -37,6 +37,25 @@ const UNKNOWN_FPS: Rational = Rational::new(30, 1);
 /// conforming it to CFR outweighs the smoothness gained.
 const MAX_MEASURED_FPS: i32 = 120;
 
+/// `best(Video)` without the cover art: an audio file with an embedded
+/// picture (MP3, WAV, FLAC...) has a one-frame video stream, and taking it
+/// for the media's video cut the audio to that one frame.
+pub(crate) fn video_stream(
+    input: &ffmpeg::format::context::Input,
+) -> Option<ffmpeg::format::stream::Stream<'_>> {
+    let is_picture = |stream: &ffmpeg::format::stream::Stream| {
+        stream.parameters().medium() != ffmpeg::media::Type::Video
+            || stream
+                .disposition()
+                .contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC)
+    };
+    input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .filter(|stream| !is_picture(stream))
+        .or_else(|| input.streams().find(|stream| !is_picture(stream)))
+}
+
 /// The rate at which the media is decoded and indexed. `r_frame_rate` is
 /// the finest tick the stream can express, not its real rate: phone screen
 /// captures declare 90000 there, so it is only believed when plausible.
@@ -91,7 +110,7 @@ fn measured_peak_fps(path: &Path) -> Option<Rational> {
 
 fn packet_times(path: &Path) -> Option<Vec<f64>> {
     let mut input = ffmpeg::format::input(&path).ok()?;
-    let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+    let stream = video_stream(&input)?;
     let stream_index = stream.index();
     let time_base = seconds_per_tick(stream.time_base());
     let mut times: Vec<f64> = input
@@ -142,7 +161,7 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
 
-    let video = match input.streams().best(ffmpeg::media::Type::Video) {
+    let video = match video_stream(&input) {
         Some(video) => {
             let fps = media_fps(path, &video);
             let decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())?
@@ -229,7 +248,7 @@ fn scan_tail(path: &Path, fps: Rational, nominal: i64) -> Option<(f64, f64)> {
     let nominal_secs = nominal as f64 / fps.as_f64();
     for seek_secs in [(nominal_secs - SAFETY_MARGIN_SECS).max(0.0), 0.0] {
         let mut input = ffmpeg::format::input(&path).ok()?;
-        let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+        let stream = video_stream(&input)?;
         let stream_index = stream.index();
         let time_base = seconds_per_tick(stream.time_base());
         let ts = (seek_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
@@ -265,7 +284,7 @@ fn scan_tail(path: &Path, fps: Rational, nominal: i64) -> Option<(f64, f64)> {
 /// the pixels.
 fn decode_from(path: &Path, from_secs: f64) -> Option<f64> {
     let mut input = ffmpeg::format::input(&path).ok()?;
-    let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+    let stream = video_stream(&input)?;
     let stream_index = stream.index();
     let time_base = seconds_per_tick(stream.time_base());
     let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
@@ -357,12 +376,7 @@ pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
 }
 
 fn file_info(path: &Path, input: &ffmpeg::format::context::Input) -> MediaFileInfo {
-    let codec_of = |kind| {
-        input
-            .streams()
-            .best(kind)
-            .map(|s| s.parameters().id().name().to_owned())
-    };
+    let codec_name = |s: &ffmpeg::format::stream::Stream| s.parameters().id().name().to_owned();
     let audio = input.streams().best(ffmpeg::media::Type::Audio);
     let tag = |keys: &[&str]| {
         let find = |dict: ffmpeg::DictionaryRef| {
@@ -377,8 +391,8 @@ fn file_info(path: &Path, input: &ffmpeg::format::context::Input) -> MediaFileIn
     };
     MediaFileInfo {
         size_bytes: std::fs::metadata(path).ok().map(|m| m.len()),
-        video_codec: codec_of(ffmpeg::media::Type::Video),
-        audio_codec: codec_of(ffmpeg::media::Type::Audio),
+        video_codec: video_stream(input).as_ref().map(codec_name),
+        audio_codec: audio.as_ref().map(codec_name),
         title: tag(&["title"]),
         artist: tag(&["artist", "author", "album_artist"]),
     }

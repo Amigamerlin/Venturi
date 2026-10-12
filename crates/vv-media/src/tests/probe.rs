@@ -184,6 +184,53 @@ fn probe_accepts_an_audio_only_file() {
 }
 
 #[test]
+fn probe_takes_an_audio_file_with_cover_art_for_audio_only() {
+    let dir = std::env::temp_dir().join("vv-media-probe-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cover = dir.join("cover.jpg");
+    crate::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=64x64",
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+        ],
+        &cover,
+    );
+    let path = dir.join("tone-with-cover.flac");
+    crate::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=2",
+            "-i",
+            cover.to_str().unwrap(),
+            "-map",
+            "0",
+            "-map",
+            "1",
+            "-c:v",
+            "copy",
+            "-disposition:v",
+            "attached_pic",
+        ],
+        &path,
+    );
+
+    let meta = probe(&path).expect("probe failed");
+    assert!(!meta.has_video);
+    assert!(meta.has_audio);
+    assert_eq!(meta.fps, AUDIO_ONLY_FPS);
+    assert_eq!(meta.duration_frames, 60, "2 s at nominal fps");
+    assert_eq!(meta.file.video_codec, None);
+}
+
+#[test]
 fn probe_image_reads_dimensions_and_reports_the_image_sentinel() {
     let dir = std::env::temp_dir().join("vv-media-probe-test");
     std::fs::create_dir_all(&dir).unwrap();

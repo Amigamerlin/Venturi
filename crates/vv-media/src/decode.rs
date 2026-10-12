@@ -6,7 +6,6 @@
 //! (scaling does not change them), with a resolution heuristic if missing.
 
 use ffmpeg::format::Pixel;
-use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::util::color;
 use ffmpeg_next as ffmpeg;
@@ -158,9 +157,7 @@ impl Decoder {
         crate::probe::ensure_init();
 
         let ictx = ffmpeg::format::input(&path)?;
-        let video_stream = ictx
-            .streams()
-            .best(Type::Video)
+        let video_stream = crate::probe::video_stream(&ictx)
             .ok_or_else(|| crate::MediaError::NoStream(path.display().to_string()))?;
         let video_stream_index = video_stream.index();
         let time_base = video_stream.time_base();
