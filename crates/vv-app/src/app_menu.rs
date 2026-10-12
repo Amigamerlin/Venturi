@@ -464,6 +464,22 @@ impl VenturiApp {
                             self.apply_proxy_settings();
                             self.persist_settings();
                         }
+                        ui.menu_button(t!("menu.preview_resolution"), |ui| {
+                            for resolution in crate::settings::PreviewResolution::ALL {
+                                let label =
+                                    t!(format!("menu.preview_resolution_{}", resolution.id()));
+                                if ui
+                                    .radio(self.settings.preview_resolution == resolution, label)
+                                    .clicked()
+                                {
+                                    self.settings.preview_resolution = resolution;
+                                    self.persist_settings();
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(t!("menu.preview_resolution_hint"));
                         if ui.button(t!("menu.playback_settings")).clicked() {
                             self.open_settings(settings_dialog::Section::Playback);
                             ui.close();

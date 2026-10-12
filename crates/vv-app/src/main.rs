@@ -1605,7 +1605,7 @@ impl VenturiApp {
 
     /// The frame the viewer composes `layers` into: at the resolution of the
     /// largest decoded frame, widened to the aspect of the timeline so the
-    /// bars show without upscaling. With SolidColor clips only, at the
+    /// bars show without upscaling, and capped by the preview resolution. With SolidColor clips only, at the
     /// timeline's resolution; empty, a tiny black frame of its aspect.
     fn viewer_output(&self, layers: &[frame_provider::OwnedLayer]) -> vv_render::OutputFrame {
         let video_size = layers
@@ -1625,6 +1625,7 @@ impl VenturiApp {
                 let timeline_size = timeline_size.unwrap_or(size);
                 let (out_w, out_h) = vv_render::fit_output_size(size, timeline_size);
                 vv_render::OutputFrame::scaled(out_w, out_h, timeline_size)
+                    .reduced(self.settings.preview_resolution.divisor())
             }
             None => {
                 let (w, h) = timeline_size.unwrap_or((16, 9));
@@ -1828,7 +1829,8 @@ impl VenturiApp {
                 Some((left, right, _)) if left.id == clip.id || right.id == clip.id => 2,
                 _ => 1,
             };
-            let mut provider = frame_provider::GpuCompounds::new(render_ahead, &self.compositor);
+            let mut provider = frame_provider::GpuCompounds::new(render_ahead, &self.compositor)
+                .with_preview_divisor(self.settings.preview_resolution.divisor());
             let track_layers = frame_provider::track_layers_at(
                 &self.session.project,
                 timeline,

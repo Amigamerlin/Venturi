@@ -186,6 +186,7 @@ pub struct GpuCompounds<'a> {
     inner: &'a mut dyn FrameProvider,
     compositor: &'a vv_render::Compositor,
     depth: u32,
+    preview_divisor: u32,
 }
 
 impl<'a> GpuCompounds<'a> {
@@ -194,6 +195,16 @@ impl<'a> GpuCompounds<'a> {
             inner,
             compositor,
             depth: 0,
+            preview_divisor: 1,
+        }
+    }
+
+    /// Composes the compound clips at most at their resolution divided by
+    /// `divisor` (see `OutputFrame::reduced`).
+    pub fn with_preview_divisor(self, divisor: u32) -> Self {
+        Self {
+            preview_divisor: divisor,
+            ..self
         }
     }
 }
@@ -232,7 +243,7 @@ impl FrameProvider for GpuCompounds<'_> {
         Ok(Some(
             self.compositor.render_layers_to_owned_texture_transparent(
                 &render_layers,
-                vv_render::OutputFrame::exact(width, height),
+                vv_render::OutputFrame::exact(width, height).reduced(self.preview_divisor),
             ),
         ))
     }

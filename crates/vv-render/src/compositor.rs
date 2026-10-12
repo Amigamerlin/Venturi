@@ -311,6 +311,26 @@ impl OutputFrame {
             timeline_size,
         }
     }
+
+    /// No larger than the timeline divided by `divisor`, same aspect: a
+    /// cheaper preview on a weak GPU.
+    pub fn reduced(self, divisor: u32) -> Self {
+        let divisor = divisor.max(1);
+        let (max_w, max_h) = (
+            (self.timeline_size.0 / divisor).max(1),
+            (self.timeline_size.1 / divisor).max(1),
+        );
+        let factor =
+            (max_w as f64 / self.width.max(1) as f64).min(max_h as f64 / self.height.max(1) as f64);
+        if factor >= 1.0 {
+            return self;
+        }
+        Self {
+            width: ((self.width as f64 * factor).round() as u32).max(1),
+            height: ((self.height as f64 * factor).round() as u32).max(1),
+            ..self
+        }
+    }
 }
 
 #[repr(C)]

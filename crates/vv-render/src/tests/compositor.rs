@@ -1090,6 +1090,26 @@ fn fit_output_size_wraps_the_source_in_the_requested_aspect() {
 }
 
 #[test]
+fn a_reduced_output_fits_the_divided_timeline_with_its_aspect() {
+    let full = OutputFrame::scaled(1920, 1080, (1920, 1080));
+    assert_eq!(full.reduced(1), full);
+    assert_eq!(full.reduced(2), OutputFrame::scaled(960, 540, (1920, 1080)));
+    // A proxy already smaller than the limit is left alone.
+    let proxy = OutputFrame::scaled(640, 360, (1920, 1080));
+    assert_eq!(proxy.reduced(2), proxy);
+    assert_eq!(
+        proxy.reduced(4),
+        OutputFrame::scaled(480, 270, (1920, 1080))
+    );
+    // Widened to a vertical timeline: the height is the limit.
+    let vertical = OutputFrame::scaled(1080, 1920, (1080, 1920));
+    assert_eq!(
+        vertical.reduced(4),
+        OutputFrame::scaled(270, 480, (1080, 1920))
+    );
+}
+
+#[test]
 fn output_size_can_differ_from_input_size() {
     let compositor = Compositor::new_headless();
     let input = solid_frame(4, 4, 1, 2, 3, ColorMatrix::Bt601, true);

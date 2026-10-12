@@ -539,6 +539,7 @@ pub struct Settings {
     /// long-GOP sources. Export always uses the originals.
     pub proxy_enabled: bool,
     pub proxy_quality: ProxyQuality,
+    pub preview_resolution: PreviewResolution,
     /// Seconds buffered ahead of/behind the playhead.
     pub lookahead_secs: f64,
     pub behind_secs: f64,
@@ -568,6 +569,41 @@ pub struct Settings {
     pub mcp_enabled: bool,
 }
 
+/// Largest size the editor composes at, as a fraction of the timeline's
+/// resolution. Export always composes at full resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewResolution {
+    #[default]
+    Full,
+    Half,
+    Quarter,
+}
+
+impl PreviewResolution {
+    pub const ALL: [PreviewResolution; 3] = [Self::Full, Self::Half, Self::Quarter];
+
+    /// Key in the settings file: must never be changed.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Half => "half",
+            Self::Quarter => "quarter",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.id() == id)
+    }
+
+    pub fn divisor(self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Half => 2,
+            Self::Quarter => 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preset<P> {
     pub name: String,
@@ -583,6 +619,7 @@ impl Default for Settings {
             kinetic_scroll_media_pool: true,
             proxy_enabled: false,
             proxy_quality: ProxyQuality::default(),
+            preview_resolution: PreviewResolution::default(),
             lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: crate::render_ahead::DEFAULT_BEHIND_SECS,
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
@@ -636,6 +673,8 @@ struct SettingsFile {
     use_proxies: Option<bool>,
     #[serde(default)]
     proxy_quality: Option<String>,
+    #[serde(default)]
+    preview_resolution: Option<String>,
     #[serde(default)]
     lookahead_secs: Option<f64>,
     #[serde(default)]
@@ -731,6 +770,11 @@ impl Settings {
             .proxy_quality
             .as_deref()
             .and_then(ProxyQuality::from_id)
+            .unwrap_or_default();
+        settings.preview_resolution = file
+            .preview_resolution
+            .as_deref()
+            .and_then(PreviewResolution::from_id)
             .unwrap_or_default();
         settings.lookahead_secs = file.lookahead_secs.unwrap_or(settings.lookahead_secs);
         settings.behind_secs = file.behind_secs.unwrap_or(settings.behind_secs);
@@ -829,6 +873,7 @@ impl Settings {
             kinetic_scroll_media_pool: Some(self.kinetic_scroll_media_pool),
             use_proxies: Some(self.proxy_enabled),
             proxy_quality: Some(self.proxy_quality.id().to_owned()),
+            preview_resolution: Some(self.preview_resolution.id().to_owned()),
             lookahead_secs: Some(self.lookahead_secs),
             behind_secs: Some(self.behind_secs),
             cache_budget_mb: Some((self.cache_budget_bytes / 1_000_000) as u32),

@@ -176,6 +176,26 @@ menu.use_proxy_hint:
   en: "Preview/edit from a low-resolution copy generated in the background instead of the source: much smoother scrubbing on long sources. Export is never affected, it always uses the original sources. Turn off for work that needs full quality."
   it: "Anteprima/editing da una copia a bassa risoluzione generata in background invece che dal sorgente: scrub molto più fluido su sorgenti lunghi. L'export non è mai influenzato, usa sempre i sorgenti originali. Disattiva per lavori che richiedono la qualità piena."
 
+menu.preview_resolution:
+  en: "Preview resolution"
+  it: "Risoluzione anteprima"
+
+menu.preview_resolution_hint:
+  en: "Composes the viewer at a fraction of the timeline's resolution: smoother playback on weak graphics cards. Export always uses the full resolution."
+  it: "Compone il viewer a una frazione della risoluzione della timeline: playback più fluido sulle schede grafiche deboli. L'export usa sempre la risoluzione piena."
+
+menu.preview_resolution_full:
+  en: "Full"
+  it: "Piena"
+
+menu.preview_resolution_half:
+  en: "1/2"
+  it: "1/2"
+
+menu.preview_resolution_quarter:
+  en: "1/4"
+  it: "1/4"
+
 menu.playback_settings:
   en: "Playback settings..."
   it: "Impostazioni di playback..."

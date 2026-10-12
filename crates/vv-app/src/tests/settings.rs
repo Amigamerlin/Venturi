@@ -63,6 +63,7 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     settings.language = Language::Italian;
     settings.proxy_enabled = true;
     settings.proxy_quality = ProxyQuality::High;
+    settings.preview_resolution = PreviewResolution::Quarter;
     settings.lookahead_secs = 7.5;
     settings.behind_secs = 0.5;
     settings.cache_budget_bytes = 3_000_000_000;
@@ -93,6 +94,7 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     );
     assert!(!loaded.proxy_enabled);
     assert_eq!(loaded.proxy_quality, ProxyQuality::default());
+    assert_eq!(loaded.preview_resolution, PreviewResolution::Full);
     assert_eq!(
         loaded.cache_budget_bytes,
         Settings::default().cache_budget_bytes
