@@ -136,6 +136,53 @@ fn seeking_outside_the_window_restarts_fast_forward_from_there() {
     assert!(pos > 60.0 && pos < 63.0, "pos={pos}");
 }
 
+/// A click seeks a few times to the same place: the stretch already on its
+/// way from there is kept, not thrown away and started again.
+#[test]
+fn seeking_again_to_the_same_place_keeps_the_stretch_in_flight() {
+    let mut audio = TimelineAudio::new();
+    audio.play();
+    audio.request_speed(2.0);
+    wait_for_speed(&mut audio, 2.0);
+
+    let target = 60 * PROJECT_SAMPLE_RATE as u64;
+    audio.seek_sample(target);
+    let request = audio.stretch_request.expect("a window wanted from there");
+    assert!(request.new_window);
+    audio.seek_sample(target);
+    audio.seek_sample(target);
+    assert_eq!(audio.stretch_request.map(|r| r.id), Some(request.id));
+    assert_eq!(audio.restretch, None);
+}
+
+/// The first window is short to sound at once; the extensions double.
+#[test]
+fn fast_forward_windows_start_short_and_double() {
+    let mut audio = TimelineAudio::new();
+    audio.play();
+    audio.request_speed(2.0);
+
+    let mut sizes: Vec<u64> = Vec::new();
+    let started = Instant::now();
+    while sizes.last() != Some(&WINDOW_FRAMES) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "sizes={sizes:?}"
+        );
+        if let Some(request) = audio.stretch_request
+            && sizes.len() <= request.id as usize
+        {
+            sizes.push(request.frames);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+        audio.tick();
+    }
+    assert_eq!(
+        sizes,
+        [FIRST_WINDOW_FRAMES, 2 * FIRST_WINDOW_FRAMES, WINDOW_FRAMES]
+    );
+}
+
 #[test]
 fn a_superseded_stretch_result_is_discarded() {
     let mut audio = TimelineAudio::new();
@@ -342,6 +389,7 @@ fn a_failed_stretch_is_not_retried_every_frame() {
         id: audio.next_request_id,
         tempo: 2,
         start: audio.position_sample(),
+        frames: FIRST_WINDOW_FRAMES,
         new_window: false,
         complete: false,
     };

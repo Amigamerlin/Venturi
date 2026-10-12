@@ -23,6 +23,12 @@ const SCRUB_SNIPPET: Duration = Duration::from_millis(80);
 /// has an exact length and the queued windows do not drift.
 const WINDOW_FRAMES: u64 = 8 * PROJECT_SAMPLE_RATE as u64;
 
+/// A new window starts this short, and the next ones double up to
+/// `WINDOW_FRAMES`: after a jump the sound is back in ~80ms instead of the
+/// ~350ms of a whole window, and each extension still lands before the
+/// previous one has played, at 8x too.
+const FIRST_WINDOW_FRAMES: u64 = 2 * PROJECT_SAMPLE_RATE as u64;
+
 /// Unplayed audio below which the next window is queued: at 8x it is 0.5s
 /// real time against ~200ms of stretching.
 const EXTEND_MARGIN_FRAMES: u64 = 4 * PROJECT_SAMPLE_RATE as u64;
@@ -32,6 +38,7 @@ struct StretchRequest {
     id: u64,
     tempo: u64,
     start: u64,
+    frames: u64,
     /// `false`: extends the current window instead of replacing it.
     new_window: bool,
     /// All the audio it is stretched from was decoded (`MixSnapshot::is_ready`).
@@ -219,16 +226,17 @@ impl TimelineAudio {
             return;
         }
         if self.restretch.is_some()
-            || !self.window_complete && self.mix.is_ready(pos..pos + WINDOW_FRAMES)
+            || !self.window_complete && self.mix.is_ready(pos..pos + FIRST_WINDOW_FRAMES)
         {
             self.request_window(tempo, pos, true);
         }
     }
 
     /// A new window from `start`, or from where the playhead is once the
-    /// window in flight lands or playback resumes.
+    /// new window in flight lands or playback resumes. An extension in
+    /// flight is not waited for: the window it extends is being replaced.
     fn want_window(&mut self, tempo: u64, start: u64) {
-        if self.playing && self.stretch_request.is_none() {
+        if self.playing && self.stretch_request.is_none_or(|r| !r.new_window) {
             self.request_window(tempo, start, true);
         } else {
             self.restretch = Some(tempo);
@@ -315,8 +323,11 @@ impl TimelineAudio {
         self.stretch_failed = false;
 
         let channels = self.channels();
+        // A click seeks a few times to the same place: the window already
+        // wanted from there must not be thrown away and stretched again.
         if let Some(window) = &self.stretched
             && !(window.origin..window.covered_until(channels)).contains(&sample)
+            && !(window.chunks.is_empty() && window.origin == sample)
         {
             // Outside the window: restart from there. While waiting the clock
             // advances silently at the same speed, without reopening the stream.
@@ -395,12 +406,26 @@ impl TimelineAudio {
     }
 
     fn request_window(&mut self, tempo: u64, start: u64, new_window: bool) {
+        let channels = self.channels().max(1) as usize;
+        let last_chunk = self
+            .stretched
+            .as_ref()
+            .filter(|_| !new_window)
+            .and_then(|w| {
+                w.chunks
+                    .last()
+                    .map(|c| (c.len() / channels) as u64 * w.tempo)
+            });
+        let frames = last_chunk.map_or(FIRST_WINDOW_FRAMES, |last| {
+            (last * 2).clamp(FIRST_WINDOW_FRAMES, WINDOW_FRAMES)
+        });
         let request = StretchRequest {
             id: self.next_request_id,
             tempo,
             start,
+            frames,
             new_window,
-            complete: self.mix.is_ready(start..start + WINDOW_FRAMES),
+            complete: self.mix.is_ready(start..start + frames),
         };
         self.next_request_id += 1;
         self.stretch_request = Some(request);
@@ -412,9 +437,9 @@ impl TimelineAudio {
         let tx = self.stretch_tx.clone();
         std::thread::spawn(move || {
             let ch = mix.channels as usize;
-            let mut samples = vec![0.0; WINDOW_FRAMES as usize * ch];
+            let mut samples = vec![0.0; frames as usize * ch];
             mix_range(&mix, start, &mut samples);
-            let expected = (WINDOW_FRAMES / tempo) as usize * ch;
+            let expected = (frames / tempo) as usize * ch;
             let samples =
                 vv_audio::stretch_samples(&samples, mix.sample_rate, mix.channels, tempo as f64)
                     .map(|mut stretched| {
@@ -451,7 +476,7 @@ impl TimelineAudio {
             if request.new_window {
                 let pos = self.position_sample();
                 // While stretching, the playhead moved past it, or was moved.
-                if !(request.start..request.start + WINDOW_FRAMES).contains(&pos) {
+                if !(request.start..request.start + request.frames).contains(&pos) {
                     self.want_window(request.tempo, pos);
                     continue;
                 }
