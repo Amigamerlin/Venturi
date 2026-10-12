@@ -3983,6 +3983,9 @@ impl VenturiApp {
                             self.exit_to_timeline_stack_index(index);
                         }
                     }
+                    // A breadcrumb click switched timeline: drawing the one
+                    // left would spend the playhead reveal on it.
+                    let timeline_id = self.timeline_id.unwrap_or(timeline_id);
                     let labels: HashMap<MediaId, String> = self
                         .session
                         .project
