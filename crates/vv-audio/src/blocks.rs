@@ -121,6 +121,18 @@ impl SampleBlocks {
         out
     }
 
+    /// Every block holding the frames `range` is there; past `end` nothing
+    /// is missing.
+    pub fn holds(&self, range: Range<u64>) -> bool {
+        let (from, to) = (range.start.max(self.start), range.end.min(self.end));
+        if from >= to {
+            return true;
+        }
+        let first = ((from - self.start) / self.block_frames) as usize;
+        let last = ((to - 1 - self.start) / self.block_frames) as usize;
+        (first..=last).all(|index| self.blocks.get(index).is_some_and(Option::is_some))
+    }
+
     /// Same blocks over the same frames, same identity.
     pub fn hash_identity(&self, state: &mut impl Hasher) {
         (self.start, self.end, self.block_frames).hash(state);

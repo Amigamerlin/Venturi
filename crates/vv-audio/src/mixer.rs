@@ -475,6 +475,24 @@ impl MixSnapshot {
         .0
     }
 
+    /// Whether every clip playing in `range` has its audio there: a render
+    /// of it now equals the render once everything is decoded. The preview
+    /// hands in a clip still decoding as `ClipAudio::Partial`, even with no
+    /// block yet, for it to be seen here.
+    pub fn is_ready(&self, range: std::ops::Range<u64>) -> bool {
+        self.clips
+            .iter()
+            .filter(|clip| clip.start < range.end && clip.start + clip.len > range.start)
+            .all(|clip| {
+                let frames = range.start.max(clip.start)..range.end.min(clip.start + clip.len);
+                let read = nested_frames(clip, frames);
+                match &clip.input {
+                    ClipInput::Blocks(buffer) => buffer.holds(read),
+                    ClipInput::Nested(nested) => nested.mix.is_ready(read),
+                }
+            })
+    }
+
     fn track(&self, index: usize) -> &Channel {
         static UNITY: Channel = Channel::UNITY;
         self.tracks.get(index).unwrap_or(&UNITY)

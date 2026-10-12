@@ -344,7 +344,6 @@ impl MixBufferCache {
         }
     }
 
-
     /// Where the mix plays now, in samples of what is mixed.
     pub fn set_playhead(&mut self, sample: u64) {
         self.playhead.store(sample, Ordering::Relaxed);
@@ -469,9 +468,9 @@ impl MixBufferCache {
         let blocks: Vec<Option<Arc<Vec<f32>>>> = (first_block..last_block)
             .map(|index| entry.blocks.get(&index).cloned())
             .collect();
-        let present = blocks.iter().filter(|b| b.is_some()).count();
+
         let view_end = entry.end.unwrap_or(u64::MAX).min(last_block * BLOCK_FRAMES);
-        let complete = present == blocks.len();
+        let complete = blocks.iter().all(Option::is_some);
         let view = SampleBlocks::new(
             first_block * BLOCK_FRAMES,
             BLOCK_FRAMES,
@@ -479,12 +478,12 @@ impl MixBufferCache {
             blocks,
             view_end,
         );
+        // Even with no block yet: the clip stays in the snapshot, silent,
+        // and `MixSnapshot::is_ready` sees what it misses.
         if complete {
             ClipAudio::Ready(view)
-        } else if present > 0 {
-            ClipAudio::Partial(view)
         } else {
-            ClipAudio::Pending
+            ClipAudio::Partial(view)
         }
     }
 

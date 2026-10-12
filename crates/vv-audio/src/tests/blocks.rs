@@ -49,3 +49,11 @@ fn contiguous_is_one_block_from_its_start() {
     assert_eq!((blocks.start(), blocks.end()), (5, 8));
     assert_eq!(blocks.frame(7), Some(&[3.0][..]));
 }
+
+#[test]
+fn holds_tells_whether_the_blocks_of_a_range_are_there() {
+    let blocks = with_hole();
+    assert!(blocks.holds(8..12));
+    assert!(!blocks.holds(10..14));
+    assert!(blocks.holds(16..30), "past the end nothing is missing");
+}

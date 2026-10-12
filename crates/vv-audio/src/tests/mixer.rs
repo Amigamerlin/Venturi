@@ -1457,3 +1457,34 @@ fn a_compound_whose_timeline_normalizes_reads_only_what_plays() {
     let frames = &ramp.unwrap().1;
     assert!(frames.end - frames.start < 50, "{frames:?}");
 }
+
+/// What the fast forward asks before stretching a window: a render of it now
+/// equals the one once everything is decoded.
+#[test]
+fn a_snapshot_is_ready_where_its_clips_have_their_audio() {
+    let (mut project, a, b) = project();
+    let nested = project
+        .timelines
+        .insert(timeline(vec![audio_track(vec![clip_at(b, 0, 0, 10)])]));
+    let compound = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("Compound Clip 1"),
+        meta: project.media_pool[a].meta.clone(),
+        content_hash: 10,
+        compound: Some(nested),
+        folder: None,
+    });
+    let tl = timeline(vec![
+        audio_track(vec![clip_at(a, 0, 0, 10)]),
+        audio_track(vec![clip_at(b, 20, 0, 10), clip_at(compound, 40, 0, 10)]),
+    ]);
+    // `b.wav` still decoding, no block yet.
+    let mut source = |path: &Path, stream: usize| match path.to_str() {
+        Some("b.wav") => Some(SampleBlocks::new(0, 1000, 1, vec![None], 1000)),
+        _ => buffers(path, stream),
+    };
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert!(snap.is_ready(0..100));
+    assert!(!snap.is_ready(150..250), "b.wav");
+    assert!(!snap.is_ready(400..450), "b.wav inside the compound clip");
+    assert!(snap.is_ready(1000..2000), "nothing plays there");
+}

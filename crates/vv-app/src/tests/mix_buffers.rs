@@ -163,8 +163,10 @@ fn buffers_are_decoded_in_background_per_path_and_stream() {
 
     let mut cache = MixBufferCache::spawn(48_000, 2);
     let whole = 0..2 * SEC;
-    assert!(cache.media_frames(&path, 0, whole.clone()).is_none());
-    assert!(cache.media_frames(&path, 1, whole.clone()).is_none());
+    for stream in [0, 1] {
+        let decoding = cache.media_frames(&path, stream, whole.clone()).unwrap();
+        assert!(!decoding.holds(whole.clone()), "nothing decoded yet");
+    }
     wait_done(&mut cache);
 
     let s0 = cache
@@ -373,10 +375,10 @@ fn only_the_blocks_read_are_decoded_with_the_same_samples_as_the_whole_file() {
     let path = sine_wav("ranged.wav", 60);
     let mut cache = MixBufferCache::spawn(48_000, 1);
     let frames = 20 * SEC..25 * SEC;
-    assert!(matches!(
-        read(&mut cache, &path, frames.clone()),
-        ClipAudio::Pending
-    ));
+    let ClipAudio::Partial(decoding) = read(&mut cache, &path, frames.clone()) else {
+        panic!("still decoding");
+    };
+    assert!(!decoding.holds(frames.clone()));
     wait_done(&mut cache);
 
     let buffer = ready(&mut cache, &path, frames.clone());

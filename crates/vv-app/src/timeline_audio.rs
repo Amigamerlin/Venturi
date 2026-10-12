@@ -34,6 +34,8 @@ struct StretchRequest {
     start: u64,
     /// `false`: extends the current window instead of replacing it.
     new_window: bool,
+    /// All the audio it is stretched from was decoded (`MixSnapshot::is_ready`).
+    complete: bool,
 }
 
 struct StretchResult {
@@ -46,6 +48,8 @@ pub struct TimelineAudio {
     buffers: MixBufferCache,
     mix: Arc<MixSnapshot>,
     stretched: Option<StretchedWindow>,
+    /// Every chunk of `stretched` was stretched from complete audio.
+    window_complete: bool,
     playing: bool,
     /// Effective speed: a fast forward request applies only when its first
     /// window is ready.
@@ -76,6 +80,7 @@ impl TimelineAudio {
             buffers: MixBufferCache::spawn(PROJECT_SAMPLE_RATE, channels),
             mix: Arc::new(MixSnapshot::empty(PROJECT_SAMPLE_RATE, channels)),
             stretched: None,
+            window_complete: true,
             playing: false,
             speed: 1.0,
             wall_base_sample: 0,
@@ -94,7 +99,6 @@ impl TimelineAudio {
         self.buffers.set_budget_bytes(bytes);
     }
 
-
     fn channels(&self) -> u16 {
         self.mix.channels
     }
@@ -104,7 +108,8 @@ impl TimelineAudio {
     pub fn sync(&mut self, project: &Project, timeline_id: TimelineId, generation: u64) {
         self.buffers.set_playhead(self.position_sample());
         let buffers_arrived = self.buffers.poll();
-        if !buffers_arrived && self.synced == Some((timeline_id, generation)) {
+        let content_changed = self.synced != Some((timeline_id, generation));
+        if !buffers_arrived && !content_changed {
             return;
         }
         self.synced = Some((timeline_id, generation));
@@ -123,6 +128,7 @@ impl TimelineAudio {
         self.mix = Arc::new(mix);
         self.buffers.sweep_unused();
         self.buffers.send_jobs(project);
+        self.refresh_window(content_changed);
         self.publish();
     }
 
@@ -131,7 +137,8 @@ impl TimelineAudio {
     pub fn sync_media(&mut self, path: &Path, audio_streams: usize, fps: f64, duration_secs: f64) {
         self.buffers.set_playhead(self.position_sample());
         let buffers_arrived = self.buffers.poll();
-        if !buffers_arrived && self.synced_media.as_deref() == Some(path) {
+        let content_changed = self.synced_media.as_deref() != Some(path);
+        if !buffers_arrived && !content_changed {
             return;
         }
         self.synced_media = Some(path.to_path_buf());
@@ -172,7 +179,34 @@ impl TimelineAudio {
             Vec::new(),
             Channel::UNITY,
         ));
+        self.refresh_window(content_changed);
         self.publish();
+    }
+
+    /// After a new snapshot, the fast forward stretched from the old one may
+    /// be stale. Another timeline or an edit throws it away at once: it
+    /// would play the old audio. Audio that only arrived replaces a window
+    /// stretched while some of it was missing, once the snapshot has all of
+    /// it; meanwhile that window keeps playing.
+    fn refresh_window(&mut self, content_changed: bool) {
+        let tempo = match (&self.stretched, self.stretch_request) {
+            (_, Some(request)) if request.new_window => request.tempo,
+            (Some(window), _) => window.tempo,
+            (None, _) => return,
+        };
+        let pos = self.position_sample();
+        if !content_changed
+            && (self.window_complete
+                || self.stretch_request.is_some()
+                || !self.mix.is_ready(pos..pos + WINDOW_FRAMES))
+        {
+            return;
+        }
+        if content_changed && let Some(window) = &mut self.stretched {
+            window.origin = pos;
+            window.chunks.clear();
+        }
+        self.request_window(tempo, pos, true);
     }
 
     fn publish(&mut self) {
@@ -337,6 +371,7 @@ impl TimelineAudio {
             tempo,
             start,
             new_window,
+            complete: self.mix.is_ready(start..start + WINDOW_FRAMES),
         };
         self.next_request_id += 1;
         self.stretch_request = Some(request);
@@ -387,6 +422,7 @@ impl TimelineAudio {
                     origin: request.start,
                     chunks: vec![samples],
                 });
+                self.window_complete = request.complete;
                 self.speed = request.tempo as f64;
             } else {
                 let Some(window) = &mut self.stretched else {
@@ -397,6 +433,7 @@ impl TimelineAudio {
                     continue;
                 }
                 window.chunks.push(samples);
+                self.window_complete &= request.complete;
                 self.drop_played_chunks();
             }
             self.publish();
@@ -471,6 +508,8 @@ impl TimelineAudio {
             self.stop_scrub_snippet();
         }
         self.apply_stretch_results();
+        // A window may land incomplete after the snapshot that completes it.
+        self.refresh_window(false);
         self.extend_window_if_needed();
     }
 
