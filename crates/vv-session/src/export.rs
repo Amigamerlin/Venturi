@@ -9,13 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vv_core::{Clip, ClipId, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind};
+use vv_core::{Clip, ClipId, FrameIdx, Project, Timeline, TimelineId, TrackKind};
 
-use vv_audio::SampleBlocks;
-use vv_audio::mixer::{
-    AudioSource, ClipAudio, MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into,
-    timeline_frame_to_sample,
-};
+use vv_audio::mixer::{PROJECT_SAMPLE_RATE, timeline_frame_to_sample};
+
+use crate::audio_render::render_offline;
 
 use crate::frame_provider::{
     FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at,
@@ -23,6 +21,8 @@ use crate::frame_provider::{
 
 pub(crate) const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
+/// Mixed audio chunks (a few seconds each) ready ahead of the encoder.
+const AUDIO_AHEAD_CHUNKS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportSettings {
@@ -92,7 +92,7 @@ pub enum ExportError {
 }
 
 impl ExportError {
-    fn failed(e: impl std::fmt::Display) -> Self {
+    pub(crate) fn failed(e: impl std::fmt::Display) -> Self {
         Self::Failed(e.to_string())
     }
 }
@@ -367,9 +367,18 @@ pub fn export_timeline(
     }
     let compositor = &compositor;
     std::thread::scope(|scope| {
-        let mut audio_mix = has_audio_track.then(|| {
-            let range = range.clone();
-            scope.spawn(move || mix_audio_track(project, timeline, range))
+        let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(AUDIO_AHEAD_CHUNKS);
+        let audio_mix = has_audio_track.then(|| {
+            let samples = audio_samples(timeline, range.clone());
+            // Stops once the encoder side is gone.
+            scope.spawn(move || {
+                render_offline(project, timeline, samples, |chunk| {
+                    match audio_tx.send(chunk.to_vec()) {
+                        Ok(()) => ControlFlow::Continue(()),
+                        Err(_) => ControlFlow::Break(()),
+                    }
+                })
+            })
         });
 
         let decode_range = range.clone();
@@ -424,7 +433,9 @@ pub fn export_timeline(
         // The audio must be written along with the video: all of it after the video and
         // the muxer keeps the whole video in RAM and the interleaving becomes
         // quadratic (minutes on a timeline of a few minutes).
-        let mut audio = AudioInterleaver::new(timeline, range.start);
+        let mut audio = audio_mix
+            .is_some()
+            .then(|| AudioInterleaver::new(timeline, range.start, audio_rx));
         for frame in range.clone() {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ExportError::Cancelled);
@@ -437,10 +448,9 @@ pub fn export_timeline(
             encoder
                 .write_video_frame(&frame_i420)
                 .map_err(ExportError::failed)?;
-            if audio_mix.as_ref().is_some_and(|h| h.is_finished()) {
-                audio.mixed = Some(join_audio_mix(audio_mix.take())?);
+            if let Some(audio) = &mut audio {
+                audio.write_until(&mut encoder, frame + 1)?;
             }
-            audio.write_until(&mut encoder, frame + 1)?;
 
             let mut p = progress.lock().unwrap();
             p.encode.add(t.elapsed());
@@ -450,10 +460,11 @@ pub fn export_timeline(
                 p.startup = Some(p.elapsed);
             }
         }
-        if audio_mix.is_some() {
-            audio.mixed = Some(join_audio_mix(audio_mix)?);
+        drop(audio);
+        match audio_mix {
+            Some(handle) => handle.join().expect("audio mix thread panicked"),
+            None => Ok(()),
         }
-        audio.write_until(&mut encoder, range.end)
     })?;
 
     encoder.finish().map_err(ExportError::failed)?;
@@ -540,55 +551,68 @@ fn compose_video_frame(
     compositor.render_layers_i420(&layers, output)
 }
 
-fn join_audio_mix(
-    handle: Option<std::thread::ScopedJoinHandle<'_, Result<Vec<f32>, ExportError>>>,
-) -> Result<Vec<f32>, ExportError> {
-    handle
-        .expect("audio mix already consumed")
-        .join()
-        .expect("audio mix thread panicked")
-}
-
-/// Writes the audio mix to the encoder in pieces, aligned to the video frames.
+/// Writes the audio mix to the encoder as it arrives, aligned to the video
+/// frames: all of it after the video and the muxer would keep the whole
+/// video in RAM.
 struct AudioInterleaver {
-    mixed: Option<Vec<f32>>,
+    chunks: std::sync::mpsc::Receiver<Vec<f32>>,
+    chunk: Vec<f32>,
+    /// Of `chunk`, already written.
+    taken: usize,
     written: usize,
     fps: f64,
     start_sample: u64,
 }
 
 impl AudioInterleaver {
-    fn new(timeline: &Timeline, start_frame: FrameIdx) -> Self {
+    fn new(
+        timeline: &Timeline,
+        start_frame: FrameIdx,
+        chunks: std::sync::mpsc::Receiver<Vec<f32>>,
+    ) -> Self {
         let fps = timeline.fps.as_f64();
         Self {
-            mixed: None,
+            chunks,
+            chunk: Vec::new(),
+            taken: 0,
             written: 0,
             fps,
             start_sample: timeline_frame_to_sample(start_frame, fps, PROJECT_SAMPLE_RATE),
         }
     }
 
-    /// Writes the samples up to the start of `frame` (exclusive); no-op
-    /// until the mix is ready.
+    /// Writes the samples up to the start of `frame` (exclusive), waiting
+    /// for the mix to get there; less if it stopped before.
     fn write_until(
         &mut self,
         encoder: &mut vv_media::Encoder,
         frame: FrameIdx,
     ) -> Result<(), ExportError> {
-        let Some(mixed) = &self.mixed else {
-            return Ok(());
-        };
         let end_sample = timeline_frame_to_sample(frame, self.fps, PROJECT_SAMPLE_RATE);
-        let end = ((end_sample - self.start_sample) as usize * PROJECT_CHANNELS as usize)
-            .min(mixed.len());
-        if end > self.written {
+        let end = (end_sample - self.start_sample) as usize * PROJECT_CHANNELS as usize;
+        while self.written < end {
+            if self.taken == self.chunk.len() {
+                let Ok(chunk) = self.chunks.recv() else {
+                    return Ok(());
+                };
+                self.chunk = chunk;
+                self.taken = 0;
+            }
+            let count = (end - self.written).min(self.chunk.len() - self.taken);
             encoder
-                .write_audio_samples(&mixed[self.written..end])
+                .write_audio_samples(&self.chunk[self.taken..self.taken + count])
                 .map_err(ExportError::failed)?;
-            self.written = end;
+            self.taken += count;
+            self.written += count;
         }
         Ok(())
     }
+}
+
+fn audio_samples(timeline: &Timeline, range: std::ops::Range<FrameIdx>) -> std::ops::Range<u64> {
+    let fps = timeline.fps.as_f64();
+    timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE)
+        ..timeline_frame_to_sample(range.end, fps, PROJECT_SAMPLE_RATE)
 }
 
 /// Mix of all the audio tracks at `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
@@ -598,157 +622,14 @@ pub(crate) fn mix_audio_track(
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, ExportError> {
-    let fps = timeline.fps.as_f64();
-    let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
-    let end_sample = timeline_frame_to_sample(range.end, fps, PROJECT_SAMPLE_RATE);
-    let samples = start_sample..end_sample;
-    let (rate, channels) = (PROJECT_SAMPLE_RATE, PROJECT_CHANNELS);
-    let mut wanted = WantedFrames::default();
-    MixSnapshot::from_timeline_range(
-        project,
-        timeline,
-        rate,
-        channels,
-        &mut wanted,
-        samples.clone(),
-    );
-    let mut audio = DecodedAudio::default();
-    for (path, windows) in wanted.0 {
-        decode_windows(&path, windows, &mut audio)?;
-    }
-    let snapshot =
-        MixSnapshot::from_timeline_range(project, timeline, rate, channels, &mut audio, samples);
-    let mut mixed = vec![0.0_f32; (end_sample - start_sample) as usize * PROJECT_CHANNELS as usize];
-    mix_range(&snapshot, start_sample, &mut mixed);
+    let samples = audio_samples(timeline, range);
+    let mut mixed =
+        Vec::with_capacity((samples.end - samples.start) as usize * PROJECT_CHANNELS as usize);
+    render_offline(project, timeline, samples, |chunk| {
+        mixed.extend_from_slice(chunk);
+        ControlFlow::Continue(())
+    })?;
     Ok(mixed)
-}
-
-/// Decodes the `(stream, frames)` windows of `path` in one pass, stopping
-/// past the last one. The same decoding as the preview (`mix_buffers`),
-/// from the start of the file: swresample to `PROJECT_SAMPLE_RATE`, so the
-/// frames line up with the preview's.
-fn decode_windows(
-    path: &Path,
-    windows: Vec<(usize, std::ops::Range<u64>)>,
-    audio: &mut DecodedAudio,
-) -> Result<(), ExportError> {
-    let ch = PROJECT_CHANNELS as u64;
-    let mut streams: Vec<usize> = windows.iter().map(|(stream, _)| *stream).collect();
-    streams.sort_unstable();
-    streams.dedup();
-    let slot_of = |stream: usize| streams.iter().position(|s| *s == stream).unwrap();
-    let mut ends = vec![0_u64; streams.len()];
-    for (stream, frames) in &windows {
-        let end = &mut ends[slot_of(*stream)];
-        *end = (*end).max(frames.end);
-    }
-    let mut buffers = vec![Vec::new(); windows.len()];
-    let mut decoded = vec![0_u64; streams.len()];
-    let mut remixed = Vec::new();
-    let formats = vv_media::decode_audio_streams_streaming(
-        path,
-        &streams,
-        Some(PROJECT_SAMPLE_RATE),
-        |slot, channels, chunk| {
-            remixed.clear();
-            remix_channels_into(chunk, channels, PROJECT_CHANNELS, &mut remixed);
-            let from = decoded[slot];
-            let to = from + remixed.len() as u64 / ch;
-            decoded[slot] = to;
-            for ((stream, frames), buffer) in windows.iter().zip(&mut buffers) {
-                let (a, b) = (frames.start.max(from), frames.end.min(to));
-                if *stream == streams[slot] && a < b {
-                    buffer.extend_from_slice(
-                        &remixed[((a - from) * ch) as usize..((b - from) * ch) as usize],
-                    );
-                }
-            }
-            if decoded
-                .iter()
-                .zip(&ends)
-                .all(|(decoded, end)| decoded >= end)
-            {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        },
-    )
-    .map_err(ExportError::failed)?;
-    for ((stream, frames), buffer) in windows.into_iter().zip(buffers) {
-        if formats[slot_of(stream)].is_some() {
-            audio
-                .files
-                .insert((path.to_path_buf(), stream, frames), Arc::new(buffer));
-        }
-    }
-    Ok(())
-}
-
-/// The frames of every real file the mix reaches, compound clips included,
-/// without providing any.
-#[derive(Default)]
-struct WantedFrames(HashMap<PathBuf, Vec<(usize, std::ops::Range<u64>)>>);
-
-impl AudioSource for WantedFrames {
-    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.file_frames(path, stream, 0..u64::MAX, 0)
-    }
-
-    fn file_frames(
-        &mut self,
-        path: &Path,
-        stream: usize,
-        frames: std::ops::Range<u64>,
-        _plays_at: u64,
-    ) -> ClipAudio {
-        let windows = self.0.entry(path.to_path_buf()).or_default();
-        let window = (stream, frames);
-        if !windows.contains(&window) {
-            windows.push(window);
-        }
-        ClipAudio::Pending
-    }
-}
-
-/// Everything decoded up front: a compound used several times is mixed once.
-#[derive(Default)]
-struct DecodedAudio {
-    files: HashMap<(PathBuf, usize, std::ops::Range<u64>), Arc<Vec<f32>>>,
-    compounds: HashMap<MediaId, Arc<Vec<f32>>>,
-}
-
-impl AudioSource for DecodedAudio {
-    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        self.file_frames(path, stream, 0..u64::MAX, 0)
-    }
-
-    fn file_frames(
-        &mut self,
-        path: &Path,
-        stream: usize,
-        frames: std::ops::Range<u64>,
-        _plays_at: u64,
-    ) -> ClipAudio {
-        let start = frames.start;
-        self.files
-            .get(&(path.to_path_buf(), stream, frames))
-            .map_or(ClipAudio::Missing, |buffer| {
-                ClipAudio::Ready(SampleBlocks::contiguous(
-                    buffer.clone(),
-                    start,
-                    PROJECT_CHANNELS,
-                ))
-            })
-    }
-
-    fn cached_compound(&mut self, media_id: MediaId, _content_hash: u64) -> Option<Arc<Vec<f32>>> {
-        self.compounds.get(&media_id).cloned()
-    }
-
-    fn store_compound(&mut self, media_id: MediaId, _content_hash: u64, mixdown: Arc<Vec<f32>>) {
-        self.compounds.insert(media_id, mixdown);
-    }
 }
 
 #[cfg(test)]

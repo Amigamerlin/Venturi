@@ -15,6 +15,7 @@ use vv_core::{
 
 use crate::blocks::{BLOCK_FRAMES, Run, SampleBlocks};
 use crate::dynamics::{BandActivity, MultibandProcessor};
+use crate::effect::Effect;
 use crate::eq::EqProcessor;
 use crate::loudness::LevelMeter;
 use crate::spectrum::SpectrumTap;
@@ -363,25 +364,17 @@ impl MixSnapshot {
     }
 }
 
-/// An effect that keeps a state from one block to the next.
-enum Processor {
-    Compressor(MultibandProcessor),
-    Eq(EqProcessor),
-}
-
-impl Processor {
-    fn reset(&mut self) {
+impl Insert {
+    /// What runs it, if it keeps a state from one block to the next.
+    fn effect(&self, sample_rate: u32, channels: u16) -> Option<Box<dyn Effect>> {
         match self {
-            Processor::Compressor(p) => p.reset(),
-            Processor::Eq(p) => p.reset(),
-        }
-    }
-
-    fn take_memory_from(&mut self, other: &Self) {
-        match (self, other) {
-            (Processor::Compressor(p), Processor::Compressor(old)) => p.take_memory_from(old),
-            (Processor::Eq(p), Processor::Eq(old)) => p.take_memory_from(old),
-            _ => {}
+            Insert::Off | Insert::Gain(_) | Insert::ClipGains(_) | Insert::Mono => None,
+            Insert::Compressor(params) => Some(Box::new(MultibandProcessor::new(
+                params,
+                sample_rate,
+                channels,
+            ))),
+            Insert::Eq(params) => Some(Box::new(EqProcessor::new(params, sample_rate, channels))),
         }
     }
 }
@@ -391,8 +384,8 @@ impl Processor {
 /// on starts them over.
 pub struct MixState {
     /// Aligned with the inserts of `MixSnapshot::tracks`.
-    tracks: Vec<Vec<Option<Processor>>>,
-    master: Vec<Option<Processor>>,
+    tracks: Vec<Vec<Option<Box<dyn Effect>>>>,
+    master: Vec<Option<Box<dyn Effect>>>,
     scratch: Vec<f32>,
     peaks: Vec<[f32; 2]>,
     next: Option<u64>,
@@ -401,19 +394,11 @@ pub struct MixState {
 impl MixState {
     pub fn new(snapshot: &MixSnapshot) -> Self {
         let (rate, channels) = (snapshot.sample_rate, snapshot.channels);
-        let processors = |channel: &Channel| -> Vec<Option<Processor>> {
+        let processors = |channel: &Channel| -> Vec<Option<Box<dyn Effect>>> {
             channel
                 .inserts
                 .iter()
-                .map(|insert| match insert {
-                    Insert::Off | Insert::Gain(_) | Insert::ClipGains(_) | Insert::Mono => None,
-                    Insert::Compressor(params) => Some(Processor::Compressor(
-                        MultibandProcessor::new(params, rate, channels),
-                    )),
-                    Insert::Eq(params) => {
-                        Some(Processor::Eq(EqProcessor::new(params, rate, channels)))
-                    }
-                })
+                .map(|insert| insert.effect(rate, channels))
                 .collect()
         };
         Self {
@@ -437,7 +422,7 @@ impl MixState {
         for (chain, old_chain) in pairs {
             for (processor, old) in chain.iter_mut().zip(old_chain) {
                 if let (Some(processor), Some(old)) = (processor, old) {
-                    processor.take_memory_from(old);
+                    processor.take_memory_from(old.as_ref());
                 }
             }
         }
@@ -1128,7 +1113,9 @@ fn compound_blocks(
     }
 }
 
-fn normalizes(timeline: &Timeline) -> bool {
+/// A normalization measures its whole timeline, so a mix of part of it
+/// still needs all of it (`MixSnapshot::from_timeline_range`).
+pub fn normalizes(timeline: &Timeline) -> bool {
     timeline
         .tracks
         .iter()
@@ -1255,6 +1242,12 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
     mix_into(snapshot, &mut MixState::new(snapshot), start, out, false);
 }
 
+/// `mix_range` carrying on the effects from the previous call through
+/// `state`: a mix split into calls equals a single one.
+pub fn mix_range_from(snapshot: &MixSnapshot, state: &mut MixState, start: u64, out: &mut [f32]) {
+    mix_into(snapshot, state, start, out, false);
+}
+
 /// `mix_range` for the output stream: the effects carry on from the
 /// previous call through `state`, and `snapshot.meters` go up. No
 /// allocations: it runs in the realtime callback.
@@ -1356,7 +1349,7 @@ fn mix_into(
 /// compressors report, if metered.
 fn apply_inserts(
     inserts: &[Insert],
-    processors: &mut [Option<Processor>],
+    processors: &mut [Option<Box<dyn Effect>>],
     samples: &mut [f32],
     channels: usize,
     time: u64,
@@ -1382,14 +1375,9 @@ fn apply_inserts(
                 if let Some(spectrum) = spectrum {
                     spectrum.record_pre(samples, channels);
                 }
-                match processor {
-                    Processor::Compressor(compressor) => {
-                        let activity = compressor.process(samples);
-                        if let Some(meter) = meter {
-                            meter.bands.raise(activity);
-                        }
-                    }
-                    Processor::Eq(eq) => eq.process(samples),
+                let activity = processor.process(samples);
+                if let (Some(meter), Some(activity)) = (meter, activity) {
+                    meter.bands.raise(activity);
                 }
                 if let Some(spectrum) = spectrum {
                     spectrum.record_post(samples, channels);

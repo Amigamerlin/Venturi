@@ -133,6 +133,26 @@ impl MultibandProcessor {
     }
 }
 
+impl crate::effect::Effect for MultibandProcessor {
+    fn process(&mut self, samples: &mut [f32]) -> Option<BandActivity> {
+        Some(MultibandProcessor::process(self, samples))
+    }
+
+    fn reset(&mut self) {
+        MultibandProcessor::reset(self);
+    }
+
+    fn take_memory_from(&mut self, previous: &dyn crate::effect::Effect) {
+        if let Some(previous) = previous.as_any().downcast_ref() {
+            MultibandProcessor::take_memory_from(self, previous);
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// What the bands went through during a `process`: the highest level the
 /// detectors saw (linear) and the most they were reduced (dB).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

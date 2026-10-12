@@ -60,6 +60,27 @@ impl EqProcessor {
 }
 
 /// The frequency response of an equalizer, for drawing it.
+impl crate::effect::Effect for EqProcessor {
+    fn process(&mut self, samples: &mut [f32]) -> Option<crate::dynamics::BandActivity> {
+        EqProcessor::process(self, samples);
+        None
+    }
+
+    fn reset(&mut self) {
+        EqProcessor::reset(self);
+    }
+
+    fn take_memory_from(&mut self, previous: &dyn crate::effect::Effect) {
+        if let Some(previous) = previous.as_any().downcast_ref() {
+            EqProcessor::take_memory_from(self, previous);
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 pub struct EqResponse {
     filters: [Option<Biquad>; BANDS],
     sample_rate: f32,

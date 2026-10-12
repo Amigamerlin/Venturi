@@ -4,6 +4,7 @@
 
 pub mod blocks;
 pub mod dynamics;
+pub mod effect;
 pub mod eq;
 mod filter;
 pub mod loudness;
