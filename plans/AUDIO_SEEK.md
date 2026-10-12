@@ -5,10 +5,11 @@ also behind MCP `get_audio_levels` on a timeline) keeps only the frames it
 reads, but still decodes every file from its start: a few seconds near the
 end of a one-hour file cost the decode of the whole hour.
 
-**Status:** the decode half is done (bfa36ba, `decode_audio_streams_from`),
-sample-exact rather than within a tolerance (§4), and used by the preview.
-Export still decodes from the start of each file: it moves to the seeking
-decode with [AUDIO_GRAPH.md](AUDIO_GRAPH.md) step 6.
+**Status:** done. The decode (bfa36ba, `decode_audio_streams_from`) is
+sample-exact rather than within a tolerance (§4); the preview uses it, and
+the export and the MCP levels since [AUDIO_LIVE_MIX.md](AUDIO_LIVE_MIX.md)
+step 1 (`vv-session/src/audio_render.rs`). Resampled files still decode
+from their start, once per reader.
 
 ---
 

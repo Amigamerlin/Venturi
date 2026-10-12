@@ -2,7 +2,8 @@
 
 **Status:** chosen over [AUDIO_GRAPH.md](AUDIO_GRAPH.md) (2026-10-12),
 which keeps the diagnosis (its §1) and the current state (its §1.3, §2).
-Steps 0–4 implemented (§4).
+Done: steps 0–4 implemented (§4). Step 5 (reverse) moved to
+[REVERSE_SPEED.md](REVERSE_SPEED.md) §3: it needs that plan's model first.
 
 **Goal:** remove the known limits of the preview audio and the memory of
 the export without a generic node graph: the existing `MixSnapshot` stays
@@ -372,7 +373,10 @@ the code it replaces and the runtime measurement of AUDIO_GRAPH §9.
    equals the whole input stretched at once, sample for sample.
 5. **Reverse**: read mapping for file clips, materialized for compounds.
    Acceptance: a reversed clip equals the reversed samples of the forward
-   clip, in preview and export.
+   clip, in preview and export. *Moved* to
+   [REVERSE_SPEED.md](REVERSE_SPEED.md) §3 and its step 4: there is no
+   reverse in the model yet (its step 1), and audio alone would have
+   nothing to play.
 
 ---
 

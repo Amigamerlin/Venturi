@@ -82,17 +82,27 @@ a keyframe.
 
 ## 3. Audio (`vv-audio`)
 
-**Superseded** by [AUDIO_GRAPH.md](AUDIO_GRAPH.md): reverse becomes a
-`Reverse` node whose demand mirrors the output range (step 7 there). The
-notes below predate the block cache.
+Designed in [AUDIO_LIVE_MIX.md](AUDIO_LIVE_MIX.md) §3.5 (its step 5,
+moved here), on what that plan built:
 
-- `ClipSpan` reads the source range as today, then the mix walks the buffer
-  backwards (`step` negative, or reverse the decoded window once).
-- Pitch correction: reverse the window first, then `stretch_samples` (the
-  stretcher does not care about direction).
-- `MixBufferCache` windows: the window for timeline range `[a, b)` is source
-  range `[p(b), p(a)]`, reversed.
+- **File clip**: a read mapping. `ClipSpan::media_frames` mirrors the
+  frames a range reads (`[axis - b, axis - a)` in audio frames, from
+  `media_secs_at`'s mirror), so the preview store and the export's
+  readers decode the mirrored blocks as they decode any other; `add_clip`
+  reads them backwards (a negative step through the same `Frames` reads,
+  varispeed included). Nothing materialized.
+- **Compound clip**: its nested mix has to run forward for its effects, so
+  it is materialized like a pitch-corrected clip: a request describing the
+  nested timeline's window (as `StretchRequest`, keyed by content),
+  rendered from the files by `render_offline` and stored reversed.
+- **Pitch correction**: the stretch request's input reversed before the
+  `Stretcher` (it does not care about direction); for a file clip that is
+  the one case where its window is materialized.
+- **Levels**: the segment keys of `vv_audio::levels` gain the direction of
+  each clip, so a reversed clip is measured apart from the forward one.
 - Timeline waveform and compound waveforms: mirror the peaks.
+- Acceptance: a reversed clip equals the reversed samples of the forward
+  clip, in preview and export.
 
 ## 4. UI (`vv-app`)
 
@@ -121,7 +131,7 @@ notes below predate the block cache.
 2. Export path (reverse chunk reader). It is correct before it is fast and
    can be checked frame by frame against a forward export.
 3. Render-ahead reverse chunks plus cache distance.
-4. Audio mirror and waveform.
+4. Audio mirror and waveform (§3).
 5. UI, paste attributes, MCP.
 6. OTIO import/export, after the open question in §5 is settled.
 

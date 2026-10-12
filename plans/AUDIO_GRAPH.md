@@ -1,9 +1,9 @@
 # AUDIO_GRAPH — the preview and export audio as a graph of nodes
 
-**Status:** design, nothing implemented; what ships today and its limits
-are in §1.3. Supersedes the audio part of
-[REVERSE_SPEED.md](REVERSE_SPEED.md) (§3) and the open points of
-[AUDIO_SEEK.md](AUDIO_SEEK.md).
+**Status:** not chosen, nothing implemented: the problems of §1 were
+solved by [AUDIO_LIVE_MIX.md](AUDIO_LIVE_MIX.md) (2026-10-12), which
+compares the two. Kept for its diagnosis (§1) and its runtime measuring
+method (§9); §1.3 describes the state before that plan.
 
 **Goal:** one model in which every audio feature (sources, clips, speed,
 reverse, effects, tracks, compound clips, analyses) is a node that declares
