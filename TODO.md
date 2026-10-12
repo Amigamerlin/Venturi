@@ -3,7 +3,8 @@
 Open items from the review of the `audio-blocks` branch (2026-10-12).
 Fixed: items 1–4 of that review (level-measure deadlock, decode priority,
 compound fade-out, stale on-disk levels), timestamp gaps, seeking in
-resampled files, stale stretch jobs and the shutdown wait.
+resampled files, stale stretch jobs, the shutdown wait and the fast
+forward's thread per frame.
 
 ## Audio: correctness
 
@@ -38,9 +39,9 @@ resampled files, stale stretch jobs and the shutdown wait.
 
 ## Audio: performance
 
-- **Fast forward** starts a new mix-and-stretch thread per frame while
-  editing, and every frame after a failed stretch (`timeline_audio.rs`,
-  `request_window`).
+- **Fast forward windows are not cancelled**: one superseded by an edit
+  or a seek still mixes and stretches its 8 s to the end before the next
+  starts (one at a time since the drag fix).
 - **Previewing a media** from the pool drops every decoded block of the
   timeline (`begin(true)` clears `asked`), despite the `begin_media_pass`
   doc.

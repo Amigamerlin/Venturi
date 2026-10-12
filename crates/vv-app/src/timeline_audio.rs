@@ -63,6 +63,13 @@ pub struct TimelineAudio {
     synced_media: Option<PathBuf>,
     /// At most one stretch in flight; a result with another id is stale.
     stretch_request: Option<StretchRequest>,
+    /// The tempo of a new window wanted from where the playhead will be,
+    /// once the one in flight lands or playback resumes: a drag would start
+    /// one stretch per frame.
+    restretch: Option<u64>,
+    /// The last stretch failed: not retried every frame, only after a
+    /// change of content, position or speed.
+    stretch_failed: bool,
     next_request_id: u64,
     stretch_tx: mpsc::Sender<StretchResult>,
     stretch_rx: mpsc::Receiver<StretchResult>,
@@ -89,6 +96,8 @@ impl TimelineAudio {
             synced: None,
             synced_media: None,
             stretch_request: None,
+            restretch: None,
+            stretch_failed: false,
             next_request_id: 0,
             stretch_tx,
             stretch_rx,
@@ -190,24 +199,40 @@ impl TimelineAudio {
     /// stretched while some of it was missing, once the snapshot has all of
     /// it; meanwhile that window keeps playing.
     fn refresh_window(&mut self, content_changed: bool) {
-        let tempo = match (&self.stretched, self.stretch_request) {
-            (_, Some(request)) if request.new_window => request.tempo,
-            (Some(window), _) => window.tempo,
-            (None, _) => return,
+        let tempo = match (&self.stretched, self.stretch_request, self.restretch) {
+            (_, Some(request), _) if request.new_window => request.tempo,
+            (_, _, Some(tempo)) => tempo,
+            (Some(window), _, _) => window.tempo,
+            (None, _, None) => return,
         };
         let pos = self.position_sample();
-        if !content_changed
-            && (self.window_complete
-                || self.stretch_request.is_some()
-                || !self.mix.is_ready(pos..pos + WINDOW_FRAMES))
-        {
+        if content_changed {
+            self.stretch_failed = false;
+            if let Some(window) = &mut self.stretched {
+                window.origin = pos;
+                window.chunks.clear();
+            }
+            self.want_window(tempo, pos);
             return;
         }
-        if content_changed && let Some(window) = &mut self.stretched {
-            window.origin = pos;
-            window.chunks.clear();
+        if !self.playing || self.stretch_request.is_some() || self.stretch_failed {
+            return;
         }
-        self.request_window(tempo, pos, true);
+        if self.restretch.is_some()
+            || !self.window_complete && self.mix.is_ready(pos..pos + WINDOW_FRAMES)
+        {
+            self.request_window(tempo, pos, true);
+        }
+    }
+
+    /// A new window from `start`, or from where the playhead is once the
+    /// window in flight lands or playback resumes.
+    fn want_window(&mut self, tempo: u64, start: u64) {
+        if self.playing && self.stretch_request.is_none() {
+            self.request_window(tempo, start, true);
+        } else {
+            self.restretch = Some(tempo);
+        }
     }
 
     fn publish(&mut self) {
@@ -287,6 +312,7 @@ impl TimelineAudio {
         }
         self.wall_base_sample = sample;
         self.wall_started_at = self.playing.then(Instant::now);
+        self.stretch_failed = false;
 
         let channels = self.channels();
         if let Some(window) = &self.stretched
@@ -305,7 +331,7 @@ impl TimelineAudio {
             });
             self.speed = tempo as f64;
             self.publish();
-            self.request_window(tempo, sample, true);
+            self.want_window(tempo, sample);
         }
     }
 
@@ -342,6 +368,7 @@ impl TimelineAudio {
     /// ready (meanwhile playback continues at the current speed).
     pub fn request_speed(&mut self, speed: f64) {
         let tempo = speed.round().max(1.0) as u64;
+        self.stretch_failed = false;
         if self.mixer.is_none() {
             let pos = self.position_sample();
             self.speed = tempo as f64;
@@ -350,6 +377,7 @@ impl TimelineAudio {
         }
         if tempo == 1 {
             self.stretch_request = None;
+            self.restretch = None;
             self.speed = 1.0;
             if self.stretched.take().is_some() {
                 self.publish();
@@ -376,6 +404,9 @@ impl TimelineAudio {
         };
         self.next_request_id += 1;
         self.stretch_request = Some(request);
+        if new_window {
+            self.restretch = None;
+        }
 
         let mix = self.mix.clone();
         let tx = self.stretch_tx.clone();
@@ -403,10 +434,16 @@ impl TimelineAudio {
                 continue;
             };
             self.stretch_request = None;
+            if let Some(tempo) = self.restretch {
+                // Stretched from what changed since.
+                self.want_window(tempo, self.position_sample());
+                continue;
+            }
             let samples = match result.samples {
                 Ok(samples) => Arc::new(samples),
                 Err(e) => {
                     eprintln!("vv-app: audio stretch at {}x failed: {e}", request.tempo);
+                    self.stretch_failed = true;
                     continue;
                 }
             };
@@ -415,7 +452,7 @@ impl TimelineAudio {
                 let pos = self.position_sample();
                 // While stretching, the playhead moved past it, or was moved.
                 if !(request.start..request.start + WINDOW_FRAMES).contains(&pos) {
-                    self.request_window(request.tempo, pos, true);
+                    self.want_window(request.tempo, pos);
                     continue;
                 }
                 self.stretched = Some(StretchedWindow {
@@ -460,7 +497,7 @@ impl TimelineAudio {
     }
 
     fn extend_window_if_needed(&mut self) {
-        if !self.playing || self.stretch_request.is_some() {
+        if !self.playing || self.stretch_request.is_some() || self.stretch_failed {
             return;
         }
         let Some(window) = &self.stretched else {

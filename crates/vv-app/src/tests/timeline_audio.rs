@@ -266,3 +266,99 @@ fn a_fast_forward_started_before_the_audio_is_decoded_plays_it_once_decoded() {
     wait_for_speed(&mut audio, 2.0);
     wait_for_loud_window(&mut audio, &project, timeline, Duration::from_millis(1500));
 }
+
+/// `timeline` decoded, playing at 2x.
+fn fast_forward_on(project: &vv_core::Project, timeline: TimelineId) -> TimelineAudio {
+    let mut audio = TimelineAudio::new();
+    while {
+        audio.sync(project, timeline, 1);
+        audio.has_pending_buffers()
+    } {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    audio.play();
+    audio.request_speed(2.0);
+    wait_for_speed(&mut audio, 2.0);
+    audio
+}
+
+/// A drag changes the project every frame.
+#[test]
+fn a_drag_during_a_fast_forward_stretches_one_window_at_a_time() {
+    let mut project = vv_core::Project::default();
+    let timeline = tone_timeline(&mut project, "drag.wav", 0.8);
+    let mut audio = fast_forward_on(&project, timeline);
+    let before = audio.next_request_id;
+    for generation in 2..32 {
+        audio.sync(&project, timeline, generation);
+        audio.tick();
+    }
+    assert!(
+        audio.next_request_id - before <= 1,
+        "{}",
+        audio.next_request_id - before
+    );
+
+    wait_for_loud_window(&mut audio, &project, timeline, Duration::from_millis(1500));
+    assert!(
+        audio.next_request_id - before <= 4,
+        "{}",
+        audio.next_request_id - before
+    );
+}
+
+#[test]
+fn an_edit_while_paused_in_fast_forward_stretches_on_resume() {
+    let mut project = vv_core::Project::default();
+    let timeline = tone_timeline(&mut project, "paused.wav", 0.8);
+    let mut audio = fast_forward_on(&project, timeline);
+    audio.pause();
+    while audio.stretch_request.is_some() {
+        std::thread::sleep(Duration::from_millis(5));
+        audio.tick();
+    }
+    let before = audio.next_request_id;
+    for generation in 2..12 {
+        audio.sync(&project, timeline, generation);
+        audio.tick();
+    }
+    assert_eq!(audio.next_request_id, before, "nothing plays");
+
+    audio.play();
+    audio.tick();
+    assert_eq!(audio.next_request_id, before + 1);
+}
+
+#[test]
+fn a_failed_stretch_is_not_retried_every_frame() {
+    let mut project = vv_core::Project::default();
+    let timeline = tone_timeline(&mut project, "failed.wav", 0.8);
+    let mut audio = fast_forward_on(&project, timeline);
+    while audio.stretch_request.is_some() {
+        std::thread::sleep(Duration::from_millis(5));
+        audio.tick();
+    }
+    let failed = StretchRequest {
+        id: audio.next_request_id,
+        tempo: 2,
+        start: audio.position_sample(),
+        new_window: false,
+        complete: false,
+    };
+    audio.next_request_id += 1;
+    audio.stretch_request = Some(failed);
+    audio.window_complete = false;
+    audio
+        .stretch_tx
+        .send(StretchResult {
+            id: failed.id,
+            samples: Err("failed".into()),
+        })
+        .unwrap();
+    let before = audio.next_request_id;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(5));
+        audio.tick();
+    }
+    assert_eq!(audio.next_request_id, before);
+}
