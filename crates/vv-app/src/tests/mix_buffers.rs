@@ -527,7 +527,7 @@ fn a_master_normalization_is_measured_over_budget() {
     let mut cache = MixBufferCache::spawn(48_000, 1);
     cache.set_budget_bytes(BLOCK_FRAMES as usize * 4);
     let snapshot = settle(&mut cache, &project, &parent);
-    assert!(cache.over_budget());
+    assert!(cache.over_budget);
     let vv_audio::mixer::Insert::Gain(gain) = snapshot.master.inserts[0] else {
         panic!("{:?}", snapshot.master.inserts);
     };

@@ -3336,13 +3336,6 @@ fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
     });
 }
 
-/// Shown while the timeline's audio does not fit the audio cache.
-fn audio_budget_indicator(ui: &mut egui::Ui) {
-    let color = theme::warning(ui.visuals());
-    status_badge(ui, t!("toolbar.audio_budget").to_string(), color)
-        .on_hover_text(t!("toolbar.audio_budget_hint"));
-}
-
 /// Hand-drawn magnet: on some platforms (Asahi) egui's fonts
 /// do not have the 🧲 glyph.
 fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
@@ -3759,13 +3752,6 @@ impl VenturiApp {
                     );
                     if let Some(mcp) = self.mcp.as_ref().filter(|mcp| mcp.clients() > 0) {
                         agent_indicator(ui, mcp.last_tool());
-                    }
-                    if self
-                        .timeline_audio
-                        .as_ref()
-                        .is_some_and(TimelineAudio::over_budget)
-                    {
-                        audio_budget_indicator(ui);
                     }
                 });
             });

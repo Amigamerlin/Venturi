@@ -268,8 +268,9 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   decode from the start; resampled files are read once from the start for
   all their queued jobs), the job closest to the playhead first, within a
   budget that keeps the blocks closest to it (Settings > Playback > Audio
-  cache, 1 GB by default; the toolbar shows "Audio cache full" when the
-  timeline's audio does not fit). A missing block plays as silence.
+  cache, 512 MB by default). A missing block plays as silence and the
+  clock keeps advancing: after a jump the audio may start a moment late,
+  never out of sync.
 - **Compound clips** are mixed live in the same pass as their parent
   (`ClipInput::Nested`): the mix state is a tree, each compound clip with
   its own effects' state, carried across snapshots by track and clip id.

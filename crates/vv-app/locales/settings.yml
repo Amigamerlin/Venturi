@@ -70,8 +70,8 @@ settings.audio_cache:
   en: "Audio cache:"
   it: "Cache audio:"
 settings.audio_cache_hint:
-  en: "How much RAM to use for the timeline's decoded audio. When the timeline needs more, only the audio around the playhead is kept and the rest is decoded again when needed: after a jump the audio may take a moment to start. Export is not affected."
-  it: "Quanta RAM usare per l'audio decodificato della timeline. Quando la timeline ne richiede di più, si tiene solo l'audio intorno alla testina e il resto viene ridecodificato quando serve: dopo un salto l'audio può metterci un attimo a partire. L'export non ne risente."
+  en: "How much RAM to keep the timeline's decoded audio in, the audio closest to the playhead first. More keeps more of it ready: going back to a part already heard, the audio starts at once instead of a moment late (always in sync with the video). Export is not affected."
+  it: "Quanta RAM usare per l'audio decodificato della timeline, a partire da quello più vicino alla testina. Di più ne tiene pronto di più: tornando su una parte già ascoltata, l'audio parte subito invece che un attimo dopo (sempre in sync con il video). L'export non ne risente."
 settings.proxy:
   en: Proxy
   it: Proxy

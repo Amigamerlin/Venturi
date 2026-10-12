@@ -13,16 +13,6 @@ pub(crate) const ACCENT_TRANSLUCENT: Color32 = Color32::from_rgba_premultiplied(
 pub(crate) const ERROR: Color32 = Color32::from_rgb(230, 70, 70);
 pub(crate) const PLAYHEAD: Color32 = Color32::from_rgb(220, 50, 50);
 
-/// Warnings: yellow, apart from the accent orange next to them in the
-/// toolbar; darker on a light background.
-pub(crate) fn warning(visuals: &egui::Visuals) -> Color32 {
-    if visuals.dark_mode {
-        Color32::from_rgb(0xF2, 0xC9, 0x4C)
-    } else {
-        Color32::from_rgb(0x9A, 0x6B, 0x00)
-    }
-}
-
 pub(crate) fn apply(ctx: &egui::Context) {
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         ctx.style_mut_of(theme, |style| {

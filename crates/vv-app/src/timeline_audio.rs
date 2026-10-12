@@ -94,10 +94,6 @@ impl TimelineAudio {
         self.buffers.set_budget_bytes(bytes);
     }
 
-    /// See `MixBufferCache::over_budget`.
-    pub fn over_budget(&self) -> bool {
-        self.buffers.over_budget()
-    }
 
     fn channels(&self) -> u16 {
         self.mix.channels

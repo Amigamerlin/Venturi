@@ -122,7 +122,7 @@ const BLOCK_REBUILD_INTERVAL: Duration = Duration::from_millis(250);
 /// Over budget, a playhead move this long chooses again what to keep.
 const REBALANCE_FRAMES: u64 = 2 * vv_audio::mixer::PROJECT_SAMPLE_RATE as u64;
 
-pub const DEFAULT_AUDIO_BUDGET_BYTES: usize = 1_000_000_000;
+pub const DEFAULT_AUDIO_BUDGET_BYTES: usize = 512_000_000;
 
 #[derive(Default)]
 struct StreamCache {
@@ -344,11 +344,6 @@ impl MixBufferCache {
         }
     }
 
-    /// The mix reads more than the budget holds: only the blocks closest to
-    /// the playhead are kept.
-    pub fn over_budget(&self) -> bool {
-        self.over_budget
-    }
 
     /// Where the mix plays now, in samples of what is mixed.
     pub fn set_playhead(&mut self, sample: u64) {
