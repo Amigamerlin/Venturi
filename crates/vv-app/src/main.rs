@@ -3338,7 +3338,7 @@ fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
 
 /// Shown while the timeline's audio does not fit the audio cache.
 fn audio_budget_indicator(ui: &mut egui::Ui) {
-    let color = ui.visuals().warn_fg_color;
+    let color = theme::warning(ui.visuals());
     status_badge(ui, t!("toolbar.audio_budget").to_string(), color)
         .on_hover_text(t!("toolbar.audio_budget_hint"));
 }
