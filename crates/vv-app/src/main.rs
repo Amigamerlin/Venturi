@@ -3668,6 +3668,9 @@ impl VenturiApp {
         for image in screenshots {
             self.mcp_screenshot(&image);
         }
+        if self.mcp_awaits_screenshot() {
+            ui.ctx().request_repaint();
+        }
         // Here and not in the pool: the viewer needs it with the pool closed too.
         self.media_pool_state.refresh_offline(&self.session.project);
         self.poll_thumbnails(&ui.ctx().clone());

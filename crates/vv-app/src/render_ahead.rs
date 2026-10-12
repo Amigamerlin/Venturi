@@ -50,8 +50,10 @@ const BEHIND_CHUNK_FRAMES: FrameIdx = 15;
 /// length. Generous: it only guards against pathological GOPs.
 const TRANSIT_SAFETY_CAP_FRAMES: FrameIdx = 3000;
 
-fn store_secs(atomic: &AtomicU64, secs: f64) {
-    atomic.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
+/// Whether the value changed.
+fn store_secs(atomic: &AtomicU64, secs: f64) -> bool {
+    let bits = secs.max(0.0).to_bits();
+    atomic.swap(bits, Ordering::Relaxed) != bits
 }
 
 fn load_secs(atomic: &AtomicU64) -> f64 {
@@ -201,15 +203,19 @@ impl RenderAhead {
     /// Seconds buffered ahead (Settings > Playback), never below
     /// `MIN_MARGIN_FRAMES`.
     pub fn set_lookahead_secs(&self, secs: f64) {
-        store_secs(&self.shared.lookahead_secs, secs);
-        self.shared.caught_up.store(false, Ordering::Relaxed);
+        // Called on every frame: resetting `caught_up` unchanged kept the UI
+        // repainting forever.
+        if store_secs(&self.shared.lookahead_secs, secs) {
+            self.shared.caught_up.store(false, Ordering::Relaxed);
+        }
     }
 
     /// How many seconds of timeline to buffer *behind* the playhead too
     /// (Settings > Playback) — see the docs of `DEFAULT_BEHIND_SECS`.
     pub fn set_behind_secs(&self, secs: f64) {
-        store_secs(&self.shared.behind_secs, secs);
-        self.shared.caught_up.store(false, Ordering::Relaxed);
+        if store_secs(&self.shared.behind_secs, secs) {
+            self.shared.caught_up.store(false, Ordering::Relaxed);
+        }
     }
 
     /// The worker works on a copy of the project: it must be updated on every

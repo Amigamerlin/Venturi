@@ -537,6 +537,14 @@ impl VenturiApp {
         }
     }
 
+    /// eframe hands a capture over at the start of the frame after it: an
+    /// idle UI must draw that frame too.
+    pub(crate) fn mcp_awaits_screenshot(&self) -> bool {
+        self.mcp
+            .as_ref()
+            .is_some_and(|mcp| !mcp.shared.ui().screenshots.is_empty())
+    }
+
     /// Answers the `screenshot_ui` calls with the frame egui just captured.
     pub(crate) fn mcp_screenshot(&mut self, image: &egui::ColorImage) {
         let Some(mcp) = &self.mcp else {

@@ -1,6 +1,6 @@
 # UI_IDLE_CPU — the editor's main thread busy while nothing happens
 
-**Status:** to investigate, nothing changed yet.
+**Status:** fixed (§5).
 
 ## 1. What was seen
 
@@ -73,3 +73,19 @@ less CPU for decoding during playback.
 - Per-thread CPU: two snapshots of `utime + stime` (fields 14 and 15) of
   `/proc/<pid>/task/*/stat`, 10 s apart, **without** MCP calls between
   them.
+
+## 5. Outcome
+
+2026-10-12, x86 (Ryzen 3900X, 144 Hz display), same project and method:
+the main thread used 32% of a core, drawing 144 frames/s while idle.
+
+- **Cause:** hypothesis 1. `sync_render_ahead` calls `set_lookahead_secs`
+  and `set_behind_secs` on every frame, and both reset `caught_up` even
+  with an unchanged value; the timeline asks for a repaint while it is
+  not caught up, so every frame scheduled the next. Found with egui's
+  `ctx.repaint_causes()` (call sites of `request_repaint`).
+- **Fix:** they reset it only when the value changes. Idle CPU of the
+  whole process: 34.5% -> 0.5-0.8%.
+- The continuous repaint hid that `screenshot_ui` needs a second frame
+  (eframe hands the capture over at the start of the next one): the UI
+  now repaints while a screenshot is pending.

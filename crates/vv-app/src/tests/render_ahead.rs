@@ -3566,6 +3566,22 @@ fn a_replaced_project_never_shows_the_previous_projects_frames() {
     );
 }
 
+/// The UI sets the window on every frame and repaints until caught up: an
+/// unchanged window must not undo it, or an idle editor redraws forever.
+#[test]
+fn an_unchanged_window_keeps_render_ahead_caught_up() {
+    let path = make_test_clip("vv-app-render-ahead-idle-test", "idle.mp4", 1);
+    let (project, _, timeline_id) = single_media_project(path);
+    let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, None, 1.0, 0.5);
+    render_ahead.set_target(0);
+    wait_caught_up(&render_ahead);
+
+    render_ahead.set_lookahead_secs(1.0);
+    render_ahead.set_behind_secs(0.5);
+    render_ahead.set_target(0);
+    assert!(render_ahead.is_caught_up());
+}
+
 /// An open decoder for `media` on `path`, and a cached frame of it.
 fn opened_media(
     media: MediaId,
