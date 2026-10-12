@@ -721,3 +721,26 @@ fn a_cancelled_render_stops_at_the_next_chunk() {
     assert!(matches!(rendered, Err(ExportError::Cancelled)));
     assert_eq!(chunks, 1);
 }
+
+#[test]
+fn a_decode_thread_gone_without_an_end_fails_the_render() {
+    let (tx, decoded) = sync_channel(1);
+    drop(tx);
+    let mut reader = Reader {
+        path: PathBuf::from("gone.wav"),
+        streams: vec![0],
+        decoded,
+        kept: vec![KeptStream {
+            first: 0,
+            blocks: VecDeque::new(),
+            filling: new_block(),
+        }],
+        ended: false,
+        read_from: vec![None],
+        used: false,
+    };
+    assert!(matches!(
+        reader.read(0, 0..100),
+        Err(ExportError::Failed(_))
+    ));
+}

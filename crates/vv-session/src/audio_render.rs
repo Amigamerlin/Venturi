@@ -972,7 +972,14 @@ impl Reader {
             match self.decoded.recv() {
                 Ok(Decoded::Samples { slot, at, samples }) => self.append(slot, at, &samples),
                 Ok(Decoded::End(Err(e))) => return Err(ExportError::Failed(e)),
-                Ok(Decoded::End(Ok(()))) | Err(_) => self.ended = true,
+                Ok(Decoded::End(Ok(()))) => self.ended = true,
+                // The decode thread panicked: its audio would play as silence.
+                Err(_) => {
+                    return Err(ExportError::Failed(format!(
+                        "{}: the decode stopped",
+                        self.path.display()
+                    )));
+                }
             }
         }
         self.used = true;
