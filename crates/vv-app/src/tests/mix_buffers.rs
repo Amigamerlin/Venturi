@@ -570,3 +570,79 @@ fn a_mixed_compound_block_frees_the_audio_it_was_mixed_from() {
         "only the compound's own blocks are kept"
     );
 }
+
+fn job(id: u64, path: &str, stream: usize, blocks: Range<u64>, plays_at: u64) -> DecodeJob {
+    DecodeJob {
+        id,
+        path: PathBuf::from(path),
+        stream,
+        blocks,
+        plays_at,
+        cancelled: Arc::default(),
+    }
+}
+
+#[test]
+fn a_file_read_from_its_start_takes_every_job_queued_for_it_in_one_read() {
+    let mut queue = vec![
+        job(0, "seeks.wav", 0, 10..18, 0),
+        job(1, "resampled.wav", 0, 40..48, 10),
+        job(2, "resampled.wav", 1, 0..8, 50),
+        job(3, "seeks.wav", 1, 10..18, 60),
+        job(4, "resampled.wav", 0, 90..98, 70),
+    ];
+    let mut reads_from_start = |path: &Path| path == Path::new("resampled.wav");
+
+    let ids = |batch: Vec<DecodeJob>| batch.iter().map(|job| job.id).collect::<Vec<_>>();
+    let first = take_batch(&mut queue, 0, &mut reads_from_start);
+    assert_eq!(
+        ids(first),
+        [0, 3],
+        "a seekable file: its other streams over the same blocks"
+    );
+    let second = take_batch(&mut queue, 0, &mut reads_from_start);
+    let mut second = ids(second);
+    second.sort_unstable();
+    assert_eq!(
+        second,
+        [1, 2, 4],
+        "a resampled file: everything queued for it"
+    );
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn a_resampled_file_read_in_distant_places_matches_its_whole_decode() {
+    let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chirp44.wav");
+    vv_media::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=60:sample_rate=44100",
+        ],
+        &path,
+    );
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    let early = 5 * SEC..8 * SEC;
+    let late = 50 * SEC..53 * SEC;
+    read(&mut cache, &path, early.clone());
+    read(&mut cache, &path, late.clone());
+    wait_done(&mut cache);
+
+    let mut whole = Vec::new();
+    vv_media::decode_audio_streams_streaming(&path, &[0], Some(48_000), |_, _, chunk| {
+        whole.extend_from_slice(chunk);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    for frames in [early, late] {
+        let buffer = ready(&mut cache, &path, frames.clone());
+        assert_eq!(
+            buffer.to_vec(frames.clone()),
+            whole[frames.start as usize..frames.end as usize]
+        );
+    }
+}

@@ -66,6 +66,12 @@ settings.video_cache:
 settings.video_cache_hint:
   en: "How much RAM to use for pre-decoded frames: more = smoother scrub/playback, less = lower risk of running out of memory (especially with 4K+ sources)."
   it: "Quanta RAM usare per i frame pre-decodificati: di più = scrub/playback più fluidi, di meno = meno rischio di esaurire la memoria (soprattutto con sorgenti 4K+)."
+settings.audio_cache:
+  en: "Audio cache:"
+  it: "Cache audio:"
+settings.audio_cache_hint:
+  en: "How much RAM to use for the timeline's decoded audio. When the timeline needs more, only the audio around the playhead is kept and the rest is decoded again when needed; effects that measure a whole track (Normalize) may not be applied in the preview. Export is not affected."
+  it: "Quanta RAM usare per l'audio decodificato della timeline. Quando la timeline ne richiede di più, si tiene solo l'audio intorno alla testina e il resto viene ridecodificato quando serve; gli effetti che misurano un'intera traccia (Normalizzazione) potrebbero non essere applicati nell'anteprima. L'export non ne risente."
 settings.proxy:
   en: Proxy
   it: Proxy

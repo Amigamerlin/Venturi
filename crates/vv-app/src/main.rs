@@ -795,6 +795,7 @@ impl VenturiApp {
         let Some(audio) = &mut self.timeline_audio else {
             return;
         };
+        audio.set_budget_bytes(self.settings.audio_budget_bytes);
         if let Some(media_id) = self.browsing_media {
             if let Some(item) = self.session.project.media_pool.get(media_id) {
                 let duration_secs =
@@ -3307,32 +3308,39 @@ fn paint_toolbar_icon(
     }
 }
 
-/// Shown while an MCP client is connected: an accent dot and "MCP".
-fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
-    let galley = ui.painter().layout_no_wrap(
-        "MCP".to_owned(),
-        egui::TextStyle::Button.resolve(ui.style()),
-        theme::ACCENT,
-    );
+/// A dot and a short text in `color`, for a state of the editor.
+fn status_badge(ui: &mut egui::Ui, text: String, color: egui::Color32) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text, egui::TextStyle::Button.resolve(ui.style()), color);
     let size = egui::vec2(18.0 + galley.size().x, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
-    painter.circle_filled(
-        egui::pos2(rect.left() + 6.0, rect.center().y),
-        3.5,
-        theme::ACCENT,
-    );
+    painter.circle_filled(egui::pos2(rect.left() + 6.0, rect.center().y), 3.5, color);
     painter.galley(
         egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        theme::ACCENT,
+        color,
     );
+    response
+}
+
+/// Shown while an MCP client is connected: an accent dot and "MCP".
+fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
+    let response = status_badge(ui, "MCP".to_owned(), theme::ACCENT);
     response.on_hover_ui(|ui| {
         ui.label(t!("toolbar.mcp_connected"));
         if let Some(tool) = last_tool {
             ui.label(t!("toolbar.mcp_last_tool", tool = tool));
         }
     });
+}
+
+/// Shown while the timeline's audio does not fit the audio cache.
+fn audio_budget_indicator(ui: &mut egui::Ui) {
+    let color = ui.visuals().warn_fg_color;
+    status_badge(ui, t!("toolbar.audio_budget").to_string(), color)
+        .on_hover_text(t!("toolbar.audio_budget_hint"));
 }
 
 /// Hand-drawn magnet: on some platforms (Asahi) egui's fonts
@@ -3751,6 +3759,13 @@ impl VenturiApp {
                     );
                     if let Some(mcp) = self.mcp.as_ref().filter(|mcp| mcp.clients() > 0) {
                         agent_indicator(ui, mcp.last_tool());
+                    }
+                    if self
+                        .timeline_audio
+                        .as_ref()
+                        .is_some_and(TimelineAudio::over_budget)
+                    {
+                        audio_budget_indicator(ui);
                     }
                 });
             });

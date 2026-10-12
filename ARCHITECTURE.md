@@ -260,8 +260,11 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   Audio is held in blocks of 64k frames (`vv_audio::SampleBlocks`), only
   those the clips read (`mix_buffers.rs`): decoded in the background by
   seeking (`vv_media::decode_audio_streams_from`, sample-exact against a
-  decode from the start), the job closest to the playhead first, within a
-  1 GB budget that keeps the blocks closest to it. Compound clips are mixed
+  decode from the start; resampled files are read once from the start for
+  all their queued jobs), the job closest to the playhead first, within a
+  budget that keeps the blocks closest to it (Settings > Playback > Audio
+  cache, 1 GB by default; the toolbar shows "Audio cache full" when the
+  timeline's audio does not fit). Compound clips are mixed
   by block with a 2 s preroll (whole when their timeline normalizes). A
   missing block plays as silence. Redesign planned in
   [plans/AUDIO_GRAPH.md](plans/AUDIO_GRAPH.md).

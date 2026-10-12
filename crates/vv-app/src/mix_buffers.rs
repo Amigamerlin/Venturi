@@ -209,6 +209,16 @@ impl MixBufferCache {
         let worker_playhead = playhead.clone();
         let worker = Worker::spawn(move |job_rx: mpsc::Receiver<DecodeJob>| {
             let mut queue: Vec<DecodeJob> = Vec::new();
+            let mut from_start: HashMap<PathBuf, bool> = HashMap::new();
+            let mut reads_from_start = |path: &Path| {
+                *from_start.entry(path.to_path_buf()).or_insert_with(|| {
+                    vv_media::audio_streams(path).is_ok_and(|streams| {
+                        streams
+                            .iter()
+                            .any(|stream| stream.sample_rate != sample_rate)
+                    })
+                })
+            };
             loop {
                 if queue.is_empty() {
                     match job_rx.recv() {
@@ -219,23 +229,10 @@ impl MixBufferCache {
                 queue.extend(job_rx.try_iter());
                 queue.retain(|job| !job.cancelled.load(Ordering::Relaxed));
                 let playhead = worker_playhead.load(Ordering::Relaxed);
-                let Some(next) = queue
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, job)| (job.plays_at.abs_diff(playhead), job.id))
-                    .map(|(i, _)| i)
-                else {
+                let batch = take_batch(&mut queue, playhead, &mut reads_from_start);
+                let Some(path) = batch.first().map(|job| job.path.clone()) else {
                     continue;
                 };
-                let job = queue.swap_remove(next);
-                // The other streams of the same file over the same blocks:
-                // one read serves them all.
-                let (mut batch, rest): (Vec<_>, Vec<_>) = queue
-                    .drain(..)
-                    .partition(|other| other.path == job.path && other.blocks == job.blocks);
-                queue = rest;
-                batch.insert(0, job);
-                let path = batch[0].path.clone();
                 if !decode_blocks(&path, &batch, sample_rate, channels, &decoded_tx) {
                     break;
                 }
@@ -331,10 +328,17 @@ impl MixBufferCache {
         }
     }
 
-    #[cfg(test)]
     pub fn set_budget_bytes(&mut self, bytes: usize) {
-        self.budget_bytes = bytes;
-        self.unplanned = true;
+        if bytes != self.budget_bytes {
+            self.budget_bytes = bytes;
+            self.unplanned = true;
+        }
+    }
+
+    /// The mix reads more than the budget holds: only the blocks closest to
+    /// the playhead are kept, and what measures a whole timeline cannot.
+    pub fn over_budget(&self) -> bool {
+        self.over_budget
     }
 
     /// Where the mix plays now, in samples of what is mixed.
@@ -843,7 +847,36 @@ impl AudioSource for MixBufferCache {
     }
 }
 
-/// Decodes the blocks of `jobs` (all of `path`, same blocks) in one read,
+/// The next decode: the job closest to the playhead, with the queued jobs one
+/// read of its file serves too, i.e. the other streams over the same blocks.
+/// A file the decoder cannot seek in (it is resampled, see
+/// `vv_media::decode_audio_streams_from`) is read from its start whatever the
+/// job: every job queued for it goes in that read, instead of one read from
+/// the start per job.
+fn take_batch(
+    queue: &mut Vec<DecodeJob>,
+    playhead: u64,
+    reads_from_start: &mut impl FnMut(&Path) -> bool,
+) -> Vec<DecodeJob> {
+    let Some(next) = queue
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, job)| (job.plays_at.abs_diff(playhead), job.id))
+        .map(|(i, _)| i)
+    else {
+        return Vec::new();
+    };
+    let job = queue.swap_remove(next);
+    let whole_file = reads_from_start(&job.path);
+    let (mut batch, rest): (Vec<_>, Vec<_>) = std::mem::take(queue)
+        .into_iter()
+        .partition(|other| other.path == job.path && (whole_file || other.blocks == job.blocks));
+    *queue = rest;
+    batch.insert(0, job);
+    batch
+}
+
+/// Decodes the blocks of `jobs` (all of `path`) in one read,
 /// seeking to them, sending each block as soon as it is complete and
 /// stopping once the last job is. `false` if the receiver is gone (the
 /// worker must exit).

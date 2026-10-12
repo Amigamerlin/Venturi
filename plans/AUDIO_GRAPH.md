@@ -1,6 +1,7 @@
 # AUDIO_GRAPH — the preview and export audio as a graph of nodes
 
-**Status:** design, nothing implemented. Supersedes the audio part of
+**Status:** design, nothing implemented; what ships today and its limits
+are in §1.3. Supersedes the audio part of
 [REVERSE_SPEED.md](REVERSE_SPEED.md) (§3) and the open points of
 [AUDIO_SEEK.md](AUDIO_SEEK.md).
 
@@ -53,9 +54,36 @@ The common shape: **for an output range, each element needs some input
 ranges, or all of its input in order.** Making that the only contract
 removes the special cases.
 
+### 1.3 Current state (usable without this plan)
+
+After the commits above plus the budget setting:
+
+- **Memory**: bounded by the audio cache budget, **Settings > Playback >
+  Audio cache** (default 1 GB, `Settings::audio_budget_bytes`). When the
+  timeline's audio does not fit, the toolbar shows "Audio cache full" with
+  a tooltip explaining the consequences and pointing to the setting.
+- **Resampled sources** (anything not at 48 kHz, e.g. 44.1 kHz music or
+  phone recordings) cannot seek without a phase offset, so every queued job
+  of such a file is decoded in one read from its start
+  (`mix_buffers::take_batch`), not one read from the start per job.
+- **Verified** by tests (sample-exact seek on WAV, FLAC, PCM+H.264 MKV,
+  AAC, Opus, MP3; block mix equal to the previous mix, compounds included)
+  and by runtime measurement (§9). **Not verified by listening**: scrub and
+  jumps (a short silence until the blocks near the playhead arrive; new
+  blocks reach the mix with up to 250 ms of delay) and block edges inside
+  compounds with a compressor or EQ (2 s preroll, an approximation).
+
+Known limits, all removed by step 4 of §8:
+
+1. A compound clip whose own timeline normalizes is mixed whole and needs
+   all its sources at once: over budget it plays **silent**.
+2. A normalization on a track or master measures only once all its audio
+   is decoded: over budget it is never measured and the preview plays it
+   at unity gain (or the last level measured). Export is unaffected.
+
 ---
 
-## 2. Where the code is today (after a5d3c48)
+## 2. Where the code is today
 
 | Piece | Where | Role |
 |---|---|---|
@@ -65,7 +93,7 @@ removes the special cases.
 | `AudioSource` | same | what the mixer asks: `file_frames(path, stream, frames, plays_at)`, compound blocks, stretch, levels |
 | `compound_audio`, `compound_blocks`, `CompoundMix` | same | compound clip: by block with preroll, or whole when its timeline normalizes |
 | `resolve_chain`, `LevelAnalysis` | same | effects of a strip; normalization measures through the effects before it |
-| `MixBufferCache` | `vv-app/src/mix_buffers.rs` | preview store: file blocks, compound blocks, budget, `rebalance` by distance to the playhead, decode/mix/stretch/level workers, passes (`begin_pass`/`sweep_unused`) |
+| `MixBufferCache` | `vv-app/src/mix_buffers.rs` | preview store: file blocks, compound blocks, budget, `rebalance` by distance to the playhead, decode/mix/stretch/level workers, passes (`begin_pass`/`sweep_unused`); `take_batch` reads a resampled file once for all its queued jobs |
 | `TimelineAudio` | `vv-app/src/timeline_audio.rs` | rebuilds the snapshot on history change or new blocks, publishes it to the cpal callback; fast forward (`StretchedWindow`), scrub, media preview |
 | `mix_audio_track` | `vv-session/src/export.rs` | export: collects the wanted windows, decodes them from the start of each file, mixes; compounds whole |
 | `analysis.rs`, `silence.rs` | `vv-session` | MCP levels and silence detection, on top of export's mix or direct decodes |
@@ -305,8 +333,7 @@ the runtime measurement of §9.
    clip, in preview blocks and in export.
 
 Later, by measurement: f16/i16 block storage, a shared worker pool,
-materializing hot intermediate nodes, the budget as a setting next to the
-video cache's.
+materializing hot intermediate nodes.
 
 ---
 
