@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use vv_audio::{
 use vv_audio::{LevelSegment, Measured, StretchInput, StretchRequest};
 use vv_core::{NormalizeMode, Project, Timeline};
 use vv_session::audio_render::{LevelCache, measure_level, stretch_offline};
+use vv_session::export::ExportError;
 
 use crate::worker::Worker;
 
@@ -27,6 +28,8 @@ type Key = (PathBuf, usize);
 /// `OwnedAnalysis`).
 struct OwnedStretch {
     key: u64,
+    /// Set when its clip is no longer played: it stops being rendered.
+    cancelled: Arc<AtomicBool>,
     input: OwnedInput,
     frames: Range<u64>,
     tempo: f64,
@@ -67,7 +70,7 @@ struct StretchJob {
 }
 
 enum Stretch {
-    Pending,
+    Pending(Arc<AtomicBool>),
     Ready(SampleBlocks),
     Failed,
 }
@@ -220,6 +223,10 @@ pub struct MixBufferCache {
     /// Keys asked for since the last `sweep_unused`.
     stretch_used: HashSet<u64>,
     queued_stretches: Vec<OwnedStretch>,
+    /// Jobs sent and not done: the queued ones wait until it is 0, so a
+    /// drag clones the project as often as the worker takes a job, not
+    /// every frame.
+    stretch_busy: Arc<AtomicUsize>,
     stretch_worker: Worker<StretchJob>,
     stretch_rx: mpsc::Receiver<(u64, Result<SampleBlocks, String>)>,
     /// Normalization levels by `LevelAnalysis::key`; `None` while measuring.
@@ -227,8 +234,11 @@ pub struct MixBufferCache {
     last_level: HashMap<AnalysisSlot, f32>,
     level_used: HashSet<u64>,
     queued_levels: Vec<OwnedAnalysis>,
+    level_busy: Arc<AtomicUsize>,
     level_worker: Worker<LevelJob>,
     level_rx: mpsc::Receiver<LevelResult>,
+    /// Stops the level worker's measures when the cache drops.
+    closing: Arc<AtomicBool>,
 }
 
 impl MixBufferCache {
@@ -258,32 +268,45 @@ impl MixBufferCache {
             }
         });
         let (stretch_tx, stretch_rx) = mpsc::channel();
+        let stretch_busy = Arc::new(AtomicUsize::new(0));
+        let worker_stretch_busy = stretch_busy.clone();
         let stretch_worker = Worker::spawn(move |jobs: mpsc::Receiver<StretchJob>| {
             let mut cache = LevelCache::on_disk();
             cache.threads = 1;
             for StretchJob { project, stretch } in jobs {
-                let result = stretch_offline(&stretch.request(&project), &mut cache)
-                    .map_err(|e| e.to_string());
-                if stretch_tx.send((stretch.key, result)).is_err() {
+                cache.cancel = Some(stretch.cancelled.clone());
+                let result = match stretch_offline(&stretch.request(&project), &mut cache) {
+                    Err(ExportError::Cancelled) => None,
+                    result => Some(result.map_err(|e| e.to_string())),
+                };
+                worker_stretch_busy.fetch_sub(1, Ordering::Relaxed);
+                if let Some(result) = result
+                    && stretch_tx.send((stretch.key, result)).is_err()
+                {
                     break;
                 }
             }
         });
         let (level_tx, level_rx) = mpsc::channel::<LevelResult>();
+        let level_busy = Arc::new(AtomicUsize::new(0));
+        let worker_level_busy = level_busy.clone();
+        let closing = Arc::new(AtomicBool::new(false));
+        let worker_closing = closing.clone();
         let level_worker = Worker::spawn(move |jobs: mpsc::Receiver<LevelJob>| {
             // Half the cores: the playback's decodes need the rest.
             let mut cache = LevelCache::on_disk();
             cache.threads = cache.threads.div_ceil(2);
+            cache.cancel = Some(worker_closing.clone());
             while let Ok(first) = jobs.recv() {
                 let mut batch = vec![first];
-                // A drag queues one job per frame: only the newest of each
-                // slot is worth measuring.
+                // Only the newest job of each slot is worth measuring.
                 while let Ok(job) = jobs.try_recv() {
                     let slot = job.analysis.slot;
                     let older =
                         slot.and_then(|s| batch.iter().position(|j| j.analysis.slot == Some(s)));
                     if let Some(older) = older {
                         let dropped = std::mem::replace(&mut batch[older], job).analysis;
+                        worker_level_busy.fetch_sub(1, Ordering::Relaxed);
                         if level_tx.send((dropped.key, slot, None)).is_err() {
                             return;
                         }
@@ -292,12 +315,16 @@ impl MixBufferCache {
                     }
                 }
                 for LevelJob { project, analysis } in batch {
+                    let measured = measure_level(&analysis.analysis(&project), &mut cache);
+                    worker_level_busy.fetch_sub(1, Ordering::Relaxed);
+                    if worker_closing.load(Ordering::Relaxed) {
+                        return;
+                    }
                     // Unity gain rather than a failed measure.
-                    let level = measure_level(&analysis.analysis(&project), &mut cache)
-                        .unwrap_or_else(|e| {
-                            eprintln!("[mix_buffers] level: {e}");
-                            0.0
-                        });
+                    let level = measured.unwrap_or_else(|e| {
+                        eprintln!("[mix_buffers] level: {e}");
+                        0.0
+                    });
                     if level_tx
                         .send((analysis.key, analysis.slot, Some(level)))
                         .is_err()
@@ -326,14 +353,17 @@ impl MixBufferCache {
             stretched: HashMap::new(),
             stretch_used: HashSet::new(),
             queued_stretches: Vec::new(),
+            stretch_busy,
             stretch_worker,
             stretch_rx,
             levels: HashMap::new(),
             last_level: HashMap::new(),
             level_used: HashSet::new(),
             queued_levels: Vec::new(),
+            level_busy,
             level_worker,
             level_rx,
+            closing,
         }
     }
 
@@ -402,9 +432,20 @@ impl MixBufferCache {
             return;
         }
         let used = std::mem::take(&mut self.stretch_used);
-        self.stretched.retain(|key, _| used.contains(key));
+        self.stretched.retain(|key, stretch| {
+            let keep = used.contains(key);
+            if let (false, Stretch::Pending(cancelled)) = (keep, stretch) {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+            keep
+        });
+        self.queued_stretches
+            .retain(|stretch| !stretch.cancelled.load(Ordering::Relaxed));
         let used = std::mem::take(&mut self.level_used);
         self.levels.retain(|key, _| used.contains(key));
+        let levels = &self.levels;
+        self.queued_levels
+            .retain(|analysis| levels.contains_key(&analysis.key));
     }
 
     /// Frames `frames` of `stream` of `path`, as far as decoded; for the
@@ -669,24 +710,36 @@ impl MixBufferCache {
         changed
     }
 
-    /// Hands the levels and stretches the pass asked for to their workers,
-    /// with a copy of `project` to render them from.
+    /// Hands the levels and stretches asked for to their workers once they
+    /// are idle, with a copy of `project` to render them from. Every frame:
+    /// a worker becoming idle takes the jobs waiting.
     pub fn send_jobs(&mut self, project: &Project) {
-        if self.queued_levels.is_empty() && self.queued_stretches.is_empty() {
+        let idle = |busy: &AtomicUsize| busy.load(Ordering::Relaxed) == 0;
+        let levels = !self.queued_levels.is_empty() && idle(&self.level_busy);
+        let stretches = !self.queued_stretches.is_empty() && idle(&self.stretch_busy);
+        if !levels && !stretches {
             return;
         }
         let project = Arc::new(project.clone());
-        for analysis in self.queued_levels.drain(..) {
-            self.level_worker.send(LevelJob {
-                project: project.clone(),
-                analysis,
-            });
+        if levels {
+            self.level_busy
+                .fetch_add(self.queued_levels.len(), Ordering::Relaxed);
+            for analysis in self.queued_levels.drain(..) {
+                self.level_worker.send(LevelJob {
+                    project: project.clone(),
+                    analysis,
+                });
+            }
         }
-        for stretch in self.queued_stretches.drain(..) {
-            self.stretch_worker.send(StretchJob {
-                project: project.clone(),
-                stretch,
-            });
+        if stretches {
+            self.stretch_busy
+                .fetch_add(self.queued_stretches.len(), Ordering::Relaxed);
+            for stretch in self.queued_stretches.drain(..) {
+                self.stretch_worker.send(StretchJob {
+                    project: project.clone(),
+                    stretch,
+                });
+            }
         }
     }
 
@@ -698,7 +751,23 @@ impl MixBufferCache {
             || self
                 .stretched
                 .values()
-                .any(|stretch| matches!(stretch, Stretch::Pending))
+                .any(|stretch| matches!(stretch, Stretch::Pending(_)))
+    }
+}
+
+/// The workers join on drop: what they have queued or running is cancelled
+/// first, or closing the app would wait for it.
+impl Drop for MixBufferCache {
+    fn drop(&mut self) {
+        for job in self.streams.values().flat_map(|stream| &stream.jobs) {
+            job.cancelled.store(true, Ordering::Relaxed);
+        }
+        for stretch in self.stretched.values() {
+            if let Stretch::Pending(cancelled) = stretch {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+        }
+        self.closing.store(true, Ordering::Relaxed);
     }
 }
 
@@ -723,13 +792,15 @@ impl AudioSource for MixBufferCache {
         self.stretch_used.insert(request.key);
         if let Some(entry) = self.stretched.get(&request.key) {
             return match entry {
-                Stretch::Pending => ClipAudio::Pending,
+                Stretch::Pending(_) => ClipAudio::Pending,
                 Stretch::Ready(samples) => ClipAudio::Ready(samples.clone()),
                 Stretch::Failed => ClipAudio::Missing,
             };
         }
+        let cancelled = Arc::new(AtomicBool::new(false));
         self.queued_stretches.push(OwnedStretch {
             key: request.key,
+            cancelled: cancelled.clone(),
             input: match request.input {
                 StretchInput::File { path, stream } => OwnedInput::File(path.to_path_buf(), stream),
                 StretchInput::Nested { timeline, depth } => {
@@ -740,7 +811,8 @@ impl AudioSource for MixBufferCache {
             tempo: request.tempo,
             format: (request.sample_rate, request.channels),
         });
-        self.stretched.insert(request.key, Stretch::Pending);
+        self.stretched
+            .insert(request.key, Stretch::Pending(cancelled));
         ClipAudio::Pending
     }
 

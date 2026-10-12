@@ -2,8 +2,8 @@
 
 Open items from the review of the `audio-blocks` branch (2026-10-12).
 Fixed: items 1–4 of that review (level-measure deadlock, decode priority,
-compound fade-out, stale on-disk levels), timestamp gaps and seeking in
-resampled files.
+compound fade-out, stale on-disk levels), timestamp gaps, seeking in
+resampled files, stale stretch jobs and the shutdown wait.
 
 ## Audio: correctness
 
@@ -38,14 +38,9 @@ resampled files.
 
 ## Audio: performance
 
-- **Stale stretch jobs** run to completion: dragging the trim of a
-  pitch-corrected clip queues a full render-and-stretch per drag frame.
-  `send_jobs` clones the whole `Project` on every sync that queues a job.
 - **Fast forward** starts a new mix-and-stretch thread per frame while
   editing, and every frame after a failed stretch (`timeline_audio.rs`,
   `request_window`).
-- **Shutdown** runs every queued decode, level and stretch job to the end:
-  nothing cancels them when `MixBufferCache` drops.
 - **Previewing a media** from the pool drops every decoded block of the
   timeline (`begin(true)` clears `asked`), despite the `begin_media_pass`
   doc.

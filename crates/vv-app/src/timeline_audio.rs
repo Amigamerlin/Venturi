@@ -108,6 +108,7 @@ impl TimelineAudio {
     pub fn sync(&mut self, project: &Project, timeline_id: TimelineId, generation: u64) {
         self.buffers.set_playhead(self.position_sample());
         let buffers_arrived = self.buffers.poll();
+        self.buffers.send_jobs(project);
         let content_changed = self.synced != Some((timeline_id, generation));
         if !buffers_arrived && !content_changed {
             return;

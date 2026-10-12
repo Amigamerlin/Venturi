@@ -701,3 +701,23 @@ fn a_compound_measuring_a_segment_its_parent_claimed_does_not_wait_on_itself() {
     let rendered = rx.recv_timeout(std::time::Duration::from_secs(60));
     assert_eq!(rendered, Ok(true), "the render hung or failed");
 }
+
+#[test]
+fn a_cancelled_render_stops_at_the_next_chunk() {
+    let mut project = Project::default();
+    let file = media(&mut project, chirp("cancelled.wav", 48_000, 20), 48_000, 1);
+    let tl = timeline(vec![audio_track(vec![clip(1, file, 0, 500, 0)])]);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut cache = LevelCache {
+        cancel: Some(cancel.clone()),
+        ..LevelCache::default()
+    };
+    let mut chunks = 0;
+    let rendered = render_offline(&project, &tl, samples(0..500), &mut cache, |_| {
+        chunks += 1;
+        cancel.store(true, Ordering::Relaxed);
+        ControlFlow::Continue(())
+    });
+    assert!(matches!(rendered, Err(ExportError::Cancelled)));
+    assert_eq!(chunks, 1);
+}

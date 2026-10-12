@@ -608,3 +608,79 @@ fn a_resampled_file_read_in_distant_places_matches_its_whole_decode() {
         );
     }
 }
+
+/// Ten minutes at 2x: a stretch that takes far longer than the tests wait.
+fn long_stretch<'a>(project: &'a Project, path: &'a Path, key: u64) -> StretchRequest<'a> {
+    StretchRequest {
+        project,
+        input: vv_audio::StretchInput::File { path, stream: 0 },
+        frames: 0..600 * SEC,
+        tempo: 2.0,
+        sample_rate: 48_000,
+        channels: 1,
+        key,
+    }
+}
+
+fn wait_idle(busy: &AtomicUsize, within: std::time::Duration) {
+    let deadline = std::time::Instant::now() + within;
+    while busy.load(Ordering::Relaxed) > 0 {
+        assert!(std::time::Instant::now() < deadline, "still busy");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// A drag of a pitch-corrected clip asks a new stretch every frame.
+#[test]
+fn a_stretch_no_longer_played_stops_and_the_next_waits_for_the_worker() {
+    let path = sine_wav("long_stretch.wav", 600);
+    let project = Project::default();
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    cache.begin_pass();
+    cache.stretched(long_stretch(&project, &path, 1));
+    cache.sweep_unused();
+    cache.send_jobs(&project);
+
+    cache.begin_pass();
+    cache.stretched(long_stretch(&project, &path, 2));
+    cache.sweep_unused();
+    cache.send_jobs(&project);
+    assert_eq!(
+        cache.queued_stretches.len(),
+        1,
+        "held while the worker is busy"
+    );
+
+    wait_idle(&cache.stretch_busy, std::time::Duration::from_secs(5));
+    cache.send_jobs(&project);
+    assert!(cache.queued_stretches.is_empty());
+}
+
+#[test]
+fn dropping_the_cache_stops_the_stretches_and_measures_running() {
+    let path = sine_wav("long_drop.wav", 600);
+    let (project, _, mut parent) = compound_project(&path, 600);
+    parent.master.effects = vec![vv_core::AudioEffect::new(
+        vv_core::AudioEffectKind::Normalize {
+            target_db: 0.0,
+            mode: vv_core::NormalizeMode::Loudness,
+            set_level: vv_core::SetLevel::Relative,
+        },
+    )];
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    cache.begin_pass();
+    MixSnapshot::from_timeline(&project, &parent, 48_000, 1, &mut cache);
+    cache.stretched(long_stretch(&project, &path, 1));
+    cache.sweep_unused();
+    cache.send_jobs(&project);
+    assert_eq!(cache.level_busy.load(Ordering::Relaxed), 1);
+    assert_eq!(cache.stretch_busy.load(Ordering::Relaxed), 1);
+
+    let started = std::time::Instant::now();
+    drop(cache);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "dropped in {:?}",
+        started.elapsed()
+    );
+}

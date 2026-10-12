@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use vv_audio::loudness::{LOOKAHEAD_FRAMES, LevelMeter, LevelParts};
@@ -329,6 +330,9 @@ fn render(
     let mut out = Vec::new();
     let mut at = range.start;
     while at < range.end {
+        if audio.cache.cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let chunk = at..(at + CHUNK_FRAMES).min(range.end);
         let last = chunk.end == range.end;
         let snapshot = audio.snapshot(project, mix, chunk.clone(), last)?;
@@ -361,6 +365,8 @@ pub struct LevelCache {
     pub threads: usize,
     /// A measure this render is nested in holds claimed segments.
     holding: bool,
+    /// Set, the renders through it stop with `ExportError::Cancelled`.
+    pub cancel: Option<Arc<AtomicBool>>,
     /// Segments rendered, not found.
     pub rendered: usize,
 }
@@ -388,6 +394,7 @@ impl Default for LevelCache {
             reads: HashSet::new(),
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             holding: false,
+            cancel: None,
             rendered: 0,
         }
     }
@@ -410,8 +417,15 @@ impl LevelCache {
             reads: HashSet::new(),
             threads: 1,
             holding: self.holding,
+            cancel: self.cancel.clone(),
             rendered: 0,
         }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 
     fn absorb(&mut self, other: LevelCache) {
