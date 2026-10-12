@@ -13,7 +13,7 @@ use vv_core::{
     MixerChannel, MultibandCompressor, NormalizeMode, Project, SetLevel, Timeline, TimelineId,
 };
 
-use crate::blocks::{Run, SampleBlocks};
+use crate::blocks::{BLOCK_FRAMES, Run, SampleBlocks};
 use crate::dynamics::{BandActivity, MultibandProcessor};
 use crate::eq::EqProcessor;
 use crate::loudness::LevelMeter;
@@ -582,6 +582,38 @@ pub enum ClipAudio {
     Missing,
 }
 
+/// Mixed before a compound clip's block and dropped: the compressors and
+/// equalizers of its timeline reach the state they would have there.
+const COMPOUND_PREROLL_FRAMES: u64 = 2 * PROJECT_SAMPLE_RATE as u64;
+
+/// A block of a compound clip's mix, as an `AudioSource` holds it.
+pub enum CompoundBlock {
+    Ready(Arc<Vec<f32>>),
+    /// Being mixed.
+    Mixing,
+    Absent,
+}
+
+/// What mixes block `index` of a compound clip: its nested timeline from
+/// `start`, the preroll then dropped.
+pub struct CompoundMix {
+    pub snapshot: MixSnapshot,
+    pub start: u64,
+    pub index: u64,
+}
+
+impl CompoundMix {
+    pub fn run(&self) -> Vec<f32> {
+        let ch = self.snapshot.channels.max(1) as usize;
+        let block_start = self.index * BLOCK_FRAMES;
+        let frames = (block_start + BLOCK_FRAMES - self.start) as usize;
+        let mut out = vec![0.0; frames * ch];
+        mix_range(&self.snapshot, self.start, &mut out);
+        // A copy: draining the preroll would keep its capacity in every block.
+        out[(block_start - self.start) as usize * ch..].to_vec()
+    }
+}
+
 /// The decoded audio a mix is built from. Compound clips never reach `file`:
 /// their mixdown is built from the nested timeline (`compound_mixdown`).
 pub trait AudioSource {
@@ -607,6 +639,27 @@ pub trait AudioSource {
     }
 
     fn store_compound(&mut self, _media_id: MediaId, _content_hash: u64, _mixdown: Arc<Vec<f32>>) {}
+
+    /// `true` if it keeps compound clips' mixes by block (`compound_block`,
+    /// `mix_compound_block`); otherwise each is mixed whole, kept by
+    /// `store_compound`.
+    fn mixes_compounds_by_block(&self) -> bool {
+        false
+    }
+
+    /// Block `index` of a compound clip's mix, playing at `plays_at`.
+    fn compound_block(
+        &mut self,
+        _media_id: MediaId,
+        _content_hash: u64,
+        _index: u64,
+        _plays_at: u64,
+    ) -> CompoundBlock {
+        CompoundBlock::Absent
+    }
+
+    /// Mixes the block `mix` describes, for `compound_block` to hand out.
+    fn mix_compound_block(&mut self, _media_id: MediaId, _content_hash: u64, _mix: CompoundMix) {}
 
     /// Frames `range` of `buffer` time-stretched by `tempo`, pitch
     /// preserved, starting at frame 0. Synchronous here; the preview answers
@@ -698,8 +751,10 @@ fn collect_clips(
             let Some(needed) = span.media_frames(mixed) else {
                 continue;
             };
+            let into_clip = needed.start.saturating_sub(span.source_offset) as f64 / span.step;
+            let plays_at = (placement + span.start as i64 + into_clip as i64).max(0) as u64;
             let audio = if item.compound.is_some() {
-                // A compound used twice is mixed once: placed by its first use.
+                // A compound used twice is mixed whole once: placed by its first use.
                 let nested_placement = placement + span.start as i64 - span.source_offset as i64;
                 compound_audio(
                     project,
@@ -709,10 +764,9 @@ fn collect_clips(
                     source,
                     depth,
                     nested_placement,
+                    Some((needed.clone(), plays_at)),
                 )
             } else {
-                let into_clip = needed.start.saturating_sub(span.source_offset) as f64 / span.step;
-                let plays_at = (placement + span.start as i64 + into_clip as i64).max(0) as u64;
                 source.file_frames(
                     &item.path,
                     clip.audio_stream_index,
@@ -930,9 +984,12 @@ pub fn compound_mixdown(
     channels: u16,
     source: &mut impl AudioSource,
 ) -> ClipAudio {
-    compound_audio(project, media_id, sample_rate, channels, source, 0, 0)
+    compound_audio(project, media_id, sample_rate, channels, source, 0, 0, None)
 }
 
+/// `read`: the frames a clip reads and when they play, for a source that
+/// mixes compounds by block; without it the compound is mixed whole.
+#[allow(clippy::too_many_arguments)]
 fn compound_audio(
     project: &Project,
     media_id: MediaId,
@@ -941,6 +998,7 @@ fn compound_audio(
     source: &mut impl AudioSource,
     depth: u32,
     placement: i64,
+    read: Option<(std::ops::Range<u64>, u64)>,
 ) -> ClipAudio {
     // Past the limit (only a cycle gets here) it never becomes ready: the
     // whole cycle stays silent instead of layering itself 16 times.
@@ -953,6 +1011,24 @@ fn compound_audio(
     let Some(nested) = item.compound.and_then(|id| project.timelines.get(id)) else {
         return ClipAudio::Missing;
     };
+    // A normalization measures its whole timeline: a block would measure itself.
+    if let Some((needed, plays_at)) = read
+        && source.mixes_compounds_by_block()
+        && !normalizes(nested)
+    {
+        return compound_blocks(
+            project,
+            (media_id, item.content_hash),
+            nested,
+            sample_rate,
+            channels,
+            source,
+            depth,
+            placement,
+            needed,
+            plays_at,
+        );
+    }
     let blocks = |mixdown| SampleBlocks::contiguous(mixdown, 0, channels);
     if let Some(mixdown) = source.cached_compound(media_id, item.content_hash) {
         return ClipAudio::Ready(blocks(mixdown));
@@ -984,6 +1060,72 @@ fn compound_audio(
     }
     source.store_compound(media_id, item.content_hash, mixdown.clone());
     ClipAudio::Ready(blocks(mixdown))
+}
+
+/// The blocks of a compound clip's mix holding `needed`: each one missing
+/// is handed to `source` to mix once the audio it needs is there.
+#[allow(clippy::too_many_arguments)]
+fn compound_blocks(
+    project: &Project,
+    (media_id, content_hash): (MediaId, u64),
+    nested: &Timeline,
+    sample_rate: u32,
+    channels: u16,
+    source: &mut impl AudioSource,
+    depth: u32,
+    placement: i64,
+    needed: std::ops::Range<u64>,
+    plays_at: u64,
+) -> ClipAudio {
+    let first = needed.start / BLOCK_FRAMES;
+    let last = needed.end.div_ceil(BLOCK_FRAMES).max(first);
+    let mut blocks = Vec::with_capacity((last - first) as usize);
+    for index in first..last {
+        let plays = (plays_at + index * BLOCK_FRAMES).saturating_sub(needed.start);
+        match source.compound_block(media_id, content_hash, index, plays) {
+            CompoundBlock::Ready(block) => blocks.push(Some(block)),
+            CompoundBlock::Mixing => blocks.push(None),
+            CompoundBlock::Absent => {
+                blocks.push(None);
+                let start = (index * BLOCK_FRAMES).saturating_sub(COMPOUND_PREROLL_FRAMES);
+                let range = start..(index + 1) * BLOCK_FRAMES;
+                let (snapshot, readiness) = collect_clips(
+                    project,
+                    nested,
+                    sample_rate,
+                    channels,
+                    source,
+                    Some(range),
+                    depth + 1,
+                    placement,
+                );
+                if readiness == Readiness::Complete {
+                    let mix = CompoundMix {
+                        snapshot,
+                        start,
+                        index,
+                    };
+                    source.mix_compound_block(media_id, content_hash, mix);
+                }
+            }
+        }
+    }
+    let present = blocks.iter().filter(|b| b.is_some()).count();
+    let complete = present == blocks.len();
+    let view = SampleBlocks::new(
+        first * BLOCK_FRAMES,
+        BLOCK_FRAMES,
+        channels,
+        blocks,
+        last * BLOCK_FRAMES,
+    );
+    if complete {
+        ClipAudio::Ready(view)
+    } else if present > 0 {
+        ClipAudio::Partial(view)
+    } else {
+        ClipAudio::Pending
+    }
 }
 
 fn normalizes(timeline: &Timeline) -> bool {

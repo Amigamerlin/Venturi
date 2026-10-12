@@ -6,6 +6,9 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 
+/// The block size of the preview's audio: about 1.4 s at 48 kHz.
+pub const BLOCK_FRAMES: u64 = 1 << 16;
+
 /// A run of frames read from `SampleBlocks::run`.
 pub enum Run<'a> {
     Samples(&'a [f32]),

@@ -13,7 +13,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use vv_audio::{AnalysisSlot, AudioSource, ClipAudio, LevelAnalysis, LevelReading, SampleBlocks};
+use vv_audio::{
+    AnalysisSlot, AudioSource, BLOCK_FRAMES, ClipAudio, CompoundBlock, CompoundMix, LevelAnalysis,
+    LevelReading, SampleBlocks,
+};
 use vv_core::MediaId;
 
 use crate::worker::Worker;
@@ -46,9 +49,6 @@ struct LevelJob {
 /// `None`: dropped for a newer job of the same slot.
 type LevelResult = (u64, Option<AnalysisSlot>, Option<f32>);
 
-/// About 1.4 s at 48 kHz.
-const BLOCK_FRAMES: u64 = 1 << 16;
-
 /// Blocks kept on each side of what the clips read: a trim into them
 /// decodes nothing.
 const MARGIN_BLOCKS: u64 = 1;
@@ -57,9 +57,9 @@ const MARGIN_BLOCKS: u64 = 1;
 /// again for the job closest to the playhead.
 const JOB_BLOCKS: u64 = 8;
 
-/// New blocks rebuild the mix at most this often: until compound clips are
-/// mixed by block, each rebuild mixes a partial compound whole.
-const BLOCK_REBUILD_INTERVAL: Duration = Duration::from_millis(500);
+/// New blocks rebuild the mix at most this often: a rebuild walks every
+/// block of the compound clips.
+const BLOCK_REBUILD_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Over budget, a playhead move this long chooses again what to keep.
 const REBALANCE_FRAMES: u64 = 2 * vv_audio::mixer::PROJECT_SAMPLE_RATE as u64;
@@ -87,6 +87,41 @@ impl StreamCache {
         self.jobs.iter().any(|job| job.blocks.contains(&block))
     }
 }
+
+/// The blocks of a compound clip's mix (`AudioSource::mixes_compounds_by_block`).
+#[derive(Default)]
+struct CompoundCache {
+    content_hash: u64,
+    blocks: HashMap<u64, Arc<Vec<f32>>>,
+    mixing: HashSet<u64>,
+    asked: bool,
+    wanted: HashMap<u64, u64>,
+}
+
+/// What `rebalance` weighs: the blocks of a stream, or of a compound's mix.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Owner {
+    File(Key),
+    Compound(MediaId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OwnerRef<'a> {
+    File(&'a Key),
+    Compound(MediaId),
+}
+
+impl OwnerRef<'_> {
+    fn to_owned(self) -> Owner {
+        match self {
+            OwnerRef::File(key) => Owner::File(key.clone()),
+            OwnerRef::Compound(media_id) => Owner::Compound(media_id),
+        }
+    }
+}
+
+/// A compound block mixed: media, `content_hash`, index, samples.
+type Mixed = (MediaId, u64, u64, Arc<Vec<f32>>);
 
 struct Job {
     id: u64,
@@ -124,6 +159,9 @@ pub struct MixBufferCache {
     channels: u16,
     budget_bytes: usize,
     streams: HashMap<Key, StreamCache>,
+    compounds: HashMap<MediaId, CompoundCache>,
+    mix_worker: Worker<(MediaId, u64, CompoundMix)>,
+    mixed_rx: mpsc::Receiver<Mixed>,
     job_keys: HashMap<u64, Key>,
     next_id: u64,
     /// Where the mix plays, in samples of what is mixed (a timeline, or a
@@ -145,8 +183,8 @@ pub struct MixBufferCache {
     /// Blocks arrived and not yet reported by `poll`, and when it last did.
     unreported_blocks: bool,
     last_block_report: Option<Instant>,
-    /// Mixdowns of compound clips, with the `content_hash` they were
-    /// computed with (see `vv_audio::mixer::compound_mixdown`).
+    /// Whole mixdowns of the compound clips that normalize, with the
+    /// `content_hash` they were computed with.
     compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
     compound_used: HashSet<MediaId>,
     /// Pitch-corrected clip audio (see `AudioSource::stretched`), with the
@@ -203,6 +241,18 @@ impl MixBufferCache {
                 }
             }
         });
+        let (mixed_tx, mixed_rx) = mpsc::channel::<Mixed>();
+        let mix_worker = Worker::spawn(move |jobs: mpsc::Receiver<(MediaId, u64, CompoundMix)>| {
+            for (media_id, content_hash, mix) in jobs {
+                let block = Arc::new(mix.run());
+                if mixed_tx
+                    .send((media_id, content_hash, mix.index, block))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let (stretch_tx, stretch_rx) = mpsc::channel();
         let stretch_worker = Worker::spawn(move |jobs: mpsc::Receiver<StretchJob>| {
             for job in jobs {
@@ -252,6 +302,9 @@ impl MixBufferCache {
             channels,
             budget_bytes: DEFAULT_AUDIO_BUDGET_BYTES,
             streams: HashMap::new(),
+            compounds: HashMap::new(),
+            mix_worker,
+            mixed_rx,
             job_keys: HashMap::new(),
             next_id: 0,
             playhead,
@@ -313,6 +366,10 @@ impl MixBufferCache {
         }
         if !media_pass {
             self.compound_used.clear();
+            for compound in self.compounds.values_mut() {
+                compound.asked = false;
+                compound.wanted.clear();
+            }
         }
     }
 
@@ -340,6 +397,15 @@ impl MixBufferCache {
             });
             *asked
         });
+        if !self.media_pass {
+            self.compounds.retain(|_, compound| {
+                let wanted = &compound.wanted;
+                compound
+                    .blocks
+                    .retain(|index, _| wanted.contains_key(index));
+                compound.asked
+            });
+        }
         self.rebalance();
         if self.media_pass {
             return;
@@ -439,29 +505,50 @@ impl MixBufferCache {
         self.unplanned = false;
         let playhead = self.playhead.load(Ordering::Relaxed);
         self.rebalanced_at = playhead;
-        let mut wanted: Vec<(u64, &Key, u64)> = self
-            .streams
-            .iter()
-            .flat_map(|(key, stream)| {
-                stream
-                    .wanted
-                    .iter()
-                    .map(move |(&index, &plays)| (plays, key, index))
-            })
-            .collect();
-        wanted.sort_unstable_by_key(|&(plays, key, index)| (plays.abs_diff(playhead), key, index));
+        let files = self.streams.iter().flat_map(|(key, stream)| {
+            stream
+                .wanted
+                .iter()
+                .map(move |(&index, &plays)| (plays, OwnerRef::File(key), index))
+        });
+        let compounds = self.compounds.iter().flat_map(|(&media_id, compound)| {
+            compound
+                .wanted
+                .iter()
+                .map(move |(&index, &plays)| (plays, OwnerRef::Compound(media_id), index))
+        });
+        let mut wanted: Vec<(u64, OwnerRef, u64)> = files.chain(compounds).collect();
+        wanted.sort_unstable_by_key(|&(plays, owner, index)| {
+            (plays.abs_diff(playhead), owner, index)
+        });
         let block_bytes = BLOCK_FRAMES as usize * self.channels.max(1) as usize * 4;
         let fit = (self.budget_bytes / block_bytes).min(wanted.len());
         self.over_budget = fit < wanted.len();
-        let mut kept: HashMap<Key, Vec<(u64, u64)>> = HashMap::new();
-        for &(plays, key, index) in &wanted[..fit] {
-            kept.entry(key.clone()).or_default().push((index, plays));
+        let mut kept: HashMap<Owner, Vec<(u64, u64)>> = HashMap::new();
+        for &(plays, owner, index) in &wanted[..fit] {
+            kept.entry(owner.to_owned())
+                .or_default()
+                .push((index, plays));
         }
 
         let mut dropped = false;
+        for (&media_id, compound) in &mut self.compounds {
+            let keep: HashSet<u64> = kept
+                .remove(&Owner::Compound(media_id))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(index, _)| index)
+                .collect();
+            let before = compound.blocks.len();
+            let wanted = &compound.wanted;
+            compound
+                .blocks
+                .retain(|index, _| keep.contains(index) || !wanted.contains_key(index));
+            dropped |= compound.blocks.len() < before;
+        }
         let mut plans: Vec<(Key, Range<u64>, u64)> = Vec::new();
         for (key, stream) in &mut self.streams {
-            let keep = kept.remove(key).unwrap_or_default();
+            let keep = kept.remove(&Owner::File(key.clone())).unwrap_or_default();
             let keep_set: HashSet<u64> = keep.iter().map(|&(index, _)| index).collect();
             let before = stream.blocks.len();
             let wanted = &stream.wanted;
@@ -526,6 +613,15 @@ impl MixBufferCache {
     /// rebuilt.
     pub fn poll(&mut self) -> bool {
         let mut changed = self.unplanned && self.rebalance();
+        while let Ok((media_id, content_hash, index, block)) = self.mixed_rx.try_recv() {
+            let Some(compound) = self.compounds.get_mut(&media_id) else {
+                continue;
+            };
+            if compound.content_hash == content_hash && compound.mixing.remove(&index) {
+                compound.blocks.insert(index, block);
+                self.unreported_blocks = true;
+            }
+        }
         while let Ok(decoded) = self.decoded_rx.try_recv() {
             match decoded {
                 Decoded::Block {
@@ -614,6 +710,7 @@ impl MixBufferCache {
     pub fn has_pending(&mut self) -> bool {
         self.poll();
         self.streams.values().any(|stream| !stream.jobs.is_empty())
+            || self.compounds.values().any(|c| !c.mixing.is_empty())
     }
 }
 
@@ -645,6 +742,51 @@ impl AudioSource for MixBufferCache {
     fn store_compound(&mut self, media_id: MediaId, content_hash: u64, mixdown: Arc<Vec<f32>>) {
         self.compound_used.insert(media_id);
         self.compound.insert(media_id, (content_hash, mixdown));
+    }
+
+    fn mixes_compounds_by_block(&self) -> bool {
+        true
+    }
+
+    fn compound_block(
+        &mut self,
+        media_id: MediaId,
+        content_hash: u64,
+        index: u64,
+        plays_at: u64,
+    ) -> CompoundBlock {
+        let playhead = self.playhead.load(Ordering::Relaxed);
+        let compound = self.compounds.entry(media_id).or_default();
+        if compound.content_hash != content_hash {
+            *compound = CompoundCache {
+                content_hash,
+                ..Default::default()
+            };
+        }
+        compound.asked = true;
+        let closest = compound
+            .wanted
+            .get(&index)
+            .is_none_or(|&other| plays_at.abs_diff(playhead) < other.abs_diff(playhead));
+        if closest {
+            compound.wanted.insert(index, plays_at);
+        }
+        if let Some(block) = compound.blocks.get(&index) {
+            CompoundBlock::Ready(block.clone())
+        } else if compound.mixing.contains(&index) {
+            CompoundBlock::Mixing
+        } else {
+            CompoundBlock::Absent
+        }
+    }
+
+    fn mix_compound_block(&mut self, media_id: MediaId, content_hash: u64, mix: CompoundMix) {
+        let Some(compound) = self.compounds.get_mut(&media_id) else {
+            return;
+        };
+        if compound.content_hash == content_hash && compound.mixing.insert(mix.index) {
+            self.mix_worker.send((media_id, content_hash, mix));
+        }
     }
 
     fn stretched(

@@ -1329,3 +1329,89 @@ fn a_normalization_waits_for_its_audio_to_be_decoded_before_measuring() {
     mix_range(&snap, 0, &mut out);
     assert!(out.iter().all(|&s| s == 0.5), "unity gain meanwhile");
 }
+
+/// Mixes compound blocks on the spot, keeping them.
+#[derive(Default)]
+struct BlockMixer {
+    blocks: std::collections::HashMap<(MediaId, u64, u64), Arc<Vec<f32>>>,
+    files_asked: usize,
+}
+
+impl AudioSource for BlockMixer {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.files_asked += 1;
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
+    }
+
+    fn mixes_compounds_by_block(&self) -> bool {
+        true
+    }
+
+    fn compound_block(
+        &mut self,
+        media_id: MediaId,
+        hash: u64,
+        index: u64,
+        _: u64,
+    ) -> CompoundBlock {
+        self.blocks
+            .get(&(media_id, hash, index))
+            .map_or(CompoundBlock::Absent, |b| CompoundBlock::Ready(b.clone()))
+    }
+
+    fn mix_compound_block(&mut self, media_id: MediaId, hash: u64, mix: CompoundMix) {
+        self.blocks
+            .insert((media_id, hash, mix.index), Arc::new(mix.run()));
+    }
+}
+
+#[test]
+fn a_compound_mixed_by_block_plays_as_the_whole_mixdown() {
+    let (project, compound) = project_with_compound();
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 3, 1, 4)])]);
+    let mut source = BlockMixer::default();
+    MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(source.blocks.len(), 1, "mixed once its audio was there");
+
+    let asked = source.files_asked;
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(source.files_asked, asked, "a mixed block needs no file");
+    let mut out = vec![9.0; 100];
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(out, render(&project, &tl, 0, 100));
+}
+
+#[test]
+fn a_compound_whose_timeline_normalizes_is_mixed_whole() {
+    let (mut project, compound) = project_with_compound();
+    let nested = project.media_pool[compound].compound.unwrap();
+    project.timelines[nested].master.effects = vec![normalize(0.0)];
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 5)])]);
+    let mut source = BlockMixer::default();
+    MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert!(
+        source.blocks.is_empty(),
+        "a block would measure only itself"
+    );
+}
+
+#[test]
+fn a_mixed_compound_block_holds_no_room_for_its_preroll() {
+    let (project, compound) = project_with_compound();
+    let nested = project.media_pool[compound].compound.unwrap();
+    let mut source = buffers;
+    let snapshot =
+        MixSnapshot::from_timeline(&project, &project.timelines[nested], RATE, 1, &mut source);
+    let block = CompoundMix {
+        snapshot,
+        start: BLOCK_FRAMES - 100,
+        index: 1,
+    }
+    .run();
+    assert_eq!(block.len(), BLOCK_FRAMES as usize);
+    assert_eq!(
+        block.capacity(),
+        block.len(),
+        "kept for as long as the block"
+    );
+}

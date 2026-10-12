@@ -1,4 +1,5 @@
 use super::*;
+use vv_audio::MixSnapshot;
 use vv_core::Project;
 
 fn wait_done(cache: &mut MixBufferCache) {
@@ -12,26 +13,14 @@ fn wait_done(cache: &mut MixBufferCache) {
     }
 }
 
-#[test]
-fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
-    let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("compound_source.wav");
-    vv_media::test_support::ffmpeg(
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000:duration=1",
-        ],
-        &path,
-    );
-
+/// A project whose compound clip plays the first `secs` of `path` (25 fps),
+/// and a timeline playing the compound from its start.
+fn compound_project(path: &Path, secs: u32) -> (Project, MediaId, vv_core::Timeline) {
     let mut project = Project::default();
     let real_media = project.media_pool.insert(vv_core::MediaItem {
-        path: path.clone(),
+        path: path.to_path_buf(),
         meta: vv_core::MediaMeta {
-            duration_frames: 25,
+            duration_frames: 25 * secs as i64,
             fps: vv_core::Rational::new(25, 1),
             width: 0,
             height: 0,
@@ -50,7 +39,7 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
         vv_core::ClipId(1),
         vv_core::ClipSource::Media(real_media),
         0,
-        25,
+        25 * secs as i64,
         0,
         vv_core::Rational::one(),
     );
@@ -74,7 +63,7 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
         meta: vv_core::MediaMeta {
-            duration_frames: 25,
+            duration_frames: 25 * secs as i64,
             fps: vv_core::Rational::new(25, 1),
             width: 0,
             height: 0,
@@ -89,6 +78,35 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
         compound: Some(nested_id),
         folder: None,
     });
+
+    let compound_clip = vv_core::Clip::from_source_range(
+        vv_core::ClipId(2),
+        vv_core::ClipSource::Media(compound_media),
+        0,
+        25 * secs as i64,
+        0,
+        vv_core::Rational::one(),
+    );
+    let mut parent = project.timelines[nested_id].clone();
+    parent.tracks[0].clips = vec![compound_clip];
+    (project, compound_media, parent)
+}
+
+#[test]
+fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
+    let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("compound_source.wav");
+    vv_media::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+        ],
+        &path,
+    );
+    let (project, compound_media, _) = compound_project(&path, 1);
 
     let mut cache = MixBufferCache::spawn(48_000, 1);
     let mixdown = |cache: &mut MixBufferCache| {
@@ -489,4 +507,66 @@ fn what_a_pass_does_not_read_is_dropped() {
     cache.sweep_unused();
     assert!(cache.streams.is_empty(), "the file's audio is freed");
     assert!(cache.compound.is_empty(), "the mixdown is freed");
+}
+
+/// Rebuilds `parent`'s mix as the preview does until nothing is pending.
+fn settle(
+    cache: &mut MixBufferCache,
+    project: &Project,
+    parent: &vv_core::Timeline,
+) -> MixSnapshot {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mix never settled"
+        );
+        cache.begin_pass();
+        let snapshot = MixSnapshot::from_timeline(project, parent, 48_000, 1, cache);
+        cache.sweep_unused();
+        if !cache.has_pending() {
+            cache.begin_pass();
+            let snapshot = MixSnapshot::from_timeline(project, parent, 48_000, 1, cache);
+            cache.sweep_unused();
+            if !cache.has_pending() {
+                return snapshot;
+            }
+        }
+        drop(snapshot);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_compound_mixed_by_block_plays_as_mixed_whole_across_blocks() {
+    let path = sine_wav("compound_blocks.wav", 6);
+    let (project, compound_media, parent) = compound_project(&path, 6);
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    let snapshot = settle(&mut cache, &project, &parent);
+    assert!(
+        cache.compounds[&compound_media].blocks.len() as u64 >= (6 * SEC).div_ceil(BLOCK_FRAMES),
+        "mixed by block"
+    );
+
+    let whole_audio = vv_media::decode_audio_track(&path, 0).unwrap().unwrap();
+    let whole = SampleBlocks::contiguous(Arc::new(whole_audio.samples), 0, 1);
+    let mut source = |_: &Path, _: usize| Some(whole.clone());
+    let reference = MixSnapshot::from_timeline(&project, &parent, 48_000, 1, &mut source);
+    let mut got = vec![0.0; 6 * SEC as usize];
+    let mut want = got.clone();
+    vv_audio::mixer::mix_range(&snapshot, 0, &mut got);
+    vv_audio::mixer::mix_range(&reference, 0, &mut want);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_mixed_compound_block_frees_the_audio_it_was_mixed_from() {
+    let path = sine_wav("compound_frees.wav", 4);
+    let (project, _, parent) = compound_project(&path, 4);
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    settle(&mut cache, &project, &parent);
+    assert!(
+        blocks_held(&cache, &path).is_empty(),
+        "only the compound's own blocks are kept"
+    );
 }
