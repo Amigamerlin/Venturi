@@ -81,3 +81,32 @@ fn the_split_into_blocks_does_not_change_the_reading() {
         assert!((whole - split).abs() < 1e-6, "{mode:?}: {whole} vs {split}");
     }
 }
+
+/// What the segments of a normalization measure: parts measured on their
+/// own and merged read as the whole within 0.1 dB, even 0.65 s long with
+/// their edges off the 100 ms grid.
+#[test]
+fn parts_measured_apart_merge_into_the_whole() {
+    let loud = sine(440.0, 0.3, 0.3, 2.0, 2);
+    let quiet = sine(997.0, 0.02, 0.0, 1.5, 2);
+    let samples = [loud.as_slice(), &quiet, &loud].concat();
+    for mode in NormalizeMode::ALL {
+        let whole = measure(mode, 2, &[&samples]);
+        let part = 2 * 31_337;
+        let context = 2 * 4800;
+        let parts: Vec<LevelParts> = (0..samples.len())
+            .step_by(part)
+            .map(|start| {
+                let end = (start + part).min(samples.len());
+                let mut meter = LevelMeter::new(mode, RATE, 2);
+                meter.warm_up(&samples[start.saturating_sub(context)..start]);
+                meter.push(&samples[start..end]);
+                let after = (end + 2 * LOOKAHEAD_FRAMES as usize).min(samples.len());
+                meter.into_parts(&samples[end..after])
+            })
+            .collect();
+        let merged = LevelParts::merge(&parts);
+        let db = 20.0 * (merged / whole).log10();
+        assert!(db.abs() < 0.1, "{mode:?}: {db} dB");
+    }
+}

@@ -68,3 +68,17 @@ fn stretch_stereo_roughly_halves_duration_and_stays_interleaved() {
         .fold(0.0_f32, |a, b| a.max(b.abs()));
     assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
 }
+
+/// What the offline render feeds it: its chunks, not the whole input.
+#[test]
+fn a_stretch_fed_in_pieces_equals_one_fed_whole() {
+    let samples: Vec<f32> = (0..96_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+    let whole = stretch_samples(&samples, 48_000, 2, 1.25).unwrap();
+    let mut stretcher = Stretcher::new(48_000, 2, 1.25).unwrap();
+    let mut pieces = Vec::new();
+    for piece in samples.chunks(2 * 7_001) {
+        stretcher.push(piece, &mut pieces).unwrap();
+    }
+    stretcher.finish(&mut pieces).unwrap();
+    assert_eq!(pieces, whole);
+}

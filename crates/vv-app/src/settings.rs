@@ -524,6 +524,10 @@ impl Default for PanelLayout {
     }
 }
 
+/// Of `audio_budget_bytes`: 0, from a hand-edited file, would play the
+/// timeline silent.
+pub const AUDIO_BUDGET_MB: std::ops::RangeInclusive<u32> = 100..=32000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub keymap: Keymap,
@@ -540,6 +544,8 @@ pub struct Settings {
     pub behind_secs: f64,
     /// Memory budget for the decoded frame cache of every `RenderAhead`.
     pub cache_budget_bytes: usize,
+    /// Memory budget for the timeline audio (`MixBufferCache`).
+    pub audio_budget_bytes: usize,
     pub hw_decode: crate::hw_decode::HwDecodeMode,
     /// `None`: `hw_decode::default_budget_bytes`, which follows the RAM.
     pub hw_decode_budget_bytes: Option<usize>,
@@ -580,6 +586,7 @@ impl Default for Settings {
             lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: crate::render_ahead::DEFAULT_BEHIND_SECS,
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
+            audio_budget_bytes: crate::mix_buffers::DEFAULT_AUDIO_BUDGET_BYTES,
             hw_decode: Default::default(),
             hw_decode_budget_bytes: None,
             intel_experimental_decode: false,
@@ -635,6 +642,8 @@ struct SettingsFile {
     behind_secs: Option<f64>,
     #[serde(default)]
     cache_budget_mb: Option<u32>,
+    #[serde(default)]
+    audio_budget_mb: Option<u32>,
     #[serde(default)]
     hw_decode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -728,6 +737,11 @@ impl Settings {
         settings.cache_budget_bytes = file
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
+        settings.audio_budget_bytes = file
+            .audio_budget_mb
+            .map_or(settings.audio_budget_bytes, |mb| {
+                mb.clamp(*AUDIO_BUDGET_MB.start(), *AUDIO_BUDGET_MB.end()) as usize * 1_000_000
+            });
         settings.hw_decode = file
             .hw_decode
             .as_deref()
@@ -818,6 +832,7 @@ impl Settings {
             lookahead_secs: Some(self.lookahead_secs),
             behind_secs: Some(self.behind_secs),
             cache_budget_mb: Some((self.cache_budget_bytes / 1_000_000) as u32),
+            audio_budget_mb: Some((self.audio_budget_bytes / 1_000_000) as u32),
             hw_decode: Some(self.hw_decode.id().to_owned()),
             hw_decode_budget_mb: self
                 .hw_decode_budget_bytes

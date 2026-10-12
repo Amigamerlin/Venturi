@@ -10,6 +10,8 @@ static INIT: Once = Once::new();
 pub(crate) fn ensure_init() {
     INIT.call_once(|| {
         ffmpeg::init().expect("cannot initialize ffmpeg");
+        // Warnings flood stderr: every MP3/Opus seek prints some.
+        ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Error);
     });
 }
 

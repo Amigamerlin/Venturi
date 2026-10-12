@@ -251,15 +251,33 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
 - Preview and export use the same `mix_range`: export mixes to 2 channels,
   preview to the device's native channels (asking for others makes PipeWire
   insert a remix that adds latency).
+- **Export** (`vv-session/src/audio_render.rs`, `render_offline`): the mix
+  rendered start to end in chunks with the effects' state carried across
+  them; each file decoded by seeking on its own thread, blocked on a bounded
+  channel so it decodes only as far as the render reads, and freed behind
+  it. Memory does not grow with the timeline's length.
 - **Preview** (`vv-app/src/timeline_audio.rs`, `TimelineAudio`): a single
   `cpal` stream opened at startup and never reopened (`vv_audio::Mixer`).
   The UI thread builds an immutable snapshot of the clips (`MixSnapshot`,
   with `Arc`s to the already converted buffers) on every change of
   `History::generation` or when a buffer arrives, and publishes it to the
   callback with a `try_lock`; old snapshots are freed on the UI thread.
-  Buffers are decoded in the background per `(path, audio_stream_index)`
-  (`mix_buffers.rs`) and published partially as they grow: the start of the
-  track plays right away, silence only past the part already decoded.
+  Audio is held in blocks of 64k frames (`vv_audio::SampleBlocks`), only
+  those the clips read (`mix_buffers.rs`): decoded in the background by
+  seeking (`vv_media::decode_audio_streams_from`, sample-exact against a
+  decode from the start; a resampled file seeks onto an input frame that
+  falls on an output frame, which keeps the resampler in phase; a jump in
+  the timestamps over 5 ms is placed by timestamp, like the video, by both),
+  the job closest to the playhead first, within a
+  budget that keeps the blocks closest to it (Settings > Playback > Audio
+  cache, 512 MB by default). A missing block plays as silence and the
+  clock keeps advancing: after a jump the audio may start a moment late,
+  never out of sync.
+- **Compound clips** are mixed live in the same pass as their parent
+  (`ClipInput::Nested`): the mix state is a tree, each compound clip with
+  its own effects' state, carried across snapshots by clip id.
+  Design in
+  [plans/AUDIO_LIVE_MIX.md](plans/AUDIO_LIVE_MIX.md).
 - **Channel strips**: every audio track and the timeline master have a
   `ChannelStrip` (gain, pan, an insert chain before the fader): 6-band
   equalizer, 3-band multiband compressor, mono and normalization. The mix is
@@ -267,12 +285,20 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
 - **Normalization**: brings a channel to a target measured as sample peak,
   true peak (BS.1770) or integrated loudness (EBU R128); per clip
   (`SetLevel::Independent`) or one gain for all the clips of the track
-  (`Relative`). The levels are measured off the audio thread by the level
-  worker in `mix_buffers.rs` (`LevelAnalysis`); until a level is ready the
-  last one keeps playing.
-- **Clip speed with pitch correction**: the clip's source range is stretched
-  with `rubberband` by a third `mix_buffers` worker, silent until ready;
-  synchronous on export.
+  (`Relative`). A `LevelAnalysis` describes what to measure (the strip up
+  to the effect, `vv_audio::levels`), cut into segments at the edit points
+  of its input, each keyed by its content in its own time; the segments are
+  rendered from the files like the export (`measure_level`), never from the
+  preview's buffers, cached in memory and in `$XDG_CACHE_HOME/venturi/levels`,
+  and merged. An edit measures again only the segments it touches, a ripple
+  none. In the preview the level worker of `mix_buffers.rs` measures them;
+  until a level is ready the last one keeps playing.
+- **Clip speed with pitch correction**: described rather than read
+  (`vv_audio::StretchRequest`: a file's window or a compound clip's
+  timeline, keyed by content): its input is rendered from the files like
+  the export and fed to `rubberband` as it comes (`stretch_offline`), by a
+  third `mix_buffers` worker in the preview, silent until ready;
+  synchronous on export. Only the stretched result is held whole.
 - **Clock**: the mixer position, in timeline samples, is the playhead
   (`drive_playback`); the video chases it. A gap is just silence, the clock
   keeps advancing. With no audio device the clock is wall-clock.

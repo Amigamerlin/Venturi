@@ -2,6 +2,7 @@
 //! import, relink and export, shared by the GUI and headless hosts.
 
 pub mod analysis;
+pub mod audio_render;
 pub mod export;
 pub mod forced_relink;
 pub mod frame_provider;

@@ -795,9 +795,12 @@ impl VenturiApp {
         let Some(audio) = &mut self.timeline_audio else {
             return;
         };
+        audio.set_budget_bytes(self.settings.audio_budget_bytes);
         if let Some(media_id) = self.browsing_media {
             if let Some(item) = self.session.project.media_pool.get(media_id) {
-                audio.sync_media(&item.path, self.browse_audio_streams, fps);
+                let duration_secs =
+                    item.meta.duration_frames as f64 / item.meta.fps.as_f64().max(1e-9);
+                audio.sync_media(&item.path, self.browse_audio_streams, fps, duration_secs);
             }
         } else if let Some(timeline_id) = self.timeline_id {
             audio.sync(
@@ -3305,26 +3308,26 @@ fn paint_toolbar_icon(
     }
 }
 
-/// Shown while an MCP client is connected: an accent dot and "MCP".
-fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
-    let galley = ui.painter().layout_no_wrap(
-        "MCP".to_owned(),
-        egui::TextStyle::Button.resolve(ui.style()),
-        theme::ACCENT,
-    );
+/// A dot and a short text in `color`, for a state of the editor.
+fn status_badge(ui: &mut egui::Ui, text: String, color: egui::Color32) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text, egui::TextStyle::Button.resolve(ui.style()), color);
     let size = egui::vec2(18.0 + galley.size().x, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
-    painter.circle_filled(
-        egui::pos2(rect.left() + 6.0, rect.center().y),
-        3.5,
-        theme::ACCENT,
-    );
+    painter.circle_filled(egui::pos2(rect.left() + 6.0, rect.center().y), 3.5, color);
     painter.galley(
         egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        theme::ACCENT,
+        color,
     );
+    response
+}
+
+/// Shown while an MCP client is connected: an accent dot and "MCP".
+fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
+    let response = status_badge(ui, "MCP".to_owned(), theme::ACCENT);
     response.on_hover_ui(|ui| {
         ui.label(t!("toolbar.mcp_connected"));
         if let Some(tool) = last_tool {

@@ -26,81 +26,101 @@ pub fn stretch_samples(
     channels: u16,
     tempo: f64,
 ) -> Result<Vec<f32>, String> {
-    if tempo.is_nan() || tempo <= 0.0 {
-        return Err(format!("invalid stretch tempo: {tempo}"));
-    }
-    ensure_init();
-
-    let format = SampleFormat::F32(SampleType::Packed);
-    let layout = ChannelLayout::default(channels as i32);
-
-    let mut graph = ffmpeg::filter::Graph::new();
-    let args = format!(
-        "time_base=1/{sample_rate}:sample_rate={sample_rate}:sample_fmt={}:channel_layout=0x{:x}",
-        format.name(),
-        layout.bits()
-    );
-    graph
-        .add(
-            &ffmpeg::filter::find("abuffer").ok_or("abuffer filter not found")?,
-            "in",
-            &args,
-        )
-        .map_err(|e| e.to_string())?;
-    graph
-        .add(
-            &ffmpeg::filter::find("abuffersink").ok_or("abuffersink filter not found")?,
-            "out",
-            "",
-        )
-        .map_err(|e| e.to_string())?;
-
-    // `rubberband` can output planar even with packed input: `aformat` forces
-    // packed, otherwise `drain_filtered` reads past the first plane (panic
-    // with stereo audio).
-    graph
-        .output("in", 0)
-        .and_then(|p| p.input("out", 0))
-        .and_then(|p| {
-            p.parse(&format!(
-                "rubberband=tempo={tempo},aformat=sample_fmts={}",
-                format.name()
-            ))
-        })
-        .map_err(|e| e.to_string())?;
-    graph.validate().map_err(|e| e.to_string())?;
-
-    let channels_usize = channels as usize;
-    let total_frames = samples.len() / channels_usize.max(1);
-
+    let mut stretcher = Stretcher::new(sample_rate, channels, tempo)?;
     let mut out = Vec::new();
-    let mut pos = 0;
-    while pos < total_frames {
-        let n = CHUNK_FRAMES.min(total_frames - pos);
-        let mut frame = ffmpeg::frame::Audio::new(format, n, layout);
-        frame.set_rate(sample_rate);
-        let start = pos * channels_usize;
-        frame.plane_mut::<f32>(0)[..n * channels_usize]
-            .copy_from_slice(&samples[start..start + n * channels_usize]);
+    stretcher.push(samples, &mut out)?;
+    stretcher.finish(&mut out)?;
+    Ok(out)
+}
 
+/// `stretch_samples` fed in pieces: the input never needs to be whole.
+pub struct Stretcher {
+    graph: ffmpeg::filter::Graph,
+    sample_rate: u32,
+    channels: usize,
+    layout: ChannelLayout,
+}
+
+const FORMAT: SampleFormat = SampleFormat::F32(SampleType::Packed);
+
+impl Stretcher {
+    pub fn new(sample_rate: u32, channels: u16, tempo: f64) -> Result<Self, String> {
+        if tempo.is_nan() || tempo <= 0.0 {
+            return Err(format!("invalid stretch tempo: {tempo}"));
+        }
+        ensure_init();
+        let layout = ChannelLayout::default(channels as i32);
+        let mut graph = ffmpeg::filter::Graph::new();
+        let args = format!(
+            "time_base=1/{sample_rate}:sample_rate={sample_rate}:sample_fmt={}:channel_layout=0x{:x}",
+            FORMAT.name(),
+            layout.bits()
+        );
         graph
+            .add(
+                &ffmpeg::filter::find("abuffer").ok_or("abuffer filter not found")?,
+                "in",
+                &args,
+            )
+            .map_err(|e| e.to_string())?;
+        graph
+            .add(
+                &ffmpeg::filter::find("abuffersink").ok_or("abuffersink filter not found")?,
+                "out",
+                "",
+            )
+            .map_err(|e| e.to_string())?;
+        // `rubberband` can output planar even with packed input: `aformat`
+        // forces packed, otherwise `drain_filtered` reads past the first
+        // plane (panic with stereo audio).
+        graph
+            .output("in", 0)
+            .and_then(|p| p.input("out", 0))
+            .and_then(|p| {
+                p.parse(&format!(
+                    "rubberband=tempo={tempo},aformat=sample_fmts={}",
+                    FORMAT.name()
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        graph.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            graph,
+            sample_rate,
+            channels: channels.max(1) as usize,
+            layout,
+        })
+    }
+
+    /// Interleaved; appends to `out` what is stretched so far.
+    pub fn push(&mut self, samples: &[f32], out: &mut Vec<f32>) -> Result<(), String> {
+        let ch = self.channels;
+        for chunk in samples.chunks(CHUNK_FRAMES * ch) {
+            let n = chunk.len() / ch;
+            let mut frame = ffmpeg::frame::Audio::new(FORMAT, n, self.layout);
+            frame.set_rate(self.sample_rate);
+            frame.plane_mut::<f32>(0)[..n * ch].copy_from_slice(&chunk[..n * ch]);
+            self.graph
+                .get("in")
+                .ok_or("pad 'in' missing")?
+                .source()
+                .add(&frame)
+                .map_err(|e| e.to_string())?;
+            drain_filtered(&mut self.graph, ch, out)?;
+        }
+        Ok(())
+    }
+
+    /// Appends the rest.
+    pub fn finish(mut self, out: &mut Vec<f32>) -> Result<(), String> {
+        self.graph
             .get("in")
             .ok_or("pad 'in' missing")?
             .source()
-            .add(&frame)
+            .flush()
             .map_err(|e| e.to_string())?;
-        drain_filtered(&mut graph, channels_usize, &mut out)?;
-        pos += n;
+        drain_filtered(&mut self.graph, self.channels, out)
     }
-    graph
-        .get("in")
-        .ok_or("pad 'in' missing")?
-        .source()
-        .flush()
-        .map_err(|e| e.to_string())?;
-    drain_filtered(&mut graph, channels_usize, &mut out)?;
-
-    Ok(out)
 }
 
 fn drain_filtered(

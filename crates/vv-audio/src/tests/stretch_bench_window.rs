@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 /// headroom). Measured in practice at ~150ms regardless of tempo, see
 /// the module comment.
 #[test]
+#[ignore = "timing-based, flaky under load: run with --ignored"]
 fn stretching_an_8s_window_is_well_under_the_extension_margin() {
     let sample_rate = 48_000u32;
     let channels = 2u16;

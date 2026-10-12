@@ -66,6 +66,7 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     settings.lookahead_secs = 7.5;
     settings.behind_secs = 0.5;
     settings.cache_budget_bytes = 3_000_000_000;
+    settings.audio_budget_bytes = 4_000_000_000;
     settings.hw_decode = crate::hw_decode::HwDecodeMode::Vulkan;
     settings.hw_decode_budget_bytes = Some(2_000_000_000);
     settings.save(&path).unwrap();
@@ -95,6 +96,10 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     assert_eq!(
         loaded.cache_budget_bytes,
         Settings::default().cache_budget_bytes
+    );
+    assert_eq!(
+        loaded.audio_budget_bytes,
+        Settings::default().audio_budget_bytes
     );
     assert_eq!(loaded.hw_decode, crate::hw_decode::HwDecodeMode::Auto);
     assert_eq!(
@@ -208,5 +213,18 @@ fn effect_presets_are_saved_and_a_broken_one_is_dropped_alone() {
     assert_eq!(loaded.compressor_presets, settings.compressor_presets);
     assert_eq!(loaded.eq_presets, settings.eq_presets);
     assert!(!loaded.kinetic_scroll, "the rest of the file still reads");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn an_audio_budget_out_of_range_in_the_file_is_clamped() {
+    let path = std::env::temp_dir()
+        .join(format!("vv-settings-audio-{}", std::process::id()))
+        .join("settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for (mb, bytes) in [(0, 100_000_000), (99_999, 32_000_000_000)] {
+        std::fs::write(&path, format!(r#"{{"audio_budget_mb": {mb}}}"#)).unwrap();
+        assert_eq!(Settings::load(&path).audio_budget_bytes, bytes);
+    }
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

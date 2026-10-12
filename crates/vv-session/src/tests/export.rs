@@ -971,7 +971,7 @@ fn mix_audio_track_plays_a_faster_clip_with_or_without_its_pitch() {
     );
 }
 
-/// A range decodes only the frames it reads, resampled like the whole file.
+/// A range is resampled like the whole file.
 #[test]
 fn mix_audio_track_of_a_range_is_the_same_part_of_the_whole_mix() {
     let dir = std::env::temp_dir().join("vv-app-export-test");
@@ -1041,15 +1041,6 @@ fn mix_audio_track_of_a_range_is_the_same_part_of_the_whole_mix() {
     let per_frame = (PROJECT_SAMPLE_RATE / 25) as usize * PROJECT_CHANNELS as usize;
     assert_eq!(part, whole[30 * per_frame..40 * per_frame]);
     assert!(part.iter().any(|&s| s.abs() > 0.1));
-
-    let mut wanted = WantedFrames::default();
-    let samples = 30 * 1920..40 * 1920;
-    MixSnapshot::from_timeline_range(&project, &tl, 48_000, 2, &mut wanted, samples);
-    let windows = &wanted.0.values().next().unwrap();
-    assert!(
-        windows.iter().all(|(_, frames)| frames.end < 4 * 48_000),
-        "{windows:?}"
-    );
 }
 
 const PRECISION_BENCH_SCENES: [&str; 4] = ["plain", "blur", "chain", "compound"];

@@ -13,7 +13,9 @@ pub mod proxy;
 pub mod thumbnail;
 pub mod waveform;
 
-pub use audio::{AudioBuffer, decode_audio_streams_streaming, decode_audio_track};
+pub use audio::{
+    AudioBuffer, decode_audio_streams_from, decode_audio_streams_streaming, decode_audio_track,
+};
 pub use cache::{SharedFrameCache, WantedRange};
 pub use decode::{Chroma, ColorMatrix, Decoder, FrameYuv420, yuv420_frame_bytes};
 pub use encode::{AudioCodec, AudioSettings, Encoder, VideoCodec, VideoSettings};
@@ -43,7 +45,7 @@ pub enum MediaError {
 
 /// Global cache directory `$XDG_CACHE_HOME/venturi/<name>` (or
 /// `~/.cache/...`, or the system temp dir without `HOME`).
-pub(crate) fn cache_dir(name: &str) -> std::path::PathBuf {
+pub fn cache_dir(name: &str) -> std::path::PathBuf {
     use std::path::PathBuf;
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)

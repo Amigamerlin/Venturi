@@ -4,9 +4,11 @@ use vv_core::{Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track
 
 const RATE: u32 = 100;
 
+/// Ids unique like a project's: a clip measured alone is found by its id.
 fn clip_at(media: vv_core::MediaId, start: FrameIdx, source_in: FrameIdx, len: FrameIdx) -> Clip {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Clip::from_source_range(
-        ClipId(0),
+        ClipId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
         ClipSource::Media(media),
         source_in,
         source_in + len,
@@ -74,7 +76,20 @@ fn audio_track(clips: Vec<Clip>) -> Track {
 
 /// Mono: `a` is always 0.5, `b` is a ramp (sample i = i/1000);
 /// stream 1 of `a` is 0.25.
-fn buffers(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+fn mono(samples: Arc<Vec<f32>>) -> SampleBlocks {
+    SampleBlocks::contiguous(samples, 0, 1)
+}
+
+fn buffers(path: &Path, stream: usize) -> Option<SampleBlocks> {
+    samples(path, stream).map(mono)
+}
+
+/// `samples` as stereo frames.
+fn stereo(path: &Path, stream: usize) -> Option<SampleBlocks> {
+    samples(path, stream).map(|s| SampleBlocks::contiguous(s, 0, 2))
+}
+
+fn samples(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
     match (path.to_str()?, stream) {
         ("a.wav", 0) => Some(Arc::new(vec![0.5; 1000])),
         ("a.wav", 1) => Some(Arc::new(vec![0.25; 1000])),
@@ -191,33 +206,16 @@ fn project_with_compound() -> (Project, vv_core::MediaId) {
     (project, compound)
 }
 
-/// Answers from `buffers`, counting the calls; `partial` answers `Partial`
-/// instead of `Ready`, as for a file still decoding.
+/// Answers from `buffers`, counting the calls.
 #[derive(Default)]
 struct CountingSource {
     files_asked: Vec<PathBuf>,
-    partial: bool,
-    stored: Vec<MediaId>,
-    cache: Option<Arc<Vec<f32>>>,
 }
 
 impl AudioSource for CountingSource {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
         self.files_asked.push(path.to_path_buf());
-        match buffers(path, stream) {
-            Some(b) if self.partial => ClipAudio::Partial(b),
-            Some(b) => ClipAudio::Ready(b),
-            None => ClipAudio::Missing,
-        }
-    }
-
-    fn cached_compound(&mut self, _: MediaId, _: u64) -> Option<Arc<Vec<f32>>> {
-        self.cache.clone()
-    }
-
-    fn store_compound(&mut self, media_id: MediaId, _: u64, mixdown: Arc<Vec<f32>>) {
-        self.stored.push(media_id);
-        self.cache = Some(mixdown);
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
     }
 }
 
@@ -235,61 +233,17 @@ fn a_compound_clip_plays_its_nested_timeline_and_never_asks_for_its_own_file() {
 }
 
 #[test]
-fn a_compound_used_twice_is_mixed_once() {
+fn a_compound_used_twice_plays_at_both_places() {
     let (project, compound) = project_with_compound();
     let tl = timeline(vec![audio_track(vec![
         clip_at(compound, 0, 0, 5),
         clip_at(compound, 10, 0, 5),
     ])]);
-    let mut source = CountingSource::default();
-    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
-    assert_eq!(snap.clips.len(), 2);
-    assert_eq!(source.stored, [compound]);
-    assert_eq!(
-        source.files_asked.len(),
-        1,
-        "the second use comes from the cache"
-    );
-}
-
-/// A mixdown built on a file still decoding plays, but caching it would
-/// keep the missing tail missing until `content_hash` changes.
-#[test]
-fn a_compound_over_a_partial_file_plays_but_is_not_cached() {
-    let (project, compound) = project_with_compound();
-    let mut source = CountingSource {
-        partial: true,
-        ..Default::default()
-    };
-    assert!(matches!(
-        compound_mixdown(&project, compound, RATE, 1, &mut source),
-        ClipAudio::Partial(_)
-    ));
-    assert!(source.stored.is_empty());
-
-    source.partial = false;
-    assert!(matches!(
-        compound_mixdown(&project, compound, RATE, 1, &mut source),
-        ClipAudio::Ready(_)
-    ));
-    assert_eq!(source.stored, [compound]);
-}
-
-#[test]
-fn a_compound_over_a_pending_file_is_silent_and_not_cached() {
-    let (project, compound) = project_with_compound();
-    assert!(matches!(
-        compound_mixdown(&project, compound, RATE, 1, &mut AllPending),
-        ClipAudio::Pending
-    ));
-}
-
-struct AllPending;
-
-impl AudioSource for AllPending {
-    fn file(&mut self, _: &Path, _: usize) -> ClipAudio {
-        ClipAudio::Pending
-    }
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let mut out = vec![9.0; 150];
+    mix_range(&snap, 0, &mut out);
+    assert!(out[..50].iter().chain(&out[100..]).all(|&s| s == 0.5));
+    assert!(out[50..100].iter().all(|&s| s == 0.0));
 }
 
 /// Safety net: `would_create_a_cycle` prevents it, but a compound containing
@@ -348,8 +302,9 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
 
     let buffer: Arc<Vec<f32>> =
         Arc::new((0..AUDIO_SAMPLES).map(|i| i as f32 / 100_000.0).collect());
-    let buffer_for =
-        |path: &Path, _stream: usize| (path.to_str() == Some("slow.wav")).then(|| buffer.clone());
+    let buffer_for = |path: &Path, _stream: usize| {
+        (path.to_str() == Some("slow.wav")).then(|| mono(buffer.clone()))
+    };
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |p: &Path, s: usize| {
         buffer_for(p, s)
     });
@@ -407,8 +362,9 @@ fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
         .insert(timeline(vec![audio_track(vec![clip])]));
 
     let buffer: Arc<Vec<f32>> = Arc::new((0..10_010).map(|i| i as f32 / 100_000.0).collect());
-    let buffer_for =
-        |path: &Path, _stream: usize| (path.to_str() == Some("slow.wav")).then(|| buffer.clone());
+    let buffer_for = |path: &Path, _stream: usize| {
+        (path.to_str() == Some("slow.wav")).then(|| mono(buffer.clone()))
+    };
     let mix_all = |project: &Project| {
         let timeline = &project.timelines[timeline_id];
         let snap =
@@ -453,7 +409,7 @@ fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
     clip.effects.gain_db = gain;
     let tl = timeline(vec![audio_track(vec![clip])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
-        Some(Arc::new(vec![0.5; len_frames]))
+        Some(mono(Arc::new(vec![0.5; len_frames])))
     });
     let mut out = vec![0.0; len_frames];
     mix_range(&snap, 0, &mut out);
@@ -521,7 +477,11 @@ fn stereo_mix_keeps_channels_interleaved() {
     let (project, a, _) = project();
     let tl = timeline(vec![audio_track(vec![clip_at(a, 1, 0, 1)])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut |_: &Path, _: usize| {
-        Some(Arc::new([0.1, 0.9].repeat(100)))
+        Some(SampleBlocks::contiguous(
+            Arc::new([0.1, 0.9].repeat(100)),
+            0,
+            2,
+        ))
     });
     let mut out = vec![0.0; 40];
     mix_range(&snap, 5, &mut out);
@@ -657,12 +617,12 @@ fn db_to_linear_matches_known_reference_points() {
 
 fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
     MixClip {
+        clip: ClipId(0),
         start: 0,
         len: 1000,
         source_offset: 0,
         step: 1.0,
-        buffer: Arc::new(Vec::new()),
-        buffer_start: 0,
+        input: ClipInput::Blocks(mono(Arc::new(Vec::new()))),
         gain_db: Keyframed::constant(0.0),
         track: 0,
         clip_fps: 10.0,
@@ -717,7 +677,7 @@ fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
     clip.fade_in = (GAIN_BLOCK_FRAMES / 10) as FrameIdx;
     let tl = timeline(vec![audio_track(vec![clip])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
-        Some(Arc::new(vec![0.5; len_frames]))
+        Some(mono(Arc::new(vec![0.5; len_frames])))
     });
     let mut out = vec![9.0; len_frames];
     mix_range(&snap, 0, &mut out);
@@ -774,9 +734,11 @@ fn a_slower_clip_interpolates_between_samples() {
 }
 
 /// Hands out a fixed "stretched" buffer and records what it was asked.
+#[derive(Default)]
 struct FakeStretch {
     ready: bool,
     asked: Vec<(std::ops::Range<u64>, f64)>,
+    nested: bool,
 }
 
 impl AudioSource for FakeStretch {
@@ -784,21 +746,46 @@ impl AudioSource for FakeStretch {
         buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
     }
 
-    fn stretched(
-        &mut self,
-        _buffer: &Arc<Vec<f32>>,
-        range: std::ops::Range<u64>,
-        tempo: f64,
-        _sample_rate: u32,
-        _channels: u16,
-    ) -> ClipAudio {
-        self.asked.push((range, tempo));
+    fn stretched(&mut self, request: StretchRequest) -> ClipAudio {
+        self.asked.push((request.frames.clone(), request.tempo));
+        self.nested |= matches!(request.input, StretchInput::Nested { .. });
         if self.ready {
-            ClipAudio::Ready(Arc::new(vec![0.9; 100]))
+            ClipAudio::Ready(mono(Arc::new(vec![0.9; 100])))
         } else {
             ClipAudio::Pending
         }
     }
+}
+
+/// Stretched from a render of its timeline, not from a mixdown of it.
+#[test]
+fn a_pitch_corrected_compound_clip_stretches_its_nested_timeline() {
+    let (project, compound) = project_with_long_compound();
+    let mut clip = sped_up_clip(compound, Rational::new(2, 1), 2);
+    clip.pitch_correction = true;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    let mut source = FakeStretch {
+        ready: true,
+        ..FakeStretch::default()
+    };
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert!(source.nested);
+    assert_eq!(source.asked, [(100..140, 2.0)], "from its source offset");
+    let mut out = vec![0.0; 20];
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(out[0], 0.9);
+}
+
+/// Its audio ends at 600: past it the stretch would be silence.
+#[test]
+fn a_pitch_corrected_compound_clip_stretches_no_further_than_its_audio() {
+    let (project, compound) = project_with_long_compound();
+    let mut clip = sped_up_clip(compound, Rational::new(2, 1), 40);
+    clip.pitch_correction = true;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    let mut source = FakeStretch::default();
+    MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(source.asked, [(100..600, 2.0)]);
 }
 
 #[test]
@@ -810,7 +797,7 @@ fn a_pitch_corrected_clip_plays_the_stretch_of_its_source_range_or_nothing() {
 
     let mut source = FakeStretch {
         ready: true,
-        asked: Vec::new(),
+        ..FakeStretch::default()
     };
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
     let mut out = vec![0.0; 200];
@@ -861,7 +848,7 @@ fn balance_attenuates_only_the_opposite_channel() {
     left.mix.pan = -0.5;
     let mut tl = timeline(vec![left]);
     tl.master.pan = 0.5;
-    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut buffers);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut stereo);
     let mut out = vec![9.0; 4];
     mix_range(&snap, 0, &mut out);
     assert_eq!(out, [0.25, 0.25, 0.25, 0.25]);
@@ -930,7 +917,7 @@ impl AudioSource for LevelByStart {
     }
 
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
-        let start = analysis.snapshot.clips[0].start;
+        let start = analysis.segments[0].frames.start;
         let level = self.0.iter().find(|(s, _)| *s == start).map(|(_, l)| *l);
         LevelReading::Ready(level.unwrap())
     }
@@ -1000,16 +987,11 @@ fn master_normalization_measures_the_mix_after_the_track_faders() {
 /// kept from before.
 struct PendingPeaks {
     last: Option<f32>,
-    stored: bool,
 }
 
 impl AudioSource for PendingPeaks {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
         buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
-    }
-
-    fn store_compound(&mut self, _: MediaId, _: u64, _: Arc<Vec<f32>>) {
-        self.stored = true;
     }
 
     fn level(&mut self, _: LevelAnalysis) -> LevelReading {
@@ -1018,21 +1000,17 @@ impl AudioSource for PendingPeaks {
 }
 
 #[test]
-fn a_pending_peak_plays_the_last_reading_and_keeps_a_compound_out_of_the_cache() {
+fn a_pending_peak_plays_the_last_reading() {
     let (mut project, compound) = project_with_compound();
     let nested = project.media_pool[compound].compound.unwrap();
     project.timelines[nested].tracks[0].mix.effects = vec![normalize(0.0)];
     let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 5)])]);
 
-    let mut source = PendingPeaks {
-        last: Some(0.25),
-        stored: false,
-    };
+    let mut source = PendingPeaks { last: Some(0.25) };
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
     let mut out = vec![0.0; 50];
     mix_range(&snap, 0, &mut out);
     assert!(out.iter().all(|&s| (s - 2.0).abs() < 1e-5), "0.5 * 1/0.25");
-    assert!(!source.stored);
 
     source.last = None;
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
@@ -1158,7 +1136,8 @@ fn mono_sends_the_average_of_the_channels_to_all_of_them() {
     let tl = timeline(vec![track]);
     // Sound on the left channel only.
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut |path: &Path, _| {
-        (path.to_str()? == "a.wav").then(|| Arc::new([0.8f32, 0.0].repeat(500)))
+        (path.to_str()? == "a.wav")
+            .then(|| SampleBlocks::contiguous(Arc::new([0.8f32, 0.0].repeat(500)), 0, 2))
     });
     let mut out = vec![0.0; 20];
     mix_range(&snap, 0, &mut out);
@@ -1167,7 +1146,8 @@ fn mono_sends_the_average_of_the_channels_to_all_of_them() {
     let mut centred = tl.clone();
     centred.tracks[0].mix.pan = 0.0;
     let snap = MixSnapshot::from_timeline(&project, &centred, RATE, 2, &mut |path: &Path, _| {
-        (path.to_str()? == "a.wav").then(|| Arc::new([0.8f32, 0.0].repeat(500)))
+        (path.to_str()? == "a.wav")
+            .then(|| SampleBlocks::contiguous(Arc::new([0.8f32, 0.0].repeat(500)), 0, 2))
     });
     mix_range(&snap, 0, &mut out);
     assert_eq!(&out[..4], [0.4, 0.4, 0.4, 0.4]);
@@ -1210,17 +1190,16 @@ impl AudioSource for Windowed {
         path: &Path,
         stream: usize,
         frames: std::ops::Range<u64>,
-    ) -> (ClipAudio, u64) {
+        _plays_at: u64,
+    ) -> ClipAudio {
         self.asked.push((path.to_path_buf(), frames.clone()));
-        let Some(whole) = buffers(path, stream) else {
-            return (ClipAudio::Missing, 0);
+        let Some(whole) = samples(path, stream) else {
+            return ClipAudio::Missing;
         };
         let end = (frames.end as usize).min(whole.len());
         let start = (frames.start as usize).min(end);
-        (
-            ClipAudio::Ready(Arc::new(whole[start..end].to_vec())),
-            frames.start,
-        )
+        let window = Arc::new(whole[start..end].to_vec());
+        ClipAudio::Ready(SampleBlocks::contiguous(window, start as u64, 1))
     }
 }
 
@@ -1257,7 +1236,7 @@ fn a_range_mix_reads_only_its_frames_and_matches_the_whole_mix() {
 }
 
 #[test]
-fn a_range_mix_reads_whole_clips_for_a_normalization() {
+fn a_range_mix_of_a_normalizing_timeline_reads_only_its_frames() {
     let (project, _, b) = project();
     let mut tl = timeline(vec![audio_track(vec![clip_at(b, 0, 0, 50)])]);
     tl.master.effects.push(vv_core::AudioEffect {
@@ -1274,5 +1253,287 @@ fn a_range_mix_reads_whole_clips_for_a_normalization() {
     mix_range(&snap, 100, &mut out);
 
     assert_eq!(out, render(&project, &tl, 100, 50));
-    assert_eq!(source.asked[0].1.start, 0);
+    let ClipInput::Blocks(buffer) = &snap.clips[0].input else {
+        panic!("a file clip");
+    };
+    assert!(buffer.start() >= 100, "its level is measured apart");
+}
+
+/// `Windowed`, its levels measured elsewhere: what it is asked for is what
+/// the mix reads.
+#[derive(Default)]
+struct MeasuredApart(Windowed);
+
+impl AudioSource for MeasuredApart {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.0.file(path, stream)
+    }
+
+    fn file_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: std::ops::Range<u64>,
+        plays_at: u64,
+    ) -> ClipAudio {
+        self.0.file_frames(path, stream, frames, plays_at)
+    }
+
+    fn level(&mut self, _: LevelAnalysis) -> LevelReading {
+        LevelReading::Ready(0.5)
+    }
+}
+
+/// Audio still decoding, counting the measures asked for.
+#[derive(Default)]
+struct PartialLevels {
+    measured: usize,
+}
+
+impl AudioSource for PartialLevels {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Partial)
+    }
+
+    fn level(&mut self, _: LevelAnalysis) -> LevelReading {
+        self.measured += 1;
+        LevelReading::Ready(0.25)
+    }
+}
+
+/// The level is measured from the files, not from what is decoded yet.
+#[test]
+fn a_normalization_is_measured_while_its_audio_decodes() {
+    let (project, a, _) = project();
+    let mut track = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    track.mix.effects = vec![normalize(0.0)];
+    let tl = timeline(vec![track]);
+    let mut source = PartialLevels::default();
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(source.measured, 1);
+    let mut out = vec![9.0; 50];
+    mix_range(&snap, 0, &mut out);
+    assert!(out.iter().all(|&s| s == 2.0), "0.5 at four times 0.25");
+}
+
+/// `project()` plus a compound clip whose nested timeline plays the ramp
+/// of `b.wav` for 60 frames through a compressor, over `a.wav` on another
+/// track.
+fn project_with_long_compound() -> (Project, vv_core::MediaId) {
+    let (mut project, a, b) = project();
+    let mut ramp = audio_track(vec![clip_at(b, 0, 10, 60)]);
+    ramp.mix.effects = vec![compressor()];
+    let nested = project.timelines.insert(timeline(vec![
+        ramp,
+        audio_track(vec![clip_at(a, 20, 0, 10)]),
+    ]));
+    let compound = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("Compound Clip 1"),
+        meta: project.media_pool[a].meta.clone(),
+        content_hash: 10,
+        compound: Some(nested),
+        folder: None,
+    });
+    (project, compound)
+}
+
+/// What a compound clip played before being mixed live: its whole mixdown,
+/// read like a file.
+fn with_mixdowns(project: &Project, snap: &MixSnapshot, compound: MediaId) -> MixSnapshot {
+    let nested = &project.timelines[project.media_pool[compound].compound.unwrap()];
+    let nested = MixSnapshot::from_timeline(project, nested, RATE, 1, &mut buffers);
+    let len = nested.clips.iter().map(|c| c.start + c.len).max().unwrap();
+    let mut samples = vec![0.0; len as usize];
+    mix_range(&nested, 0, &mut samples);
+    let mixdown = mono(Arc::new(samples));
+    let clips = snap
+        .clips
+        .iter()
+        .map(|clip| MixClip {
+            input: ClipInput::Blocks(mixdown.clone()),
+            ..clip.clone()
+        })
+        .collect();
+    MixSnapshot::new(RATE, 1, clips, snap.tracks.clone(), snap.master.clone())
+}
+
+#[test]
+fn a_compound_mixed_live_plays_as_its_mixdown() {
+    let (project, compound) = project_with_long_compound();
+    // A fade in would silence it: at `RATE` a gain block outlasts the clip.
+    let mut gain = clip_at(compound, 2, 0, 30);
+    gain.fade_out = 5;
+    let mut keyframes = Keyframed::constant(-3.0f32);
+    keyframes.upsert(0, 0.0, Interpolation::Linear);
+    keyframes.upsert(20, -12.0, Interpolation::Linear);
+    gain.effects.gain_db = keyframes;
+    let mut faster = Clip::new(
+        ClipId(1),
+        ClipSource::Media(compound),
+        0,
+        40,
+        20,
+        Rational::one(),
+        Rational::new(3, 2),
+    );
+    let mut slower = Clip::new(
+        ClipId(2),
+        ClipSource::Media(compound),
+        0,
+        70,
+        30,
+        Rational::one(),
+        Rational::new(2, 3),
+    );
+    faster.pitch_correction = false;
+    slower.pitch_correction = false;
+    let tracks = [vec![gain], vec![faster], vec![slower]];
+    for clips in tracks {
+        let tl = timeline(vec![audio_track(clips)]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+        let mut live = vec![9.0; 1000];
+        mix_range(&snap, 0, &mut live);
+        let mut mixdown = vec![9.0; 1000];
+        mix_range(&with_mixdowns(&project, &snap, compound), 0, &mut mixdown);
+        assert_eq!(live, mixdown);
+        assert!(live.iter().any(|&s| s != 0.0));
+    }
+}
+
+/// As a file clip past its file's end: the fade-out is on the audio, not
+/// on the silence after it.
+#[test]
+fn a_compound_longer_than_its_audio_fades_out_where_its_audio_ends() {
+    let (project, compound) = project_with_compound();
+    let mut clip = clip_at(compound, 0, 0, 10);
+    clip.fade_out = 2;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    // Checked on the clip: at `RATE` a gain block outlasts the fade.
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    assert_eq!((snap.clips[0].len, snap.clips[0].fade_out), (50, 20));
+}
+
+/// The nested compressor runs in order across calls, and a varispeed read
+/// does not render twice the frame two calls share.
+#[test]
+fn a_compound_mixed_in_many_calls_equals_one_call() {
+    let (project, compound) = project_with_long_compound();
+    for speed in [Rational::one(), Rational::new(3, 2), Rational::new(2, 3)] {
+        let mut clip = Clip::new(
+            ClipId(1),
+            ClipSource::Media(compound),
+            0,
+            5,
+            30,
+            Rational::one(),
+            speed,
+        );
+        clip.pitch_correction = false;
+        let tl = timeline(vec![audio_track(vec![clip])]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+        let mut whole = vec![0.0; 600];
+        mix_range(&snap, 0, &mut whole);
+        let mut state = MixState::new(&snap);
+        let mut split = Vec::new();
+        for (start, len) in [(0, 7), (7, 64), (71, 1), (72, 300), (372, 228)] {
+            let mut out = vec![0.0; len];
+            mix_range_from(&snap, &mut state, start as u64, &mut out);
+            split.extend(out);
+        }
+        assert_eq!(split, whole, "at speed {speed:?}");
+    }
+}
+
+/// An edit elsewhere publishes a new snapshot: the compound's compressor
+/// must carry on, not restart.
+#[test]
+fn a_new_snapshot_carries_on_a_compounds_effects() {
+    let (project, compound) = project_with_long_compound();
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 60)])]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let mut whole = vec![0.0; 600];
+    mix_range(&snap, 0, &mut whole);
+
+    let mut state = MixState::new(&snap);
+    let mut first = vec![0.0; 250];
+    mix_range_from(&snap, &mut state, 0, &mut first);
+    let next = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let mut next_state = MixState::new(&next);
+    next_state.continue_from(&state);
+    let mut second = vec![0.0; 350];
+    mix_range_from(&next, &mut next_state, 250, &mut second);
+    first.extend(second);
+    assert_eq!(first, whole);
+}
+
+/// A track inserted above it moves the compound to another track index:
+/// its compressor carries on all the same.
+#[test]
+fn a_compound_moved_to_another_track_carries_on_its_effects() {
+    let (project, compound) = project_with_long_compound();
+    let clip = clip_at(compound, 0, 0, 60);
+    let before = timeline(vec![audio_track(vec![clip.clone()])]);
+    let after = timeline(vec![audio_track(Vec::new()), audio_track(vec![clip])]);
+    let next = MixSnapshot::from_timeline(&project, &after, RATE, 1, &mut buffers);
+    let mut whole = vec![0.0; 600];
+    mix_range(&next, 0, &mut whole);
+
+    let snap = MixSnapshot::from_timeline(&project, &before, RATE, 1, &mut buffers);
+    let mut state = MixState::new(&snap);
+    let mut first = vec![0.0; 250];
+    mix_range_from(&snap, &mut state, 0, &mut first);
+    let mut next_state = MixState::new(&next);
+    next_state.continue_from(&state);
+    let mut second = vec![0.0; 350];
+    mix_range_from(&next, &mut next_state, 250, &mut second);
+    first.extend(second);
+    assert_eq!(first, whole);
+}
+
+#[test]
+fn a_compound_whose_timeline_normalizes_reads_only_what_plays() {
+    let (mut project, compound) = project_with_long_compound();
+    let nested = project.media_pool[compound].compound.unwrap();
+    project.timelines[nested].master.effects = vec![normalize(0.0)];
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 60)])]);
+    let mut source = MeasuredApart::default();
+    MixSnapshot::from_timeline_range(&project, &tl, RATE, 1, &mut source, 300..310);
+    let ramp = source
+        .0
+        .asked
+        .iter()
+        .find(|(path, _)| path.as_os_str() == "b.wav");
+    let frames = &ramp.unwrap().1;
+    assert!(frames.end - frames.start < 50, "{frames:?}");
+}
+
+/// What the fast forward asks before stretching a window: a render of it now
+/// equals the one once everything is decoded.
+#[test]
+fn a_snapshot_is_ready_where_its_clips_have_their_audio() {
+    let (mut project, a, b) = project();
+    let nested = project
+        .timelines
+        .insert(timeline(vec![audio_track(vec![clip_at(b, 0, 0, 10)])]));
+    let compound = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("Compound Clip 1"),
+        meta: project.media_pool[a].meta.clone(),
+        content_hash: 10,
+        compound: Some(nested),
+        folder: None,
+    });
+    let tl = timeline(vec![
+        audio_track(vec![clip_at(a, 0, 0, 10)]),
+        audio_track(vec![clip_at(b, 20, 0, 10), clip_at(compound, 40, 0, 10)]),
+    ]);
+    // `b.wav` still decoding, no block yet.
+    let mut source = |path: &Path, stream: usize| match path.to_str() {
+        Some("b.wav") => Some(SampleBlocks::new(0, 1000, 1, vec![None], 1000)),
+        _ => buffers(path, stream),
+    };
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert!(snap.is_ready(0..100));
+    assert!(!snap.is_ready(150..250), "b.wav");
+    assert!(!snap.is_ready(400..450), "b.wav inside the compound clip");
+    assert!(snap.is_ready(1000..2000), "nothing plays there");
 }

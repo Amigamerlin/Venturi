@@ -4,7 +4,7 @@ use super::*;
 /// with "Input changed".
 #[test]
 fn decode_audio_track_handles_unspecified_channel_layout() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("pcm_unknown_layout.mkv");
 
@@ -31,7 +31,7 @@ fn decode_audio_track_handles_unspecified_channel_layout() {
 
 #[test]
 fn decode_audio_track_reads_correct_length_and_is_not_silent() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sample.mp4");
 
@@ -67,7 +67,7 @@ fn decode_audio_track_reads_correct_length_and_is_not_silent() {
 
 #[test]
 fn streaming_decode_resamples_continuously_in_many_chunks() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("streaming_44k.wav");
     crate::test_support::ffmpeg(
@@ -107,7 +107,7 @@ fn streaming_decode_resamples_continuously_in_many_chunks() {
 
 #[test]
 fn streaming_decode_stops_when_the_callback_breaks() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("streaming_break.wav");
     crate::test_support::ffmpeg(
@@ -131,7 +131,7 @@ fn streaming_decode_stops_when_the_callback_breaks() {
 
 #[test]
 fn streaming_decode_delivers_every_requested_stream_in_one_pass() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("streaming_three.mkv");
     crate::test_support::ffmpeg(
@@ -197,7 +197,7 @@ fn streaming_decode_delivers_every_requested_stream_in_one_pass() {
 /// without spectral analysis.
 #[test]
 fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
-    let dir = std::env::temp_dir().join("vv-media-audio-test");
+    let dir = std::env::temp_dir().join(format!("vv-media-audio-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("two_streams.mp4");
 
@@ -235,4 +235,237 @@ fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
         decode_audio_track(&path, 2).unwrap().is_none(),
         "no audio stream at index 2"
     );
+}
+
+/// 20 s of seeded noise: unlike a tone, a shift of one sample shows.
+const NOISE: &str = "anoisesrc=duration=20:color=white:amplitude=0.5:seed=7:sample_rate=48000";
+
+/// A sweep, never periodic either: lossy codecs fill noise with noise of
+/// their own (AAC's PNS), different after a seek.
+const CHIRP: &str = "aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=20:sample_rate=48000";
+
+fn test_file(
+    name: &str,
+    source: &str,
+    output_args: &[&str],
+    with_video: bool,
+) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("vv-media-seek-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let mut args = vec!["-f", "lavfi", "-i", source];
+    if with_video {
+        args.extend([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=20:size=320x240:rate=30",
+            "-map",
+            "1:v",
+            "-map",
+            "0:a",
+            "-c:v",
+            "libx264",
+            "-g",
+            "120",
+        ]);
+    }
+    args.extend(["-ac", "2"]);
+    args.extend(output_args);
+    crate::test_support::ffmpeg(&args, &path);
+    path
+}
+
+/// The frames `from..from + len` of stream 0 at 48 kHz stereo, by seeking.
+fn seeked(path: &std::path::Path, from: u64, len: u64) -> Vec<f32> {
+    let mut out = vec![f32::NAN; len as usize * 2];
+    decode_audio_streams_from(path, &[0], 48_000, from, |_, channels, at, chunk| {
+        assert_eq!(channels, 2);
+        for (i, frame) in chunk.as_chunks::<2>().0.iter().enumerate() {
+            let pos = at + i as u64;
+            if (from..from + len).contains(&pos) {
+                let o = (pos - from) as usize * 2;
+                out[o..o + 2].copy_from_slice(frame);
+            }
+        }
+        if at >= from + len {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .unwrap();
+    out
+}
+
+/// Stream 0 decoded from the start, each sample where `at` puts it: NaN
+/// where nothing plays (a gap in the timestamps).
+fn placed_full_decode(path: &std::path::Path) -> Vec<f32> {
+    let mut full = Vec::new();
+    decode_audio_streams_from(path, &[0], 48_000, 0, |_, _, at, chunk| {
+        let start = at as usize * 2;
+        if full.len() < start + chunk.len() {
+            full.resize(start + chunk.len(), f32::NAN);
+        }
+        full[start..start + chunk.len()].copy_from_slice(chunk);
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    full
+}
+
+/// Inside the preroll, past a seek, and up to the end of the file.
+const SEEK_OFFSETS: [u64; 4] = [300, 48_000 * 7 + 123, 48_000 * 13 + 7, 48_000 * 19 + 5];
+
+fn assert_seek_matches_full_decode(path: &std::path::Path, tolerance: f32) {
+    assert_seeks_match_full_decode(path, tolerance, &SEEK_OFFSETS);
+}
+
+fn assert_seeks_match_full_decode(path: &std::path::Path, tolerance: f32, offsets: &[u64]) {
+    let full = placed_full_decode(path);
+    for &from in offsets {
+        let len = 48_000.min(full.len() as u64 / 2 - from);
+        let got = seeked(path, from, len);
+        let want = &full[from as usize * 2..(from + len) as usize * 2];
+        let worst = got
+            .iter()
+            .zip(want)
+            .fold(0.0f32, |m, (g, w)| match (g.is_nan(), w.is_nan()) {
+                (true, true) => m,
+                (false, false) => m.max((g - w).abs()),
+                _ => f32::INFINITY,
+            });
+        assert!(
+            worst <= tolerance,
+            "{}: from frame {from} the seeked decode differs by {worst}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_pcm() {
+    let path = test_file("pcm.wav", NOISE, &["-c:a", "pcm_s16le"], false);
+    assert_seek_matches_full_decode(&path, 0.0);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_pcm_next_to_h264() {
+    let path = test_file("obs.mkv", NOISE, &["-c:a", "pcm_s16le"], true);
+    assert_seek_matches_full_decode(&path, 0.0);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_flac() {
+    let path = test_file("noise.flac", NOISE, &["-c:a", "flac"], false);
+    assert_seek_matches_full_decode(&path, 0.0);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_aac() {
+    let path = test_file("aac.mp4", CHIRP, &["-c:a", "aac"], true);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_aac_in_mkv() {
+    let path = test_file("aac.mkv", CHIRP, &["-c:a", "aac"], true);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_opus() {
+    let path = test_file("opus.mkv", CHIRP, &["-c:a", "libopus"], true);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+#[test]
+fn a_seeked_decode_matches_the_full_decode_on_mp3() {
+    let path = test_file("chirp.mp3", CHIRP, &["-c:a", "libmp3lame"], false);
+    assert_seek_matches_full_decode(&path, 1e-4);
+}
+
+fn chirp_at(rate: u32) -> String {
+    format!("aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=20:sample_rate={rate}")
+}
+
+/// Seeked onto an input frame that falls on an output frame, the resampler
+/// is in phase with one fed from the start.
+#[test]
+fn a_seeked_resampled_decode_matches_the_full_decode() {
+    for (name, rate, codec, tolerance) in [
+        ("chirp44.wav", 44_100, "pcm_s16le", 0.0),
+        ("chirp22.flac", 22_050, "flac", 0.0),
+        ("chirp32.wav", 32_000, "pcm_s16le", 0.0),
+        ("chirp96.wav", 96_000, "pcm_s16le", 0.0),
+        // No channel layout in the file.
+        ("chirp44.mkv", 44_100, "pcm_s16le", 0.0),
+        ("chirp44.mp3", 44_100, "libmp3lame", 1e-4),
+    ] {
+        let path = test_file(name, &chirp_at(rate), &["-c:a", codec], false);
+        assert_seek_matches_full_decode(&path, tolerance);
+    }
+    // Not up to the end: at 44.1 kHz AAC differs in its last 10 ms after a
+    // seek, resampled or not (TODO.md).
+    let path = test_file("chirp44.mp4", &chirp_at(44_100), &["-c:a", "aac"], true);
+    assert_seeks_match_full_decode(&path, 1e-4, &SEEK_OFFSETS[..3]);
+}
+
+#[test]
+fn a_resampled_file_is_read_from_near_the_frame_asked_not_from_its_start() {
+    let path = test_file(
+        "near44.wav",
+        &chirp_at(44_100),
+        &["-c:a", "pcm_s16le"],
+        false,
+    );
+    let from = 48_000 * 13;
+    let mut first = None;
+    decode_audio_streams_from(&path, &[0], 48_000, from, |_, _, at, _| {
+        first = Some(at);
+        ControlFlow::Break(())
+    })
+    .unwrap();
+    let first = first.unwrap();
+    assert!(from - first <= 48_000, "first chunk at {first}");
+}
+
+/// 1 s missing from the timestamps at 5 s (a dropout, a cut capture): a
+/// seek past it and a decode from the start both leave it silent.
+#[test]
+fn a_gap_in_the_timestamps_is_kept_by_a_decode_from_the_start_and_by_a_seek() {
+    for (name, rate) in [("gap.mkv", 48_000), ("gap44.mkv", 44_100)] {
+        let path = test_file(
+            name,
+            &chirp_at(rate),
+            &[
+                "-af",
+                "asetpts='if(gte(T,5),PTS+SR,PTS)'",
+                "-c:a",
+                "pcm_s16le",
+            ],
+            false,
+        );
+        let full = placed_full_decode(&path);
+        let silent = full[..full.len() / 2 * 2]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|frame| frame[0].is_nan())
+            .count();
+        assert!(
+            (47_000..49_000).contains(&silent),
+            "{name}: {silent} frames missing"
+        );
+        assert_seeks_match_full_decode(
+            &path,
+            0.0,
+            &[
+                48_000 * 3,
+                48_000 * 4 + 24_000,
+                48_000 * 6 + 600,
+                48_000 * 13 + 7,
+            ],
+        );
+    }
 }

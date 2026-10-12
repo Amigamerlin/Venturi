@@ -559,6 +559,23 @@ fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
                 changed = true;
             }
             ui.end_row();
+
+            ui.label(t!("settings.audio_cache"))
+                .on_hover_text(t!("settings.audio_cache_hint"));
+            let mut budget_mb = (settings.audio_budget_bytes / 1_000_000) as u32;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut budget_mb)
+                        .range(crate::settings::AUDIO_BUDGET_MB)
+                        .suffix(" MB"),
+                )
+                .on_hover_text(t!("settings.audio_cache_hint"))
+                .changed()
+            {
+                settings.audio_budget_bytes = budget_mb as usize * 1_000_000;
+                changed = true;
+            }
+            ui.end_row();
         });
 
     ui.add_space(12.0);
