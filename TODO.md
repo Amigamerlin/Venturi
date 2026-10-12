@@ -31,8 +31,6 @@ forward's thread per frame.
 - **Failures cached forever.** A decode error marks the stream `missing`
   until it leaves the timeline; a failed level measure is `Ready(0.0)`, i.e. unity gain, with only an
   `eprintln`. A `recv` error in the export reader reads as end of file.
-- **`SampleBlocks::to_vec`** loops forever on a block whose length is not a
-  multiple of `channels` (no producer does that today; add `.max(1)`).
 - **Weak seek anchor**: when none of the first `MAX_ORIGIN_PACKETS` packets
   gives two frames, the fallback anchor ignores priming and pre-skip (off by
   up to a frame). Log it at least.
@@ -62,16 +60,8 @@ forward's thread per frame.
 - Two block decoders (`mix_buffers::decode_blocks`, export
   `Reader`/`KeptStream`).
 - Cancel-and-forget code copied in `sweep_unused` and `rebalance`.
-- `SampleBlocks::hash_identity` is unused, and its pointer hash can collide
-  once a block is freed: remove it.
-- Clip readiness is computed then dropped by every public constructor; the
-  `normalize_gain` comment still mentions the gone compound cache.
-- Misplaced doc comments: `eq.rs:62` (`EqResponse` lost its doc),
-  `mix_buffers.rs` above `stretched` ("Whole mixdowns of…").
 - The seek's first read repeats the packet-to-slot lookup of
   `decode_streams`.
-- FFmpeg floods stderr ("Could not update timestamps for skipped samples")
-  on every MP3/Opus seek: no `av_log_set_level` anywhere.
 
 ## Audio: tests
 
