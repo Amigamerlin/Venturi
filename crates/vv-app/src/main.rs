@@ -1359,12 +1359,13 @@ impl VenturiApp {
         }
     }
 
-    /// Opens `nested_id` as if it were the project timeline: from the double
-    /// click on a compound clip (`timeline_ui::show_timeline`). The whole
+    /// Opens `nested_id` as if it were the project timeline, with the playhead
+    /// on its frame `at`: from the double click on a compound clip
+    /// (`timeline_ui::show_timeline`). The whole
     /// existing editing UI stays unchanged (it is already parameterized on
     /// `self.timeline_id`), here only the "which" has to be moved and
     /// where one came from stacked for the breadcrumb.
-    pub(crate) fn enter_compound_timeline(&mut self, nested_id: TimelineId) {
+    pub(crate) fn enter_compound_timeline(&mut self, nested_id: TimelineId, at: FrameIdx) {
         let Some(current) = self.timeline_id else {
             return;
         };
@@ -1376,6 +1377,9 @@ impl VenturiApp {
         }
         self.timeline_stack.push(current);
         self.switch_to_timeline(nested_id);
+        let end = self.session.project.timelines[nested_id].total_frames();
+        self.timeline_state.playhead = at.clamp(0, (end - 1).max(0));
+        self.timeline_state.reveal_playhead = true;
     }
 
     /// Goes back to the timeline at position `index` of `timeline_stack` (0 =
@@ -3979,8 +3983,8 @@ impl VenturiApp {
                         is_playing,
                     );
                     media_drop = drop;
-                    if let Some(nested_id) = enter_compound {
-                        self.enter_compound_timeline(nested_id);
+                    if let Some((nested_id, at)) = enter_compound {
+                        self.enter_compound_timeline(nested_id, at);
                     }
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();

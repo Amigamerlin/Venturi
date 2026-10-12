@@ -18,6 +18,8 @@ struct Harness {
     release_rects: std::collections::HashMap<ClipId, egui::Rect>,
     /// Held down during every following frame.
     modifiers: egui::Modifiers,
+    /// The last compound clip `show_timeline` asked to open.
+    entered: Option<(TimelineId, FrameIdx)>,
 }
 
 impl Harness {
@@ -40,6 +42,7 @@ impl Harness {
             time: 0.0,
             release_rects: std::collections::HashMap::new(),
             modifiers: egui::Modifiers::NONE,
+            entered: None,
         };
         // Two frames: the first one only lays the panes out.
         harness.frame(Vec::new());
@@ -58,9 +61,10 @@ impl Harness {
         input.events = std::iter::once(egui::Event::ModifiersChanged(self.modifiers))
             .chain(events)
             .collect();
+        let mut entered = None;
         let mut output = self.ctx.run_ui(input, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                show_timeline(
+                (_, entered) = show_timeline(
                     ui,
                     &mut self.project,
                     &mut self.history,
@@ -77,6 +81,7 @@ impl Harness {
             });
         });
         output.textures_delta.clear();
+        self.entered = entered.or(self.entered);
     }
 
     fn rect(&self, clip: ClipId) -> egui::Rect {
@@ -641,4 +646,60 @@ fn the_marker_editor_saves_on_ctrl_enter_and_discards_on_escape() {
     h.frame(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     assert!(h.state.marker_editor.is_none());
     assert_eq!(h.project.timelines[h.timeline_id].markers[0].note, "retake");
+}
+
+/// Double click on a compound clip: it opens at the frame of it under the
+/// playhead, or at its nearest edge when the playhead is outside it.
+#[test]
+fn a_compound_clip_opens_at_the_frame_under_the_playhead() {
+    let mut h = Harness::new(vec![track(TrackKind::Video, Vec::new())]);
+    let nested = h.project.timelines.insert(vv_core::Timeline {
+        name: "Nested".into(),
+        fps: Rational::new(25, 1),
+        resolution: (1920, 1080),
+        tracks: vec![Track::new(TrackKind::Video)],
+        markers: Vec::new(),
+        master: Default::default(),
+    });
+    let media = h.project.media_pool.insert(vv_core::MediaItem {
+        path: "Compound Clip 1".into(),
+        meta: vv_core::MediaMeta {
+            duration_frames: 1000,
+            fps: Rational::new(25, 1),
+            width: 1920,
+            height: 1080,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 1,
+        compound: Some(nested),
+        folder: None,
+    });
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        100,
+        0,
+        Rational::one(),
+    );
+    clip.source_offset = 200;
+    h.project.timelines[h.timeline_id].tracks[0].clips = vec![clip];
+    h.frame(Vec::new());
+    let center = h.rect(ClipId(1)).center();
+
+    h.state.playhead = 40;
+    h.click(center);
+    h.click(center);
+    assert_eq!(h.entered, Some((nested, 240)));
+
+    h.time += 1.0;
+    h.state.playhead = 150;
+    h.click(center);
+    h.click(center);
+    assert_eq!(h.entered, Some((nested, 299)));
 }

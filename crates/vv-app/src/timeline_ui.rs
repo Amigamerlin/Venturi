@@ -1845,6 +1845,8 @@ pub enum MediaDropTarget {
     Track(usize),
 }
 
+pub type MediaDrop = (TimelineDrag, FrameIdx, MediaDropTarget);
+
 /// `Some((drag, frame, target))` if in this frame something dragged from the
 /// media pool or from the Effects panel was released; the caller
 /// takes care of it.
@@ -1867,13 +1869,11 @@ pub fn show_timeline(
     // always stay visible, so the view "turns the page" to
     // follow it when it leaves the visible area (see below).
     playback_active: bool,
-) -> (
-    Option<(TimelineDrag, FrameIdx, MediaDropTarget)>,
-    Option<TimelineId>,
-) {
+) -> (Option<MediaDrop>, Option<(TimelineId, FrameIdx)>) {
     let mut media_drop = None;
     // Double click on a compound clip: the caller (main.rs) opens it
-    // as a timeline of its own (see `VenturiApp::enter_compound_timeline`).
+    // as a timeline of its own (see `VenturiApp::enter_compound_timeline`),
+    // at the frame of it under the playhead.
     let mut enter_compound = None;
 
     // Alt+scroll/pinch zooms only with the pointer over the timeline.
@@ -3435,7 +3435,11 @@ pub fn show_timeline(
                             && let Some(nested_id) =
                                 project.media_pool.get(media_id).and_then(|m| m.compound)
                         {
-                            enter_compound = Some(nested_id);
+                            let clip = &visual.clip;
+                            let outer = state
+                                .playhead
+                                .clamp(clip.timeline_start, clip.timeline_end() - 1);
+                            enter_compound = Some((nested_id, clip.picture_frame_at(outer)));
                         }
                     } else if resp.clicked() {
                         let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {

@@ -115,7 +115,7 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
         master: Default::default(),
     });
     insert_compound_media(&mut app, nested_id);
-    app.enter_compound_timeline(nested_id);
+    app.enter_compound_timeline(nested_id, 0);
     for track_index in 0..2 {
         let clip_id = app.session.project.alloc_clip_id();
         let clip = vv_core::Clip::from_source_range(
@@ -150,6 +150,39 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
 }
 
 #[test]
+fn entering_a_compound_puts_the_playhead_on_the_given_frame_within_it() {
+    let mut app = VenturiApp::default();
+    let root_id = app.ensure_timeline();
+    let mut track = Track::new(TrackKind::Video);
+    track.insert_sorted(vv_core::Clip::from_source_range(
+        vv_core::ClipId(1),
+        vv_core::ClipSource::SolidColor,
+        0,
+        20,
+        0,
+        vv_core::Rational::one(),
+    ));
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
+        name: "Nested".into(),
+        fps: vv_core::Rational::new(25, 1),
+        resolution: (1920, 1080),
+        tracks: vec![track],
+        markers: Vec::new(),
+        master: Default::default(),
+    });
+    insert_compound_media(&mut app, nested_id);
+
+    app.enter_compound_timeline(nested_id, 12);
+    assert_eq!(app.timeline_state.playhead, 12);
+    assert!(app.timeline_state.reveal_playhead);
+
+    app.exit_to_timeline_stack_index(0);
+    assert_eq!(app.timeline_id, Some(root_id));
+    app.enter_compound_timeline(nested_id, 50);
+    assert_eq!(app.timeline_state.playhead, 19, "kept within the compound");
+}
+
+#[test]
 fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
@@ -162,7 +195,7 @@ fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() 
         master: Default::default(),
     });
     let media = insert_compound_media(&mut app, nested_id);
-    app.enter_compound_timeline(nested_id);
+    app.enter_compound_timeline(nested_id, 0);
 
     app.media_pool_state.selected.insert(media);
     app.delete_selected_media();
@@ -257,7 +290,7 @@ fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_u
     app.timeline_state.playhead = 42;
     app.timeline_state.selected = BTreeSet::from([(0, ClipId(999))]);
 
-    app.enter_compound_timeline(nested_id);
+    app.enter_compound_timeline(nested_id, 0);
 
     assert_eq!(app.timeline_id, Some(nested_id));
     assert_eq!(
@@ -290,7 +323,7 @@ fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op(
 
     // Intended or due to a residual cycle (see MAX_COMPOUND_DEPTH): it must not
     // stack the current timeline on itself.
-    app.enter_compound_timeline(root_id);
+    app.enter_compound_timeline(root_id, 0);
     assert_eq!(app.timeline_id, Some(root_id));
     assert!(app.timeline_stack.is_empty());
 
@@ -303,12 +336,12 @@ fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op(
         master: Default::default(),
     });
     insert_compound_media(&mut app, nested_id);
-    app.enter_compound_timeline(nested_id);
+    app.enter_compound_timeline(nested_id, 0);
     assert_eq!(app.timeline_stack, vec![root_id]);
 
     // The root is already an ancestor on the stack: re-entering it must not
     // stack `nested_id` a second time over itself.
-    app.enter_compound_timeline(root_id);
+    app.enter_compound_timeline(root_id, 0);
     assert_eq!(
         app.timeline_id,
         Some(nested_id),
@@ -349,7 +382,7 @@ fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
         link_tag: None,
     }];
 
-    app.enter_compound_timeline(nested_id);
+    app.enter_compound_timeline(nested_id, 0);
     assert_eq!(
         app.timeline_state.clipboard.len(),
         1,
