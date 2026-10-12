@@ -265,8 +265,10 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   Audio is held in blocks of 64k frames (`vv_audio::SampleBlocks`), only
   those the clips read (`mix_buffers.rs`): decoded in the background by
   seeking (`vv_media::decode_audio_streams_from`, sample-exact against a
-  decode from the start; resampled files are read once from the start for
-  all their queued jobs), the job closest to the playhead first, within a
+  decode from the start; a resampled file seeks onto an input frame that
+  falls on an output frame, which keeps the resampler in phase; a jump in
+  the timestamps over 5 ms is placed by timestamp, like the video, by both),
+  the job closest to the playhead first, within a
   budget that keeps the blocks closest to it (Settings > Playback > Audio
   cache, 512 MB by default). A missing block plays as silence and the
   clock keeps advancing: after a jump the audio may start a moment late,

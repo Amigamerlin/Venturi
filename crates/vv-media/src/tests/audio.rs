@@ -298,25 +298,43 @@ fn seeked(path: &std::path::Path, from: u64, len: u64) -> Vec<f32> {
     out
 }
 
-fn assert_seek_matches_full_decode(path: &std::path::Path, tolerance: f32) {
+/// Stream 0 decoded from the start, each sample where `at` puts it: NaN
+/// where nothing plays (a gap in the timestamps).
+fn placed_full_decode(path: &std::path::Path) -> Vec<f32> {
     let mut full = Vec::new();
-    decode_audio_streams_streaming(path, &[0], Some(48_000), |_, _, chunk| {
-        full.extend_from_slice(chunk);
+    decode_audio_streams_from(path, &[0], 48_000, 0, |_, _, at, chunk| {
+        let start = at as usize * 2;
+        if full.len() < start + chunk.len() {
+            full.resize(start + chunk.len(), f32::NAN);
+        }
+        full[start..start + chunk.len()].copy_from_slice(chunk);
         ControlFlow::Continue(())
     })
     .unwrap();
-    for from in [48_000 * 7 + 123, 48_000 * 13 + 7, 300] {
-        let len = 48_000;
+    full
+}
+
+/// Inside the preroll, past a seek, and up to the end of the file.
+const SEEK_OFFSETS: [u64; 4] = [300, 48_000 * 7 + 123, 48_000 * 13 + 7, 48_000 * 19 + 5];
+
+fn assert_seek_matches_full_decode(path: &std::path::Path, tolerance: f32) {
+    assert_seeks_match_full_decode(path, tolerance, &SEEK_OFFSETS);
+}
+
+fn assert_seeks_match_full_decode(path: &std::path::Path, tolerance: f32, offsets: &[u64]) {
+    let full = placed_full_decode(path);
+    for &from in offsets {
+        let len = 48_000.min(full.len() as u64 / 2 - from);
         let got = seeked(path, from, len);
         let want = &full[from as usize * 2..(from + len) as usize * 2];
         let worst = got
             .iter()
             .zip(want)
-            .map(|(g, w)| (g - w).abs())
-            .fold(
-                0.0f32,
-                |m, d| if d.is_nan() { f32::INFINITY } else { m.max(d) },
-            );
+            .fold(0.0f32, |m, (g, w)| match (g.is_nan(), w.is_nan()) {
+                (true, true) => m,
+                (false, false) => m.max((g - w).abs()),
+                _ => f32::INFINITY,
+            });
         assert!(
             worst <= tolerance,
             "{}: from frame {from} the seeked decode differs by {worst}",
@@ -367,9 +385,87 @@ fn a_seeked_decode_matches_the_full_decode_on_mp3() {
     assert_seek_matches_full_decode(&path, 1e-4);
 }
 
+fn chirp_at(rate: u32) -> String {
+    format!("aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=20:sample_rate={rate}")
+}
+
+/// Seeked onto an input frame that falls on an output frame, the resampler
+/// is in phase with one fed from the start.
 #[test]
-fn a_resampled_stream_is_read_from_its_start_to_stay_in_phase() {
-    let chirp_44k = "aevalsrc=0.5*sin(2*PI*(100+300*t)*t):duration=20:sample_rate=44100";
-    let path = test_file("chirp44.wav", chirp_44k, &["-c:a", "pcm_s16le"], false);
-    assert_seek_matches_full_decode(&path, 0.0);
+fn a_seeked_resampled_decode_matches_the_full_decode() {
+    for (name, rate, codec, tolerance) in [
+        ("chirp44.wav", 44_100, "pcm_s16le", 0.0),
+        ("chirp22.flac", 22_050, "flac", 0.0),
+        ("chirp32.wav", 32_000, "pcm_s16le", 0.0),
+        ("chirp96.wav", 96_000, "pcm_s16le", 0.0),
+        // No channel layout in the file.
+        ("chirp44.mkv", 44_100, "pcm_s16le", 0.0),
+        ("chirp44.mp3", 44_100, "libmp3lame", 1e-4),
+    ] {
+        let path = test_file(name, &chirp_at(rate), &["-c:a", codec], false);
+        assert_seek_matches_full_decode(&path, tolerance);
+    }
+    // Not up to the end: at 44.1 kHz AAC differs in its last 10 ms after a
+    // seek, resampled or not (TODO.md).
+    let path = test_file("chirp44.mp4", &chirp_at(44_100), &["-c:a", "aac"], true);
+    assert_seeks_match_full_decode(&path, 1e-4, &SEEK_OFFSETS[..3]);
+}
+
+#[test]
+fn a_resampled_file_is_read_from_near_the_frame_asked_not_from_its_start() {
+    let path = test_file(
+        "near44.wav",
+        &chirp_at(44_100),
+        &["-c:a", "pcm_s16le"],
+        false,
+    );
+    let from = 48_000 * 13;
+    let mut first = None;
+    decode_audio_streams_from(&path, &[0], 48_000, from, |_, _, at, _| {
+        first = Some(at);
+        ControlFlow::Break(())
+    })
+    .unwrap();
+    let first = first.unwrap();
+    assert!(from - first <= 48_000, "first chunk at {first}");
+}
+
+/// 1 s missing from the timestamps at 5 s (a dropout, a cut capture): a
+/// seek past it and a decode from the start both leave it silent.
+#[test]
+fn a_gap_in_the_timestamps_is_kept_by_a_decode_from_the_start_and_by_a_seek() {
+    for (name, rate) in [("gap.mkv", 48_000), ("gap44.mkv", 44_100)] {
+        let path = test_file(
+            name,
+            &chirp_at(rate),
+            &[
+                "-af",
+                "asetpts='if(gte(T,5),PTS+SR,PTS)'",
+                "-c:a",
+                "pcm_s16le",
+            ],
+            false,
+        );
+        let full = placed_full_decode(&path);
+        let silent = full[..full.len() / 2 * 2]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|frame| frame[0].is_nan())
+            .count();
+        assert!(
+            (47_000..49_000).contains(&silent),
+            "{name}: {silent} frames missing"
+        );
+        assert_seeks_match_full_decode(
+            &path,
+            0.0,
+            &[
+                48_000 * 3,
+                48_000 * 4 + 24_000,
+                48_000 * 6 + 600,
+                48_000 * 13 + 7,
+            ],
+        );
+    }
 }

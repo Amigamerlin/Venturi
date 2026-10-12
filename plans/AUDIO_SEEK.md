@@ -8,8 +8,9 @@ end of a one-hour file cost the decode of the whole hour.
 **Status:** done. The decode (bfa36ba, `decode_audio_streams_from`) is
 sample-exact rather than within a tolerance (§4); the preview uses it, and
 the export and the MCP levels since [AUDIO_LIVE_MIX.md](AUDIO_LIVE_MIX.md)
-step 1 (`vv-session/src/audio_render.rs`). Resampled files still decode
-from their start, once per reader.
+step 1 (`vv-session/src/audio_render.rs`). Resampled files seek too
+(2026-10-12): onto an input frame that falls on an output frame, with a
+fresh resampler, in phase with one fed from the start.
 
 ---
 

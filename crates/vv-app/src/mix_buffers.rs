@@ -238,16 +238,6 @@ impl MixBufferCache {
         let worker_playhead = playhead.clone();
         let worker = Worker::spawn(move |job_rx: mpsc::Receiver<DecodeJob>| {
             let mut queue: Vec<DecodeJob> = Vec::new();
-            let mut from_start: HashMap<PathBuf, bool> = HashMap::new();
-            let mut reads_from_start = |path: &Path| {
-                *from_start.entry(path.to_path_buf()).or_insert_with(|| {
-                    vv_media::audio_streams(path).is_ok_and(|streams| {
-                        streams
-                            .iter()
-                            .any(|stream| stream.sample_rate != sample_rate)
-                    })
-                })
-            };
             loop {
                 if queue.is_empty() {
                     match job_rx.recv() {
@@ -258,7 +248,7 @@ impl MixBufferCache {
                 queue.extend(job_rx.try_iter());
                 queue.retain(|job| !job.cancelled.load(Ordering::Relaxed));
                 let playhead = worker_playhead.load(Ordering::Relaxed);
-                let batch = take_batch(&mut queue, playhead, &mut reads_from_start);
+                let batch = take_batch(&mut queue, playhead);
                 let Some(path) = batch.first().map(|job| job.path.clone()) else {
                     continue;
                 };
@@ -782,15 +772,7 @@ impl AudioSource for MixBufferCache {
 
 /// The next decode: the job closest to the playhead, with the queued jobs one
 /// read of its file serves too, i.e. the other streams over the same blocks.
-/// A file the decoder cannot seek in (it is resampled, see
-/// `vv_media::decode_audio_streams_from`) is read from its start whatever the
-/// job: every job queued for it goes in that read, instead of one read from
-/// the start per job.
-fn take_batch(
-    queue: &mut Vec<DecodeJob>,
-    playhead: u64,
-    reads_from_start: &mut impl FnMut(&Path) -> bool,
-) -> Vec<DecodeJob> {
+fn take_batch(queue: &mut Vec<DecodeJob>, playhead: u64) -> Vec<DecodeJob> {
     let Some(next) = queue
         .iter()
         .enumerate()
@@ -800,10 +782,9 @@ fn take_batch(
         return Vec::new();
     };
     let job = queue.swap_remove(next);
-    let whole_file = reads_from_start(&job.path);
     let (mut batch, rest): (Vec<_>, Vec<_>) = std::mem::take(queue)
         .into_iter()
-        .partition(|other| other.path == job.path && (whole_file || other.blocks == job.blocks));
+        .partition(|other| other.path == job.path && other.blocks == job.blocks);
     *queue = rest;
     batch.insert(0, job);
     batch

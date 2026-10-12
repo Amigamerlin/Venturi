@@ -555,37 +555,22 @@ fn the_job_holding_the_playhead_goes_before_the_next_one_whose_start_is_closer()
         job(1, "a.wav", 0, 24..32, 24 * BLOCK_FRAMES),
     ];
     let playhead = 29 * BLOCK_FRAMES + BLOCK_FRAMES / 2;
-    let first = take_batch(&mut queue, playhead, &mut |_: &Path| false);
+    let first = take_batch(&mut queue, playhead);
     assert_eq!(first[0].id, 1);
 }
 
 #[test]
-fn a_file_read_from_its_start_takes_every_job_queued_for_it_in_one_read() {
+fn a_read_takes_the_other_streams_queued_over_the_same_blocks() {
     let mut queue = vec![
-        job(0, "seeks.wav", 0, 10..18, 0),
-        job(1, "resampled.wav", 0, 40..48, 10),
-        job(2, "resampled.wav", 1, 0..8, 50),
-        job(3, "seeks.wav", 1, 10..18, 60),
-        job(4, "resampled.wav", 0, 90..98, 70),
+        job(0, "a.wav", 0, 10..18, 0),
+        job(1, "b.wav", 0, 10..18, 10),
+        job(2, "a.wav", 1, 10..18, 50),
+        job(3, "a.wav", 0, 40..48, 60),
     ];
-    let mut reads_from_start = |path: &Path| path == Path::new("resampled.wav");
-
-    let ids = |batch: Vec<DecodeJob>| batch.iter().map(|job| job.id).collect::<Vec<_>>();
-    let first = take_batch(&mut queue, 0, &mut reads_from_start);
-    assert_eq!(
-        ids(first),
-        [0, 3],
-        "a seekable file: its other streams over the same blocks"
-    );
-    let second = take_batch(&mut queue, 0, &mut reads_from_start);
-    let mut second = ids(second);
-    second.sort_unstable();
-    assert_eq!(
-        second,
-        [1, 2, 4],
-        "a resampled file: everything queued for it"
-    );
-    assert!(queue.is_empty());
+    let mut ids: Vec<u64> = take_batch(&mut queue, 0).iter().map(|job| job.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [0, 2]);
+    assert_eq!(queue.len(), 2);
 }
 
 #[test]

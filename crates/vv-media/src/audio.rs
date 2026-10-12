@@ -45,6 +45,12 @@ const MAX_ORIGIN_PACKETS: usize = 2000;
 /// Frames decoded from the start of each stream before a seek.
 const ORIGIN_FRAMES: usize = 8;
 
+/// Timestamps further than this from the samples counted are a jump in the
+/// stream (a gap, an overlap): placed by timestamp, as the video is, so a
+/// decode from the start and one from a seek agree. Above the rounding of
+/// millisecond timestamps.
+const DISCONTINUITY_SECS: f64 = 0.005;
+
 /// Where a decode from the start puts a frame with timestamp `ts`.
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -70,12 +76,26 @@ struct StreamDecoder {
     channels: u16,
     /// Seconds per timestamp tick.
     time_base: f64,
-    /// Set after a seek: the frames are placed by timestamp from it.
+    /// Where the timestamps put the frames: set by a seek, or learnt from
+    /// `firsts` in a decode from the start.
     anchor: Option<Anchor>,
+    firsts: Vec<(Option<i64>, u64)>,
     /// After a seek, until a whole frame is placed by its timestamp.
     placing: bool,
+    /// Input frame of the next sample fed to the resampler.
+    fed: u64,
     /// Output frame of the next sample.
     next: u64,
+}
+
+/// Where a decoded frame goes.
+enum Place {
+    /// Right after the previous one.
+    Counted,
+    /// At this input frame, by its timestamp.
+    At(u64),
+    /// Nowhere: a frame after a seek without a timestamp.
+    Skip,
 }
 
 impl StreamDecoder {
@@ -107,29 +127,67 @@ impl StreamDecoder {
             out_rate,
             time_base,
             anchor: None,
+            firsts: Vec::new(),
             placing: false,
+            fed: 0,
             next: 0,
         })
     }
 
-    /// The output frame `decoded` starts at, counted like a decode from the
-    /// start: by counting, or from its timestamp after a seek. `None` for a
-    /// frame after a seek that has no timestamp.
-    fn position(&mut self, decoded: &ffmpeg::frame::Audio) -> Option<u64> {
-        if !self.placing {
-            return Some(self.next);
-        }
-        let anchor = self.anchor?;
-        let ts = decoded.timestamp().or(decoded.pts())?;
+    fn resamples(&self) -> bool {
+        self.in_rate != self.out_rate
+    }
+
+    fn fresh_resampler(&self) -> Result<Resampler, crate::MediaError> {
+        Ok(Resampler::get(
+            self.decoder.format(),
+            self.layout,
+            self.in_rate,
+            Sample::F32(SampleType::Packed),
+            self.layout,
+            self.out_rate,
+        )?)
+    }
+
+    /// Input frames from `anchor` to timestamp `ts`, snapped to whole
+    /// frames when the timestamps are coarser than a sample.
+    fn input_at(&self, anchor: Anchor, ts: i64) -> f64 {
         let in_rate = self.in_rate.max(1) as f64;
-        let mut offset = (ts - anchor.ts) as f64 * self.time_base * in_rate;
+        let offset = (ts - anchor.ts) as f64 * self.time_base * in_rate;
         let coarse = self.time_base * in_rate > 1.0 + 1e-9;
+        match anchor.frame_samples {
+            Some(frame) if coarse => (offset / frame as f64).round() * frame as f64,
+            _ => offset,
+        }
+    }
+
+    fn place(&mut self, decoded: &ffmpeg::frame::Audio) -> Place {
+        let ts = decoded.timestamp().or(decoded.pts());
         let samples = decoded.samples() as u64;
+        if !self.placing {
+            if self.anchor.is_none() {
+                self.firsts.push((ts, samples));
+                if self.firsts.len() == ORIGIN_FRAMES {
+                    self.anchor = anchor(&self.firsts);
+                }
+            }
+            let (Some(anchor), Some(ts)) = (self.anchor, ts) else {
+                return Place::Counted;
+            };
+            let input = anchor.position as f64 + self.input_at(anchor, ts);
+            let tolerance = DISCONTINUITY_SECS * self.in_rate as f64;
+            return if (input - self.fed as f64).abs() > tolerance {
+                Place::At(input.round().max(0.0) as u64)
+            } else {
+                Place::Counted
+            };
+        }
+        let (Some(anchor), Some(ts)) = (self.anchor, ts) else {
+            return Place::Skip;
+        };
+        let mut offset = self.input_at(anchor, ts);
         match anchor.frame_samples {
             Some(frame) => {
-                if coarse {
-                    offset = (offset / frame as f64).round() * frame as f64;
-                }
                 if anchor.trims_first && samples < frame {
                     offset += (frame - samples) as f64;
                 }
@@ -137,8 +195,7 @@ impl StreamDecoder {
             }
             None => self.placing = false,
         }
-        let input = (anchor.position as f64 + offset.round()).max(0.0);
-        Some((input * self.out_rate as f64 / in_rate).round() as u64)
+        Place::At((anchor.position as f64 + offset.round()).max(0.0) as u64)
     }
 
     /// Resamples and delivers all the frames ready in the decoder.
@@ -150,9 +207,30 @@ impl StreamDecoder {
     ) -> Result<ControlFlow<()>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Audio::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
-            let Some(at) = self.position(&decoded) else {
-                continue;
+            let mut input = match self.place(&decoded) {
+                Place::Skip => continue,
+                Place::Counted => self.fed,
+                Place::At(input) => input,
             };
+            if input != self.fed {
+                if self.resamples() {
+                    // A resampler is in phase with one fed from the start
+                    // only from an input frame that falls on an output frame.
+                    if self.flush(slot, samples, on_chunk)?.is_break() {
+                        return Ok(ControlFlow::Break(()));
+                    }
+                    self.resampler = self.fresh_resampler()?;
+                    let grid = u64::from(self.in_rate / gcd(self.in_rate, self.out_rate));
+                    let skip = (grid - input % grid) % grid;
+                    if skip >= decoded.samples() as u64 {
+                        continue;
+                    }
+                    decoded = drop_front(&decoded, skip as usize, self.layout);
+                    input += skip;
+                }
+                self.fed = input;
+                self.next = input * u64::from(self.out_rate) / u64::from(self.in_rate.max(1));
+            }
             // `Resampler::run` allocates the output as large as the input, which
             // is not enough when resampling upwards.
             let capacity =
@@ -160,6 +238,8 @@ impl StreamDecoder {
             let mut resampled =
                 ffmpeg::frame::Audio::new(Sample::F32(SampleType::Packed), capacity, self.layout);
             run_resampler(&mut self.resampler, &mut decoded, &mut resampled)?;
+            self.fed += decoded.samples() as u64;
+            let at = self.next;
             self.next = at + resampled.samples() as u64;
             if emit(slot, self.channels, at, &resampled, samples, on_chunk).is_break() {
                 return Ok(ControlFlow::Break(()));
@@ -231,8 +311,8 @@ pub fn decode_audio_streams_streaming(
 /// Like `decode_audio_streams_streaming`, from about frame `from` of
 /// `out_rate` on: it seeks there instead of reading the file from its start.
 /// `on_chunk(i, channels, at, samples)` with `at` the frame of the first
-/// sample, counted as a decode from the start counts it; chunks may start
-/// before `from`.
+/// sample where a decode from the start puts it; chunks may start before
+/// `from`, and after a jump in the stream's timestamps `at` jumps too.
 pub fn decode_audio_streams_from(
     path: &Path,
     stream_indices: &[usize],
@@ -277,13 +357,7 @@ fn decode_streams(
     if decoders.iter().all(Option::is_none) {
         return Ok(formats);
     }
-    // A fresh resampler would start between two output samples of a
-    // decode from the start: the blocks around a seek would not join.
-    let resamples = decoders
-        .iter()
-        .flatten()
-        .any(|(_, d)| d.in_rate != d.out_rate);
-    if let Some(secs) = seek_to.filter(|_| !resamples) {
+    if let Some(secs) = seek_to {
         seek(&mut ictx, &mut decoders, out_rate, secs)?;
     }
 
@@ -446,6 +520,34 @@ pub(crate) fn run_resampler(
     }
     resampler.run(decoded, resampled)?;
     Ok(())
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a.max(1) } else { gcd(b, a % b) }
+}
+
+/// `frame` without its first `skip` samples. `layout`: see
+/// `decoder_channel_layout`.
+fn drop_front(
+    frame: &ffmpeg::frame::Audio,
+    skip: usize,
+    layout: ChannelLayout,
+) -> ffmpeg::frame::Audio {
+    let samples = frame.samples() - skip;
+    let mut out = ffmpeg::frame::Audio::new(frame.format(), samples, layout);
+    out.set_rate(frame.rate());
+    let sample_bytes = frame.format().bytes();
+    let (planes, plane_samples) = if frame.is_planar() {
+        (frame.planes(), 1)
+    } else {
+        (1, frame.channels() as usize)
+    };
+    for plane in 0..planes {
+        let from = skip * plane_samples * sample_bytes;
+        let len = samples * plane_samples * sample_bytes;
+        out.data_mut(plane)[..len].copy_from_slice(&frame.data(plane)[from..from + len]);
+    }
+    out
 }
 
 fn append_f32(frame: &ffmpeg::frame::Audio, out: &mut Vec<f32>) {
