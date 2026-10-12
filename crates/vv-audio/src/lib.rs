@@ -15,7 +15,7 @@ pub mod stretch;
 
 pub use blocks::{BLOCK_FRAMES, SampleBlocks};
 pub use mixer::{
-    AnalysisSlot, AudioSource, BandMeter, ClipAudio, CompoundBlock, CompoundMix, LevelAnalysis,
-    LevelReading, MixSnapshot, Mixer, MixerState, StretchedWindow,
+    AnalysisSlot, AudioSource, BandMeter, ClipAudio, ClipInput, LevelAnalysis, LevelReading,
+    MixSnapshot, Mixer, MixerState, StretchedWindow,
 };
 pub use stretch::stretch_samples;

@@ -8,7 +8,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use vv_audio::mixer::{
-    Channel, MixClip, MixMeters, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE,
+    Channel, ClipInput, MixClip, MixMeters, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE,
     StretchedWindow, mix_range, sample_to_timeline_frame, timeline_frame_to_sample,
 };
 use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
@@ -157,7 +157,7 @@ impl TimelineAudio {
                 len: buffer.end(),
                 source_offset: 0,
                 step: 1.0,
-                buffer,
+                input: ClipInput::Blocks(buffer),
                 gain_db: Keyframed::constant(0.0),
                 track: 0,
                 clip_fps: fps,

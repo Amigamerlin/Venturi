@@ -538,15 +538,11 @@ fn settle(
 }
 
 #[test]
-fn a_compound_mixed_by_block_plays_as_mixed_whole_across_blocks() {
+fn a_compound_mixed_live_plays_as_over_whole_files() {
     let path = sine_wav("compound_blocks.wav", 6);
-    let (project, compound_media, parent) = compound_project(&path, 6);
+    let (project, _, parent) = compound_project(&path, 6);
     let mut cache = MixBufferCache::spawn(48_000, 1);
     let snapshot = settle(&mut cache, &project, &parent);
-    assert!(
-        cache.compounds[&compound_media].blocks.len() as u64 >= (6 * SEC).div_ceil(BLOCK_FRAMES),
-        "mixed by block"
-    );
 
     let whole_audio = vv_media::decode_audio_track(&path, 0).unwrap().unwrap();
     let whole = SampleBlocks::contiguous(Arc::new(whole_audio.samples), 0, 1);
@@ -557,18 +553,6 @@ fn a_compound_mixed_by_block_plays_as_mixed_whole_across_blocks() {
     vv_audio::mixer::mix_range(&snapshot, 0, &mut got);
     vv_audio::mixer::mix_range(&reference, 0, &mut want);
     assert_eq!(got, want);
-}
-
-#[test]
-fn a_mixed_compound_block_frees_the_audio_it_was_mixed_from() {
-    let path = sine_wav("compound_frees.wav", 4);
-    let (project, _, parent) = compound_project(&path, 4);
-    let mut cache = MixBufferCache::spawn(48_000, 1);
-    settle(&mut cache, &project, &parent);
-    assert!(
-        blocks_held(&cache, &path).is_empty(),
-        "only the compound's own blocks are kept"
-    );
 }
 
 fn job(id: u64, path: &str, stream: usize, blocks: Range<u64>, plays_at: u64) -> DecodeJob {

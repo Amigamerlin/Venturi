@@ -304,3 +304,38 @@ fn a_range_starting_inside_the_timeline_is_that_part_of_the_mix() {
         mixed_whole(&project, &tl, range)
     );
 }
+
+/// Each chunk is a new snapshot: the compound's own compressor carries on
+/// across them like the outer ones.
+#[test]
+fn a_compound_rendered_in_chunks_equals_one_mix() {
+    let mut project = Project::default();
+    let file = media(&mut project, chirp("nested.wav", 48_000, 20), 48_000, 1);
+    let mut nested_track = audio_track(vec![clip(1, file, 0, 400, 0)]);
+    nested_track.mix.effects = vec![effect(AudioEffectKind::MultibandCompressor(
+        MultibandCompressor::DEFAULT,
+    ))];
+    let nested = project.timelines.insert(timeline(vec![nested_track]));
+    let compound = project.media_pool.insert(MediaItem {
+        compound: Some(nested),
+        ..project.media_pool[file].clone()
+    });
+    let mut varispeed = Clip::new(
+        ClipId(2),
+        ClipSource::Media(compound),
+        0,
+        200,
+        150,
+        Rational::one(),
+        Rational::new(3, 2),
+    );
+    varispeed.pitch_correction = false;
+    let tl = timeline(vec![
+        audio_track(vec![clip(1, compound, 0, 300, 10)]),
+        audio_track(vec![varispeed]),
+    ]);
+    let range = samples(0..400);
+    let whole = mixed_whole(&project, &tl, range.clone());
+    assert_eq!(rendered(&project, &tl, range), whole);
+    assert!(whole.iter().any(|s| s.abs() > 0.1));
+}

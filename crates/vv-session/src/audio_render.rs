@@ -12,8 +12,8 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use vv_audio::SampleBlocks;
 use vv_audio::mixer::{
-    AudioSource, ClipAudio, MixSnapshot, MixState, PROJECT_SAMPLE_RATE, mix_range_from, normalizes,
-    remix_channels_into, stretch_range,
+    AudioSource, ClipAudio, LevelAnalysis, LevelReading, MixSnapshot, MixState,
+    PROJECT_SAMPLE_RATE, mix_range_from, normalizes, remix_channels_into, stretch_range,
 };
 use vv_core::{MediaId, Project, Timeline};
 
@@ -86,9 +86,13 @@ struct StreamingAudio {
     /// The windows of the current chunk; one asked again keeps its buffer,
     /// so what was built from it (a stretch) is found again.
     windows: HashMap<WindowKey, SampleBlocks>,
-    /// Compound clips mixed whole (until plan step 2), by media and content.
+    /// Mixdowns of the pitch-corrected compound clips (until plan step 4),
+    /// by media and content.
     compounds: HashMap<(MediaId, u64), Arc<Vec<f32>>>,
     stretched: HashMap<u64, SampleBlocks>,
+    /// By `LevelAnalysis::key`: a nested normalization is asked again by
+    /// every chunk its compound clip plays in.
+    levels: HashMap<u64, f32>,
 }
 
 impl StreamingAudio {
@@ -121,6 +125,7 @@ impl StreamingAudio {
             audio: self,
             compounds_used: HashSet::new(),
             stretched_used: HashSet::new(),
+            levels_used: HashSet::new(),
         };
         let snapshot = MixSnapshot::from_timeline_range(
             project,
@@ -130,9 +135,15 @@ impl StreamingAudio {
             &mut provider,
             range,
         );
-        let (compounds_used, stretched_used) = (provider.compounds_used, provider.stretched_used);
+        let Provider {
+            compounds_used,
+            stretched_used,
+            levels_used,
+            ..
+        } = provider;
         self.compounds.retain(|key, _| compounds_used.contains(key));
         self.stretched.retain(|key, _| stretched_used.contains(key));
+        self.levels.retain(|key, _| levels_used.contains(key));
         Ok(snapshot)
     }
 
@@ -234,6 +245,7 @@ struct Provider<'a> {
     audio: &'a mut StreamingAudio,
     compounds_used: HashSet<(MediaId, u64)>,
     stretched_used: HashSet<u64>,
+    levels_used: HashSet<u64>,
 }
 
 impl AudioSource for Provider<'_> {
@@ -285,6 +297,17 @@ impl AudioSource for Provider<'_> {
         let stretched = SampleBlocks::contiguous(Arc::new(samples), 0, channels);
         self.audio.stretched.insert(key, stretched.clone());
         ClipAudio::Ready(stretched)
+    }
+
+    fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
+        let key = analysis.key();
+        self.levels_used.insert(key);
+        let level = *self
+            .audio
+            .levels
+            .entry(key)
+            .or_insert_with(|| analysis.run());
+        LevelReading::Ready(level)
     }
 }
 

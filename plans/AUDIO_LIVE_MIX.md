@@ -2,7 +2,7 @@
 
 **Status:** chosen over [AUDIO_GRAPH.md](AUDIO_GRAPH.md) (2026-10-12),
 which keeps the diagnosis (its §1) and the current state (its §1.3, §2).
-Steps 0 and 1 implemented (§4), not yet committed.
+Steps 0–2 implemented (§4).
 
 **Goal:** remove the known limits of the preview audio and the memory of
 the export without a generic node graph: the existing `MixSnapshot` stays
@@ -303,6 +303,21 @@ the code it replaces and the runtime measurement of AUDIO_GRAPH §9.
    timeline; reference project preview memory below a5d3c48 (the
    compound blocks are gone); callback time measured with the chapter
    compounds playing.
+   *Done.* `ClipInput::Nested`; `MixState` holds one `NestedState` per
+   compound clip (its timeline's state and the last frames rendered, in a
+   buffer sized for one mixer block so the callback never allocates).
+   A pitch-corrected compound clip still stretches its whole mixdown
+   (`compound_mixdown`, `cached_compound`) until step 4. The offline
+   render caches levels by key, or a nested normalization was measured
+   again in every chunk its compound played in. Tests: a live compound
+   equals its mixdown (gain keyframes, fades, varispeed both ways); a mix
+   split into many calls equals one; a new snapshot carries the nested
+   compressor on; a chunked render of compounds equals one mix. Reference
+   project, audio of the whole master timeline, peak RSS: 1.54 → 0.89 GB
+   as it is, 0.55 → 0.33 GB with its master normalization off. The mix
+   alone, in 1024-frame calls as the callback makes them, takes 1.1–1.4 s
+   for the 29 minutes (~0.07% of real time). Not yet measured: the preview
+   in the running app (AUDIO_GRAPH §9).
 3. **Analyses on the offline render.** Level job on `render_offline`,
    segments, content keys, disk cache; `LevelAnalysis::key` and the
    `Readiness::Complete` gate on levels removed. Acceptance: levels equal
