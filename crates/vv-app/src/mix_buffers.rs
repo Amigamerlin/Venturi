@@ -141,6 +141,9 @@ struct StreamCache {
     asked: bool,
     /// Blocks read since the pass began, with when they play.
     wanted: HashMap<u64, u64>,
+    /// Read by the last timeline pass: a media preview keeps its blocks,
+    /// outside the budget, for when the timeline plays again.
+    timeline: bool,
 }
 
 impl StreamCache {
@@ -389,7 +392,7 @@ impl MixBufferCache {
     }
 
     /// Like `begin_pass`, for the preview of a media: the timeline's
-    /// mixdowns, stretches and levels are kept for when it plays again.
+    /// blocks, stretches and levels are kept for when it plays again.
     pub fn begin_media_pass(&mut self) {
         self.begin(true);
     }
@@ -407,6 +410,7 @@ impl MixBufferCache {
     /// ask for, cancels the decodes no longer wanted and plans the others.
     pub fn sweep_unused(&mut self) {
         self.in_pass = false;
+        let media_pass = self.media_pass;
         let job_keys = &mut self.job_keys;
         self.streams.retain(|_, stream| {
             let StreamCache {
@@ -414,9 +418,16 @@ impl MixBufferCache {
                 jobs,
                 asked,
                 wanted,
+                timeline,
                 ..
             } = stream;
-            blocks.retain(|index, _| wanted.contains_key(index));
+            if !media_pass {
+                *timeline = *asked;
+            }
+            let parked = media_pass && !*asked && *timeline;
+            if !parked {
+                blocks.retain(|index, _| wanted.contains_key(index));
+            }
             jobs.retain(|job| {
                 let keep = job.blocks.clone().any(|index| wanted.contains_key(&index));
                 if !keep {
@@ -425,7 +436,7 @@ impl MixBufferCache {
                 }
                 keep
             });
-            *asked
+            *asked || parked
         });
         self.rebalance();
         if self.media_pass {

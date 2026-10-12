@@ -684,3 +684,31 @@ fn dropping_the_cache_stops_the_stretches_and_measures_running() {
         started.elapsed()
     );
 }
+
+#[test]
+fn previewing_a_media_keeps_the_timeline_blocks_and_not_the_previous_media() {
+    let timeline = sine_wav("timeline_kept.wav", 10);
+    let first = sine_wav("first_media.wav", 10);
+    let second = sine_wav("second_media.wav", 10);
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    cache.begin_pass();
+    read(&mut cache, &timeline, 0..5 * SEC);
+    cache.sweep_unused();
+    wait_done(&mut cache);
+    let held = blocks_held(&cache, &timeline);
+    assert!(!held.is_empty());
+
+    for media in [&first, &second] {
+        cache.begin_media_pass();
+        cache.media_frames(media, 0, 0..5 * SEC);
+        cache.sweep_unused();
+        wait_done(&mut cache);
+    }
+    assert_eq!(blocks_held(&cache, &timeline), held);
+    assert!(blocks_held(&cache, &first).is_empty());
+
+    cache.begin_pass();
+    ready(&mut cache, &timeline, 0..5 * SEC);
+    cache.sweep_unused();
+    assert!(blocks_held(&cache, &second).is_empty());
+}
