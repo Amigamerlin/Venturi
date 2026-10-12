@@ -257,9 +257,14 @@ pipeline's alpha blending; the other 14 modes copy the stack composed so far
   with `Arc`s to the already converted buffers) on every change of
   `History::generation` or when a buffer arrives, and publishes it to the
   callback with a `try_lock`; old snapshots are freed on the UI thread.
-  Buffers are decoded in the background per `(path, audio_stream_index)`
-  (`mix_buffers.rs`) and published partially as they grow: the start of the
-  track plays right away, silence only past the part already decoded.
+  Audio is held in blocks of 64k frames (`vv_audio::SampleBlocks`), only
+  those the clips read (`mix_buffers.rs`): decoded in the background by
+  seeking (`vv_media::decode_audio_streams_from`, sample-exact against a
+  decode from the start), the job closest to the playhead first, within a
+  1 GB budget that keeps the blocks closest to it. Compound clips are mixed
+  by block with a 2 s preroll (whole when their timeline normalizes). A
+  missing block plays as silence. Redesign planned in
+  [plans/AUDIO_GRAPH.md](plans/AUDIO_GRAPH.md).
 - **Channel strips**: every audio track and the timeline master have a
   `ChannelStrip` (gain, pan, an insert chain before the fader): 6-band
   equalizer, 3-band multiband compressor, mono and normalization. The mix is

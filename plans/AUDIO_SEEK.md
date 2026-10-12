@@ -5,7 +5,10 @@ also behind MCP `get_audio_levels` on a timeline) keeps only the frames it
 reads, but still decodes every file from its start: a few seconds near the
 end of a one-hour file cost the decode of the whole hour.
 
-**Status:** proposed, not started.
+**Status:** the decode half is done (bfa36ba, `decode_audio_streams_from`),
+sample-exact rather than within a tolerance (§4), and used by the preview.
+Export still decodes from the start of each file: it moves to the seeking
+decode with [AUDIO_GRAPH.md](AUDIO_GRAPH.md) step 6.
 
 ---
 

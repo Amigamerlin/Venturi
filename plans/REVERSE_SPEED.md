@@ -82,6 +82,10 @@ a keyframe.
 
 ## 3. Audio (`vv-audio`)
 
+**Superseded** by [AUDIO_GRAPH.md](AUDIO_GRAPH.md): reverse becomes a
+`Reverse` node whose demand mirrors the output range (step 7 there). The
+notes below predate the block cache.
+
 - `ClipSpan` reads the source range as today, then the mix walks the buffer
   backwards (`step` negative, or reverse the decoded window once).
 - Pitch correction: reverse the window first, then `stretch_samples` (the
