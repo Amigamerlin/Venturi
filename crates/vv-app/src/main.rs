@@ -244,6 +244,9 @@ struct VenturiApp {
     /// `enter_compound_timeline`): empty when editing the
     /// project timeline. The breadcrumb above the timeline shows them.
     timeline_stack: Vec<TimelineId>,
+    /// Parallel to `timeline_stack`: the compound clip opened in that
+    /// timeline, and its playhead then, to go back to where one was.
+    entered_from: Vec<(Option<ClipId>, FrameIdx)>,
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
     keyframe_editor: keyframe_editor::KeyframeEditorState,
@@ -466,6 +469,7 @@ impl Default for VenturiApp {
             session: vv_session::Session::default(),
             timeline_id: None,
             timeline_stack: Vec::new(),
+            entered_from: Vec::new(),
             timeline_state: timeline_ui::TimelineState::default(),
             media_pool_state: media_pool::MediaPoolState::default(),
             keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
@@ -1338,6 +1342,7 @@ impl VenturiApp {
             return;
         }
         self.timeline_stack.clear();
+        self.entered_from.clear();
         self.switch_to_timeline(timeline_id);
     }
 
@@ -1360,12 +1365,17 @@ impl VenturiApp {
     }
 
     /// Opens `nested_id` as if it were the project timeline, with the playhead
-    /// on its frame `at`: from the double click on a compound clip
+    /// on its frame `at`: from the double click on compound clip `clip`
     /// (`timeline_ui::show_timeline`). The whole
     /// existing editing UI stays unchanged (it is already parameterized on
     /// `self.timeline_id`), here only the "which" has to be moved and
     /// where one came from stacked for the breadcrumb.
-    pub(crate) fn enter_compound_timeline(&mut self, nested_id: TimelineId, at: FrameIdx) {
+    pub(crate) fn enter_compound_timeline(
+        &mut self,
+        nested_id: TimelineId,
+        at: FrameIdx,
+        clip: Option<ClipId>,
+    ) {
         let Some(current) = self.timeline_id else {
             return;
         };
@@ -1376,6 +1386,7 @@ impl VenturiApp {
             return;
         }
         self.timeline_stack.push(current);
+        self.entered_from.push((clip, self.timeline_state.playhead));
         self.switch_to_timeline(nested_id);
         let end = self.session.project.timelines[nested_id].total_frames();
         self.timeline_state.playhead = at.clamp(0, (end - 1).max(0));
@@ -1383,13 +1394,36 @@ impl VenturiApp {
     }
 
     /// Goes back to the timeline at position `index` of `timeline_stack` (0 =
-    /// the root): a clicked breadcrumb segment.
+    /// the root): a clicked breadcrumb segment. The playhead lands where the
+    /// one inside the compound clips is, level by level.
     fn exit_to_timeline_stack_index(&mut self, index: usize) {
         let Some(target) = self.timeline_stack.get(index).copied() else {
             return;
         };
+        let mut frame = self.timeline_state.playhead;
+        for level in (index..self.timeline_stack.len()).rev() {
+            let (clip_id, entry_playhead) = self.entered_from[level];
+            let parent = &self.session.project.timelines[self.timeline_stack[level]];
+            let clip = clip_id.and_then(|id| {
+                parent
+                    .tracks
+                    .iter()
+                    .flat_map(|t| &t.clips)
+                    .find(|c| c.id == id)
+            });
+            frame = match clip {
+                // A freeze frame shows one frame of it for its whole length.
+                Some(clip) if clip.freeze.is_none() => clip
+                    .timeline_frame_at(frame)
+                    .clamp(clip.timeline_start, clip.timeline_end() - 1),
+                _ => entry_playhead,
+            };
+        }
         self.timeline_stack.truncate(index);
+        self.entered_from.truncate(index);
         self.switch_to_timeline(target);
+        self.timeline_state.playhead = frame;
+        self.timeline_state.reveal_playhead = true;
     }
 
     /// The part common to the two functions above: it clears the state
@@ -2600,7 +2634,11 @@ impl VenturiApp {
             .is_some_and(|id| !self.session.project.timelines.contains_key(id))
         {
             match self.timeline_stack.pop() {
-                Some(parent) => self.switch_to_timeline(parent),
+                Some(parent) => {
+                    let (_, entry_playhead) = self.entered_from.pop().unwrap_or_default();
+                    self.switch_to_timeline(parent);
+                    self.timeline_state.playhead = entry_playhead;
+                }
                 None => {
                     self.timeline_id = None;
                     self.timeline_state = timeline_ui::TimelineState::default();
@@ -3983,8 +4021,8 @@ impl VenturiApp {
                         is_playing,
                     );
                     media_drop = drop;
-                    if let Some((nested_id, at)) = enter_compound {
-                        self.enter_compound_timeline(nested_id, at);
+                    if let Some((nested_id, clip, at)) = enter_compound {
+                        self.enter_compound_timeline(nested_id, at, Some(clip));
                     }
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();

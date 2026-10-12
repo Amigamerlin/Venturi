@@ -19,7 +19,7 @@ struct Harness {
     /// Held down during every following frame.
     modifiers: egui::Modifiers,
     /// The last compound clip `show_timeline` asked to open.
-    entered: Option<(TimelineId, FrameIdx)>,
+    entered: Option<(TimelineId, ClipId, FrameIdx)>,
 }
 
 impl Harness {
@@ -695,11 +695,11 @@ fn a_compound_clip_opens_at_the_frame_under_the_playhead() {
     h.state.playhead = 40;
     h.click(center);
     h.click(center);
-    assert_eq!(h.entered, Some((nested, 240)));
+    assert_eq!(h.entered, Some((nested, ClipId(1), 240)));
 
     h.time += 1.0;
     h.state.playhead = 150;
     h.click(center);
     h.click(center);
-    assert_eq!(h.entered, Some((nested, 299)));
+    assert_eq!(h.entered, Some((nested, ClipId(1), 299)));
 }

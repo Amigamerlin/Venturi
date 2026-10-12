@@ -1869,7 +1869,7 @@ pub fn show_timeline(
     // always stay visible, so the view "turns the page" to
     // follow it when it leaves the visible area (see below).
     playback_active: bool,
-) -> (Option<MediaDrop>, Option<(TimelineId, FrameIdx)>) {
+) -> (Option<MediaDrop>, Option<(TimelineId, ClipId, FrameIdx)>) {
     let mut media_drop = None;
     // Double click on a compound clip: the caller (main.rs) opens it
     // as a timeline of its own (see `VenturiApp::enter_compound_timeline`),
@@ -3439,7 +3439,8 @@ pub fn show_timeline(
                             let outer = state
                                 .playhead
                                 .clamp(clip.timeline_start, clip.timeline_end() - 1);
-                            enter_compound = Some((nested_id, clip.picture_frame_at(outer)));
+                            enter_compound =
+                                Some((nested_id, clip.id, clip.picture_frame_at(outer)));
                         }
                     } else if resp.clicked() {
                         let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {
