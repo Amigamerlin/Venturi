@@ -292,7 +292,7 @@ fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
             path: path.clone(),
             stream,
             blocks: blocks.clone(),
-            plays_at: 0,
+            plays: 0..blocks.end * BLOCK_FRAMES,
             cancelled: Arc::default(),
         })
         .collect();
@@ -537,14 +537,26 @@ fn a_master_normalization_is_measured_over_budget() {
 }
 
 fn job(id: u64, path: &str, stream: usize, blocks: Range<u64>, plays_at: u64) -> DecodeJob {
+    let plays = plays_at..plays_at + (blocks.end - blocks.start) * BLOCK_FRAMES;
     DecodeJob {
         id,
         path: PathBuf::from(path),
         stream,
         blocks,
-        plays_at,
+        plays,
         cancelled: Arc::default(),
     }
+}
+
+#[test]
+fn the_job_holding_the_playhead_goes_before_the_next_one_whose_start_is_closer() {
+    let mut queue = vec![
+        job(0, "a.wav", 0, 32..40, 32 * BLOCK_FRAMES),
+        job(1, "a.wav", 0, 24..32, 24 * BLOCK_FRAMES),
+    ];
+    let playhead = 29 * BLOCK_FRAMES + BLOCK_FRAMES / 2;
+    let first = take_batch(&mut queue, playhead, &mut |_: &Path| false);
+    assert_eq!(first[0].id, 1);
 }
 
 #[test]

@@ -157,9 +157,19 @@ struct DecodeJob {
     path: PathBuf,
     stream: usize,
     blocks: Range<u64>,
-    /// When its first block plays, for the order of the jobs.
-    plays_at: u64,
+    /// When its blocks play, for the order of the jobs.
+    plays: Range<u64>,
     cancelled: Arc<AtomicBool>,
+}
+
+/// 0 while `plays` holds the playhead: a job ranked by its first block
+/// would lose to the next one, whose start is closer.
+fn distance(plays: &Range<u64>, playhead: u64) -> u64 {
+    if playhead < plays.start {
+        plays.start - playhead
+    } else {
+        playhead.saturating_sub(plays.end - 1)
+    }
 }
 
 enum Decoded {
@@ -453,10 +463,10 @@ impl MixBufferCache {
             ..(last_block + MARGIN_BLOCKS).min(blocks_end).max(last_block);
         for index in wanted {
             let plays = (plays_at + index * BLOCK_FRAMES).saturating_sub(needed.start);
-            let closest = entry
-                .wanted
-                .get(&index)
-                .is_none_or(|&other| plays.abs_diff(playhead) < other.abs_diff(playhead));
+            let closest = entry.wanted.get(&index).is_none_or(|&other| {
+                distance(&(plays..plays + BLOCK_FRAMES), playhead)
+                    < distance(&(other..other + BLOCK_FRAMES), playhead)
+            });
             if closest {
                 entry.wanted.insert(index, plays);
             }
@@ -504,7 +514,13 @@ impl MixBufferCache {
                     .map(move |(&index, &plays)| (plays, key, index))
             })
             .collect();
-        wanted.sort_unstable_by_key(|&(plays, key, index)| (plays.abs_diff(playhead), key, index));
+        wanted.sort_unstable_by_key(|&(plays, key, index)| {
+            (
+                distance(&(plays..plays + BLOCK_FRAMES), playhead),
+                key,
+                index,
+            )
+        });
         let block_bytes = BLOCK_FRAMES as usize * self.channels.max(1) as usize * 4;
         let fit = (self.budget_bytes / block_bytes).min(wanted.len());
         self.over_budget = fit < wanted.len();
@@ -514,7 +530,7 @@ impl MixBufferCache {
         }
 
         let mut dropped = false;
-        let mut plans: Vec<(Key, Range<u64>, u64)> = Vec::new();
+        let mut plans: Vec<(Key, Range<u64>, Range<u64>)> = Vec::new();
         for (key, stream) in &mut self.streams {
             let keep = kept.remove(key).unwrap_or_default();
             let keep_set: HashSet<u64> = keep.iter().map(|&(index, _)| index).collect();
@@ -542,18 +558,20 @@ impl MixBufferCache {
             missing.sort_unstable();
             for (index, plays) in missing {
                 match plans.last_mut() {
-                    Some((k, run, _))
+                    Some((k, run, run_plays))
                         if k == key && run.end == index && run.end - run.start < JOB_BLOCKS =>
                     {
                         run.end += 1;
+                        run_plays.start = run_plays.start.min(plays);
+                        run_plays.end = run_plays.end.max(plays + BLOCK_FRAMES);
                     }
-                    _ => plans.push((key.clone(), index..index + 1, plays)),
+                    _ => plans.push((key.clone(), index..index + 1, plays..plays + BLOCK_FRAMES)),
                 }
             }
         }
         // The worker may start on the first before the others arrive.
-        plans.sort_by_key(|&(_, _, plays_at)| plays_at.abs_diff(playhead));
-        for (key, blocks, plays_at) in plans {
+        plans.sort_by_key(|(_, _, plays)| distance(plays, playhead));
+        for (key, blocks, plays) in plans {
             let id = self.next_id;
             self.next_id += 1;
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -562,7 +580,7 @@ impl MixBufferCache {
                 path: key.0.clone(),
                 stream: key.1,
                 blocks: blocks.clone(),
-                plays_at,
+                plays,
                 cancelled: cancelled.clone(),
             });
             self.job_keys.insert(id, key.clone());
@@ -776,7 +794,7 @@ fn take_batch(
     let Some(next) = queue
         .iter()
         .enumerate()
-        .min_by_key(|(_, job)| (job.plays_at.abs_diff(playhead), job.id))
+        .min_by_key(|(_, job)| (distance(&job.plays, playhead), job.id))
         .map(|(i, _)| i)
     else {
         return Vec::new();
