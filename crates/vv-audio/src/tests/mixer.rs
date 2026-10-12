@@ -760,7 +760,7 @@ impl AudioSource for FakeStretch {
 /// Stretched from a render of its timeline, not from a mixdown of it.
 #[test]
 fn a_pitch_corrected_compound_clip_stretches_its_nested_timeline() {
-    let (project, compound) = project_with_compound();
+    let (project, compound) = project_with_long_compound();
     let mut clip = sped_up_clip(compound, Rational::new(2, 1), 2);
     clip.pitch_correction = true;
     let tl = timeline(vec![audio_track(vec![clip])]);
@@ -774,6 +774,18 @@ fn a_pitch_corrected_compound_clip_stretches_its_nested_timeline() {
     let mut out = vec![0.0; 20];
     mix_range(&snap, 0, &mut out);
     assert_eq!(out[0], 0.9);
+}
+
+/// Its audio ends at 600: past it the stretch would be silence.
+#[test]
+fn a_pitch_corrected_compound_clip_stretches_no_further_than_its_audio() {
+    let (project, compound) = project_with_long_compound();
+    let mut clip = sped_up_clip(compound, Rational::new(2, 1), 40);
+    clip.pitch_correction = true;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    let mut source = FakeStretch::default();
+    MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(source.asked, [(100..600, 2.0)]);
 }
 
 #[test]
@@ -1386,6 +1398,19 @@ fn a_compound_mixed_live_plays_as_its_mixdown() {
         assert_eq!(live, mixdown);
         assert!(live.iter().any(|&s| s != 0.0));
     }
+}
+
+/// As a file clip past its file's end: the fade-out is on the audio, not
+/// on the silence after it.
+#[test]
+fn a_compound_longer_than_its_audio_fades_out_where_its_audio_ends() {
+    let (project, compound) = project_with_compound();
+    let mut clip = clip_at(compound, 0, 0, 10);
+    clip.fade_out = 2;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    // Checked on the clip: at `RATE` a gain block outlasts the fade.
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    assert_eq!((snap.clips[0].len, snap.clips[0].fade_out), (50, 20));
 }
 
 /// The nested compressor runs in order across calls, and a varispeed read

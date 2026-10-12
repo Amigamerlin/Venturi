@@ -910,8 +910,17 @@ fn collect_clips(
                     readiness = Readiness::Cyclic;
                     continue;
                 }
-                let frames = span.source_offset
+                let mut frames = span.source_offset
                     ..span.source_offset + (span.len as f64 * span.step).ceil() as u64;
+                if let Some(timeline) = nested {
+                    frames.end =
+                        frames
+                            .end
+                            .min(audio_end(project, timeline, sample_rate, depth + 1));
+                    if frames.is_empty() {
+                        continue;
+                    }
+                }
                 let (input, content) = match nested {
                     Some(timeline) => (
                         StretchInput::Nested {
@@ -992,7 +1001,13 @@ fn collect_clips(
                 ClipInput::Blocks(buffer) if !pitch_corrected => {
                     (buffer.end() < needed.end).then_some(buffer.end())
                 }
-                ClipInput::Blocks(_) | ClipInput::Nested(_) => None,
+                ClipInput::Nested(_) => item
+                    .compound
+                    .and_then(|id| project.timelines.get(id))
+                    .and_then(|nested| {
+                        compound_readable_to(project, nested, &span, sample_rate, depth)
+                    }),
+                ClipInput::Blocks(_) => None,
             };
             let Some(mut mix_clip) = mix_clip_from(clip, &span, clip_fps, input, readable_to)
             else {
@@ -1316,16 +1331,7 @@ fn mix_clip_from(
         return None;
     }
     let step = span.step;
-    let len = match readable_to {
-        None => span.len,
-        Some(file_end) => {
-            let source_offset = span.source_offset.min(file_end);
-            // The last frame read is interpolated with the one after it.
-            let readable = ((file_end - source_offset) as f64 / step).floor() as u64;
-            span.len
-                .min(readable.saturating_sub(u64::from(step != 1.0)))
-        }
-    };
+    let len = readable_to.map_or(span.len, |end| readable_len(span, end));
     if len == 0 {
         return None;
     }
@@ -1344,6 +1350,56 @@ fn mix_clip_from(
         fade_in: span.fade_in.min(len),
         fade_out: span.fade_out.min(len),
     })
+}
+
+fn readable_len(span: &ClipSpan, media_end: u64) -> u64 {
+    let source_offset = span.source_offset.min(media_end);
+    // The last frame read is interpolated with the one after it.
+    let readable = ((media_end - source_offset) as f64 / span.step).floor() as u64;
+    span.len
+        .min(readable.saturating_sub(u64::from(span.step != 1.0)))
+}
+
+/// Where `timeline`'s audio ends: a compound clip reads no further, so its
+/// fade-out ends with its audio as a file clip's ends with its file.
+fn audio_end(project: &Project, timeline: &Timeline, sample_rate: u32, depth: u32) -> u64 {
+    if depth >= vv_core::MAX_COMPOUND_DEPTH {
+        return 0;
+    }
+    let fps = timeline.fps.as_f64().max(1e-9);
+    timeline
+        .audible_tracks()
+        .flat_map(|(_, track)| track.clips.iter())
+        .filter(|c| !c.disabled && c.freeze.is_none())
+        .filter_map(|clip| {
+            let ClipSource::Media(media_id) = &clip.source else {
+                return None;
+            };
+            let item = project.media_pool.get(*media_id)?;
+            let span = ClipSpan::new(clip, fps, sample_rate);
+            let len = item
+                .compound
+                .and_then(|id| project.timelines.get(id))
+                .and_then(|nested| compound_readable_to(project, nested, &span, sample_rate, depth))
+                .map_or(span.len, |end| readable_len(&span, end));
+            (len > 0).then_some(span.start + len)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// `readable_to` of a clip of `nested`, a compound at `depth`.
+fn compound_readable_to(
+    project: &Project,
+    nested: &Timeline,
+    span: &ClipSpan,
+    sample_rate: u32,
+    depth: u32,
+) -> Option<u64> {
+    let end = audio_end(project, nested, sample_rate, depth + 1);
+    span.media_frames(None)
+        .is_some_and(|whole| end < whole.end)
+        .then_some(end)
 }
 
 fn seconds_to_frames(secs: f64, sample_rate: u32) -> u64 {
