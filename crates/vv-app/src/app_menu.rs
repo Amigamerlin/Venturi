@@ -473,6 +473,7 @@ impl VenturiApp {
                                     .clicked()
                                 {
                                     self.settings.preview_resolution = resolution;
+                                    self.apply_preview_resolution();
                                     self.persist_settings();
                                     ui.close();
                                 }

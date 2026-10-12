@@ -79,6 +79,34 @@ fn make_test_clip(name: &str, duration_secs: u32) -> std::path::PathBuf {
     path
 }
 
+#[test]
+fn fitted_size_shrinks_only_what_does_not_fit_and_keeps_it_even() {
+    assert_eq!(fitted_size((1920, 1080), None), (1920, 1080));
+    assert_eq!(fitted_size((1920, 1080), Some((1920, 1080))), (1920, 1080));
+    assert_eq!(fitted_size((1920, 1080), Some((480, 270))), (480, 270));
+    assert_eq!(fitted_size((1920, 1080), Some((960, 2000))), (960, 540));
+    assert_eq!(fitted_size((1280, 720), Some((480, 270))), (480, 270));
+    assert_eq!(fitted_size((322, 182), Some((161, 91))), (162, 92));
+}
+
+#[test]
+fn a_max_size_scales_the_frames_down_with_the_same_picture() {
+    let path = make_test_clip("max-size.mp4", 1);
+    let full = decode_first_frame(&path).unwrap();
+    let mut decoder = Decoder::open(&path).unwrap();
+    decoder.set_max_size(Some((160, 120)));
+    let (_, small) = decoder.next_frame().unwrap().unwrap();
+
+    assert_eq!((small.width, small.height), (160, 120));
+    assert_eq!((small.chroma_width, small.chroma_height), (80, 60));
+    assert_eq!(small.y.len(), 160 * 120);
+    let mean = |y: &[u8]| y.iter().map(|&v| v as u64).sum::<u64>() / y.len() as u64;
+    assert!(
+        mean(&full.y).abs_diff(mean(&small.y)) <= 2,
+        "same picture, only smaller"
+    );
+}
+
 /// Phone screen capture: frames only when the picture changes, so the
 /// pts leave long holes. 30 fps declared, 6 frames in 3.1 s.
 fn make_vfr_test_clip(name: &str) -> std::path::PathBuf {

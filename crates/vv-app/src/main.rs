@@ -708,7 +708,15 @@ impl VenturiApp {
             lookahead_secs,
             behind_secs,
         );
+        render_ahead.set_preview_divisor(self.settings.preview_resolution.divisor());
         (render_ahead, preview_media)
+    }
+
+    pub(crate) fn apply_preview_resolution(&self) {
+        let divisor = self.settings.preview_resolution.divisor();
+        for render_ahead in self.render_aheads() {
+            render_ahead.set_preview_divisor(divisor);
+        }
     }
 
     /// The timeline buffer and the preview one, if they exist.
@@ -1346,6 +1354,7 @@ impl VenturiApp {
                 self.settings.lookahead_secs,
                 self.settings.behind_secs,
             ));
+            self.apply_preview_resolution();
             self.render_ahead_generation = self.session.history.generation();
         }
     }

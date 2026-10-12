@@ -100,6 +100,7 @@ fn walk_and_fill_decodes_a_stretched_image_clip_past_its_only_real_frame() {
         generous_budget,
         false,
         None,
+        1,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(0),
@@ -1141,7 +1142,8 @@ fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened
     );
@@ -1156,7 +1158,8 @@ fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Seeked,
         "a real seek on an already open media must reuse the decoder, not reopen it"
@@ -1188,7 +1191,8 @@ fn position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek()
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened
     );
@@ -1208,7 +1212,8 @@ fn position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek()
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened,
         "the path changed: it must reopen on the new one, not reuse the old decoder"
@@ -1243,7 +1248,8 @@ fn position_decoder_reseeks_when_next_frame_claims_coverage_the_cache_no_longer_
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened
     );
@@ -1300,7 +1306,8 @@ fn position_decoder_reseeks_when_next_frame_claims_coverage_the_cache_no_longer_
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Seeked,
         "a hole left by an eviction behind next_frame must force a real seek, \
@@ -1332,7 +1339,8 @@ fn position_decoder_does_not_reseek_when_already_usefully_ahead_of_the_segment_s
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened
     );
@@ -1369,7 +1377,8 @@ fn position_decoder_does_not_reseek_when_already_usefully_ahead_of_the_segment_s
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Reused
     );
@@ -1431,7 +1440,8 @@ fn walk_and_fill_reports_caught_up_when_the_whole_window_fits_the_budget() {
         0,
         generous_budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(0),
@@ -1501,7 +1511,8 @@ fn walk_and_fill_decodes_the_behind_window_on_a_fresh_area() {
         60,
         generous_budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(60),
@@ -1592,7 +1603,8 @@ fn walk_and_fill_decodes_the_behind_window_nearest_frames_first_under_a_tight_bu
         95,
         tight_budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(95),
@@ -1679,6 +1691,7 @@ fn walk_and_fill_does_not_reseek_an_already_complete_behind_window_when_idle() {
         generous_budget,
         false,
         None,
+        1,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(95),
@@ -1710,6 +1723,7 @@ fn walk_and_fill_does_not_reseek_an_already_complete_behind_window_when_idle() {
             generous_budget,
             false,
             None,
+            1,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
             &LiveTarget::still(95),
@@ -1778,8 +1792,9 @@ fn walk_and_fill_buffers_only_a_minimal_margin_when_configured_to_zero_seconds()
         generous_budget,
         false,
         None, // proxy: irrelevant for this test
-        0.0,  // lookahead_secs: the one under test
-        0.0,  // behind_secs: the one under test
+        1,
+        0.0, // lookahead_secs: the one under test
+        0.0, // behind_secs: the one under test
         &LiveTarget::still(60),
     );
 
@@ -1865,7 +1880,8 @@ fn walk_and_fill_prioritizes_frames_near_the_playhead_when_the_budget_is_too_sma
         0,
         tiny_budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(0),
@@ -1941,7 +1957,8 @@ fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_d
         0,
         100_000_000,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &drifted_target,
@@ -2032,7 +2049,8 @@ fn walk_and_fill_does_not_invalidate_one_segment_while_processing_another_segmen
         40,
         budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(40),
@@ -2124,7 +2142,8 @@ fn walk_and_fill_does_not_let_one_segment_of_a_media_evict_another_via_capacity_
         40,
         budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(40),
@@ -2183,7 +2202,8 @@ fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened
     );
@@ -2197,7 +2217,8 @@ fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Reused,
         "in the same cycle the second segment must never need a seek: the decoder is already there"
@@ -2217,7 +2238,8 @@ fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Reused,
         "playhead still: reprocessing the first segment must not trigger a real seek"
@@ -2232,7 +2254,8 @@ fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Reused
     );
@@ -2328,7 +2351,8 @@ fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_bud
         0,
         total_budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(0),
@@ -2348,7 +2372,8 @@ fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_bud
         200,
         total_budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(200),
@@ -2704,7 +2729,8 @@ fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum()
             from,
             budget,
             went_backward,
-            None,                   // proxy: irrelevant for this test
+            None, // proxy: irrelevant for this test
+            1,
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &LiveTarget::still(from),
@@ -2731,7 +2757,8 @@ fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum()
         80,
         budget,
         true,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(80),
@@ -2821,7 +2848,8 @@ fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backw
         300,
         budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(300),
@@ -2844,7 +2872,8 @@ fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backw
         270,
         budget,
         true,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(270),
@@ -2937,6 +2966,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
         budget,
         false,
         None,
+        1,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(300),
@@ -2951,6 +2981,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
         budget,
         true,
         None,
+        1,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(290),
@@ -2973,6 +3004,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
             budget,
             false,
             None,
+            1,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
             &LiveTarget::still(290),
@@ -3051,6 +3083,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         cache_budget_bytes: usize::MAX,
         from_frame: 5,
         proxy: None,
+        preview_divisor: 1,
         target: &LiveTarget::still(5),
         jumps: 0,
         window: &[],
@@ -3125,6 +3158,7 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         cache_budget_bytes: tight_budget,
         from_frame: 80,
         proxy: None,
+        preview_divisor: 1,
         target: &LiveTarget::still(80),
         jumps: 0,
         window: &[],
@@ -3222,6 +3256,7 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
         cache_budget_bytes: budget_enough_for_the_wanted_range_but_not_the_full_transit,
         from_frame: 24,
         proxy: None,
+        preview_divisor: 1,
         target: &LiveTarget::still(24),
         jumps: 0,
         window: &[],
@@ -3312,7 +3347,8 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
         10,
         budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(10),
@@ -3328,7 +3364,8 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
         target,
         budget,
         false,
-        None,                   // proxy: irrelevant for this test
+        None, // proxy: irrelevant for this test
+        1,
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
         &LiveTarget::still(target),
@@ -3344,7 +3381,8 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
             target,
             budget,
             false,
-            None,                   // proxy: irrelevant for this test
+            None, // proxy: irrelevant for this test
+            1,
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &LiveTarget::still(target),
@@ -3404,6 +3442,7 @@ fn fill_segments_caches_only_the_transit_some_window_wants() {
         cache_budget_bytes: usize::MAX,
         from_frame: 80,
         proxy: None,
+        preview_divisor: 1,
         target: &LiveTarget::still(80),
         jumps: 0,
         window: &window,
@@ -3458,6 +3497,7 @@ fn fill_segments_is_interrupted_by_a_jump_below_the_seek_threshold() {
         cache_budget_bytes: usize::MAX,
         from_frame: 10,
         proxy: None,
+        preview_divisor: 1,
         target: &target,
         jumps: 0,
         window: std::slice::from_ref(&segment),
@@ -3566,6 +3606,23 @@ fn a_replaced_project_never_shows_the_previous_projects_frames() {
     );
 }
 
+#[test]
+fn a_preview_divisor_caches_smaller_frames_and_a_change_drops_the_old_ones() {
+    let path = make_test_clip("vv-app-render-ahead-divisor-test", "divisor.mp4", 1);
+    let (project, media, timeline_id) = single_media_project(path);
+    let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, None, 1.0, 0.0);
+    render_ahead.set_preview_divisor(2);
+    render_ahead.set_target(0);
+    wait_caught_up(&render_ahead);
+    let frame = render_ahead.get_frame(media, 0).expect("frame 0");
+    assert_eq!((frame.width, frame.height), (160, 120));
+
+    render_ahead.set_preview_divisor(1);
+    wait_caught_up(&render_ahead);
+    let frame = render_ahead.get_frame(media, 0).expect("frame 0");
+    assert_eq!((frame.width, frame.height), (320, 240));
+}
+
 /// The UI sets the window on every frame and repaints until caught up: an
 /// unchanged window must not undo it, or an idle editor redraws forever.
 #[test]
@@ -3599,7 +3656,8 @@ fn opened_media(
             false,
             false,
             false,
-            HwPriority::Normal
+            HwPriority::Normal,
+            None,
         ),
         Positioned::Opened
     );

@@ -107,6 +107,8 @@ pub struct Decoder {
     /// Built from the first frame that needs one: the format the decoder
     /// declares before decoding is not always the one of its frames.
     scaler: Option<Scaler>,
+    /// See `set_max_size`.
+    max_size: Option<(u32, u32)>,
     video_stream_index: usize,
     time_base: ffmpeg::Rational,
     fps: vv_core::Rational,
@@ -193,6 +195,7 @@ impl Decoder {
             ictx,
             decoder,
             scaler: None,
+            max_size: None,
             video_stream_index,
             time_base,
             fps,
@@ -539,6 +542,13 @@ impl Decoder {
         (self.frame_idx(decoded.pts().unwrap_or(0)), decoded)
     }
 
+    /// Frames larger than `max` come out scaled down to fit it, with their
+    /// aspect: a reduced preview uploads and caches less. Not for an image,
+    /// decoded at `open_image`.
+    pub fn set_max_size(&mut self, max: Option<(u32, u32)>) {
+        self.max_size = max;
+    }
+
     fn convert(
         &mut self,
         decoded: &mut ffmpeg::frame::Video,
@@ -560,7 +570,8 @@ impl Decoder {
             && (decoded.color_range() == color::Range::JPEG
                 || without_deprecated_range(format) != format);
         decoded.set_format(without_deprecated_range(format));
-        let frame = yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range)?;
+        let frame =
+            yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range, self.max_size)?;
         Ok(Arc::new(frame))
     }
 }
@@ -614,17 +625,33 @@ fn without_deprecated_range(format: Pixel) -> Pixel {
     }
 }
 
-/// The scaler converting `frame` to its target format, rebuilt when the
-/// frames change format or size.
+/// `(width, height)` scaled down to fit `max` with its aspect, even for
+/// 4:2:0; unchanged if it already fits.
+pub(crate) fn fitted_size((width, height): (u32, u32), max: Option<(u32, u32)>) -> (u32, u32) {
+    let Some((max_w, max_h)) = max else {
+        return (width, height);
+    };
+    if width <= max_w && height <= max_h {
+        return (width, height);
+    }
+    let factor = (max_w as f64 / width as f64).min(max_h as f64 / height as f64);
+    let even = |v: u32| ((v as f64 * factor / 2.0).round() as u32 * 2).max(2);
+    (even(width), even(height))
+}
+
+/// The scaler converting `frame` to its target format and `size`, rebuilt
+/// when either side changes.
 fn scaler_for<'a>(
     scaler: &'a mut Option<Scaler>,
     frame: &ffmpeg::frame::Video,
+    size: (u32, u32),
 ) -> Result<&'a mut Scaler, crate::MediaError> {
     let fits = scaler.as_ref().is_some_and(|s| {
-        let input = s.input();
+        let (input, output) = (s.input(), s.output());
         input.format == frame.format()
             && input.width == frame.width()
             && input.height == frame.height()
+            && (output.width, output.height) == size
     });
     if !fits {
         *scaler = Some(Scaler::get(
@@ -632,8 +659,8 @@ fn scaler_for<'a>(
             frame.width(),
             frame.height(),
             target_format(frame.format()),
-            frame.width(),
-            frame.height(),
+            size.0,
+            size.1,
             Flags::BILINEAR,
         )?);
     }
@@ -645,15 +672,20 @@ fn yuv420_from_decoded(
     decoded: &ffmpeg::frame::Video,
     matrix: ColorMatrix,
     full_range: bool,
+    max_size: Option<(u32, u32)>,
 ) -> Result<FrameYuv420, crate::MediaError> {
-    // Already in the target format (most camera and screen recordings): sws
-    // would only copy the planes once more, on the thread feeding the decoder.
+    let size = fitted_size((decoded.width(), decoded.height()), max_size);
+    // Already in the target format and size (most camera and screen
+    // recordings): sws would only copy the planes once more, on the thread
+    // feeding the decoder.
     let converted;
-    let scaled = if decoded.format() == target_format(decoded.format()) {
+    let scaled = if decoded.format() == target_format(decoded.format())
+        && size == (decoded.width(), decoded.height())
+    {
         decoded
     } else {
         let mut frame = ffmpeg::frame::Video::empty();
-        scaler_for(scaler, decoded)?.run(decoded, &mut frame)?;
+        scaler_for(scaler, decoded, size)?.run(decoded, &mut frame)?;
         converted = frame;
         &converted
     };

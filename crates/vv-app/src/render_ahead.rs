@@ -84,6 +84,8 @@ enum Command {
     /// Goes through the commands and not through an atomic: the worker must react to the change
     /// by emptying caches and decoders (the frames have the wrong resolution).
     SetProxy(Option<ProxyQuality>),
+    /// Like `SetProxy`: the cached frames have the wrong size.
+    SetPreviewDivisor(u32),
     /// The HW decode setting changed: the decoders reopen with it, the
     /// frames already cached stay (same pixels).
     ReopenDecoders,
@@ -240,6 +242,13 @@ impl RenderAhead {
         let _ = self.tx.send(Command::SetProxy(proxy));
     }
 
+    /// Decodes the frames at most at their media's size divided by
+    /// `divisor` (Playback > Preview resolution).
+    pub fn set_preview_divisor(&self, divisor: u32) {
+        self.shared.caught_up.store(false, Ordering::Relaxed);
+        let _ = self.tx.send(Command::SetPreviewDivisor(divisor));
+    }
+
     /// The decoded frame for `(media_id, source_frame)`, if already
     /// cached.
     pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameYuv420>> {
@@ -361,6 +370,7 @@ fn worker_loop(
     // Previous cycle interrupted by a playhead jump: it restarts
     // immediately instead of waiting for `POLL_INTERVAL`.
     let mut retry_immediately = false;
+    let mut preview_divisor = 1;
     loop {
         let first = if retry_immediately {
             match rx.try_recv() {
@@ -393,6 +403,14 @@ fn worker_loop(
                     open.clear();
                     open_behind.clear();
                 }
+                Command::SetPreviewDivisor(divisor) => {
+                    if divisor != preview_divisor {
+                        preview_divisor = divisor;
+                        shared.caches.clear();
+                        open.clear();
+                        open_behind.clear();
+                    }
+                }
                 Command::ReopenDecoders => {
                     open.clear();
                     open_behind.clear();
@@ -414,6 +432,7 @@ fn worker_loop(
             shared.cache_budget_bytes.load(Ordering::Relaxed),
             went_backward,
             proxy,
+            preview_divisor,
             load_secs(&shared.lookahead_secs),
             load_secs(&shared.behind_secs),
             &shared.target,
@@ -741,6 +760,7 @@ fn position_decoder(
     is_all_intra: bool,
     is_image: bool,
     hw_priority: vv_media::HwPriority,
+    max_size: Option<(u32, u32)>,
 ) -> Positioned {
     if open.get(&media_id).is_some_and(|o| o.resolved_path != path) {
         open.remove(&media_id);
@@ -781,6 +801,7 @@ fn position_decoder(
     let Ok(mut decoder) = opened else {
         return Positioned::Failed;
     };
+    decoder.set_max_size(max_size);
     let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
     let _ = decoder.seek_to_time(secs);
     if let Some(t) = debug_start {
@@ -846,6 +867,7 @@ fn walk_and_fill(
     cache_budget_bytes: usize,
     went_backward: bool,
     proxy: Option<ProxyQuality>,
+    preview_divisor: u32,
     lookahead_secs: f64,
     behind_secs: f64,
     target: &LiveTarget,
@@ -908,6 +930,7 @@ fn walk_and_fill(
         cache_budget_bytes,
         from_frame,
         proxy,
+        preview_divisor,
         target,
         jumps,
         window: &forward_segments,
@@ -973,6 +996,8 @@ struct FillContext<'a> {
     /// from the last `Command::SetProxy` — see `fill_segments`
     /// where it decides whether to resolve the source path or the proxy one.
     proxy: Option<ProxyQuality>,
+    /// See `RenderAhead::set_preview_divisor`.
+    preview_divisor: u32,
     target: &'a LiveTarget,
     /// `target.jumps()` when the cycle started.
     jumps: u64,
@@ -1009,7 +1034,14 @@ fn fill_segments(
         // Without room for even one frame it does not start: it would pay the
         // transit for a frame then rejected, cycle after cycle. The transit never
         // counts against the budget of the wanted stretch.
-        let estimated_frame_bytes = vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
+        let max_size = (ctx.preview_divisor > 1).then(|| {
+            (
+                (item.meta.width / ctx.preview_divisor).max(1),
+                (item.meta.height / ctx.preview_divisor).max(1),
+            )
+        });
+        let (frame_w, frame_h) = max_size.unwrap_or((item.meta.width, item.meta.height));
+        let estimated_frame_bytes = vv_media::yuv420_frame_bytes(frame_w, frame_h);
         if ctx.caches.bytes_used() + estimated_frame_bytes > ctx.cache_budget_bytes {
             if debug_enabled() {
                 eprintln!(
@@ -1041,6 +1073,7 @@ fn fill_segments(
             is_proxy,
             item.meta.is_image(),
             ctx.hw_priority,
+            max_size,
         ) {
             Positioned::Failed => continue,
             // Going on in sequence towards a segment ahead (a jump shorter
