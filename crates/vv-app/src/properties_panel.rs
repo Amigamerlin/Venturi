@@ -1720,8 +1720,6 @@ impl VenturiApp {
                                         PropertiesTab::Selection => {}
                                         PropertiesTab::Video => {
                                             use vv_core::TransformParam as P;
-                                            let (frame_w, frame_h) =
-                                                (timeline_size.0 as f32, timeline_size.1 as f32);
                                             let (source_w, source_h) =
                                                 (source_size.0 as f32, source_size.1 as f32);
 
@@ -1823,7 +1821,7 @@ impl VenturiApp {
                                                         &mut transform.position[0],
                                                         1.0,
                                                         1,
-                                                        -frame_w..=frame_w,
+                                                        f32::NEG_INFINITY..=f32::INFINITY,
                                                     );
                                                     let y = axis_field(
                                                         ui,
@@ -1831,7 +1829,7 @@ impl VenturiApp {
                                                         &mut transform.position[1],
                                                         1.0,
                                                         1,
-                                                        -frame_h..=frame_h,
+                                                        f32::NEG_INFINITY..=f32::INFINITY,
                                                     );
                                                     x || y
                                                 },
@@ -1867,7 +1865,7 @@ impl VenturiApp {
                                                         &mut transform.anchor[0],
                                                         1.0,
                                                         1,
-                                                        -frame_w..=frame_w,
+                                                        f32::NEG_INFINITY..=f32::INFINITY,
                                                     );
                                                     let y = axis_field(
                                                         ui,
@@ -1875,7 +1873,7 @@ impl VenturiApp {
                                                         &mut transform.anchor[1],
                                                         1.0,
                                                         1,
-                                                        -frame_h..=frame_h,
+                                                        f32::NEG_INFINITY..=f32::INFINITY,
                                                     );
                                                     x || y
                                                 },
