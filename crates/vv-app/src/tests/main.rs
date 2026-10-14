@@ -5191,3 +5191,86 @@ fn the_buffer_keeps_one_frame_per_speed_step_only_while_playing_fast() {
     assert_eq!(frame_stride(true, false, 2.0), 1, "paused: every frame");
     assert_eq!(frame_stride(false, true, 2.0), 1, "setting off");
 }
+
+/// A timeline at 60 fps with one video track holding `clips`.
+fn timeline_60_with(app: &mut VenturiApp, clips: Vec<vv_core::Clip>) -> TimelineId {
+    let mut track = Track::new(TrackKind::Video);
+    track.clips = clips;
+    app.session.project.timelines.insert(vv_core::Timeline {
+        name: "T".into(),
+        fps: vv_core::Rational::new(60, 1),
+        resolution: (1920, 1080),
+        tracks: vec![track],
+        markers: Vec::new(),
+        master: Default::default(),
+    })
+}
+
+fn media_clip_at(id: u64, media: MediaId, start: FrameIdx, len: FrameIdx) -> vv_core::Clip {
+    vv_core::Clip::from_source_range(
+        ClipId(id),
+        vv_core::ClipSource::Media(media),
+        0,
+        len,
+        start,
+        vv_core::Rational::one(),
+    )
+}
+
+/// The cache holds the media inside a compound clip, not a frame of the
+/// compound clip's own size: an ultrawide source nested in a 1080p compound
+/// weighs what it weighs.
+#[test]
+fn window_frame_bytes_counts_the_media_inside_a_compound_clip() {
+    let mut app = VenturiApp::default();
+    let wide = hd_media(&mut app, 1, (4516, 1080));
+    let nested = timeline_60_with(&mut app, vec![media_clip_at(1, wide, 0, 1000)]);
+    let compound = insert_compound_media(&mut app, nested);
+    let root = timeline_60_with(&mut app, vec![media_clip_at(2, compound, 100, 1000)]);
+
+    assert_eq!(
+        app.window_frame_bytes(root, 0, 500),
+        vv_media::yuv420_frame_bytes(4516, 1080)
+    );
+}
+
+/// Only the nested clips the window reaches through the compound clip count,
+/// and a media both nested and direct counts once.
+#[test]
+fn window_frame_bytes_maps_the_window_into_the_compound_clip() {
+    let mut app = VenturiApp::default();
+    let early = hd_media(&mut app, 1, (1920, 1080));
+    let late = hd_media(&mut app, 2, (3840, 2160));
+    let nested = timeline_60_with(
+        &mut app,
+        vec![media_clip_at(1, early, 0, 200), media_clip_at(2, late, 200, 200)],
+    );
+    let compound = insert_compound_media(&mut app, nested);
+    let root = timeline_60_with(&mut app, vec![media_clip_at(3, compound, 1000, 400)]);
+    let mut direct = Track::new(TrackKind::Video);
+    direct.clips.push(media_clip_at(4, early, 0, 2000));
+    app.session.project.timelines[root].tracks.push(direct);
+
+    assert_eq!(
+        app.window_frame_bytes(root, 1000, 1100),
+        vv_media::yuv420_frame_bytes(1920, 1080),
+        "nested frames 0..100: `late` not reached, `early` once"
+    );
+    assert_eq!(
+        app.window_frame_bytes(root, 1150, 1300),
+        vv_media::yuv420_frame_bytes(1920, 1080) + vv_media::yuv420_frame_bytes(3840, 2160)
+    );
+}
+
+#[test]
+fn window_frame_bytes_follows_the_preview_resolution() {
+    let mut app = VenturiApp::default();
+    let media = hd_media(&mut app, 1, (1920, 1080));
+    let root = timeline_60_with(&mut app, vec![media_clip_at(1, media, 0, 1000)]);
+    app.settings.preview_resolution = crate::settings::PreviewResolution::Half;
+
+    assert_eq!(
+        app.window_frame_bytes(root, 0, 100),
+        vv_media::yuv420_frame_bytes(960, 540)
+    );
+}

@@ -1571,11 +1571,28 @@ impl VenturiApp {
     }
 
     /// Bytes one frame of each distinct media playing in `[from, to)` takes in
-    /// the cache. Source resolution, not the timeline one: the cache holds
-    /// decoded frames, before any scaling.
+    /// the cache: the media inside compound clips, at the size the preview
+    /// resolution decodes them to.
     fn window_frame_bytes(&self, timeline_id: TimelineId, from: FrameIdx, to: FrameIdx) -> usize {
-        let timeline = &self.session.project.timelines[timeline_id];
         let mut seen = std::collections::HashSet::new();
+        self.frame_bytes_within(timeline_id, from, to, &mut seen, 0)
+    }
+
+    fn frame_bytes_within(
+        &self,
+        timeline_id: TimelineId,
+        from: FrameIdx,
+        to: FrameIdx,
+        seen: &mut std::collections::HashSet<MediaId>,
+        depth: u32,
+    ) -> usize {
+        let Some(timeline) = self.session.project.timelines.get(timeline_id) else {
+            return 0;
+        };
+        if depth >= vv_core::MAX_COMPOUND_DEPTH {
+            return 0;
+        }
+        let divisor = self.settings.preview_resolution.divisor().max(1);
         let mut bytes = 0;
         for (_, clip) in timeline.visible_video_clips() {
             let vv_core::ClipSource::Media(media_id) = clip.source else {
@@ -1584,11 +1601,19 @@ impl VenturiApp {
             if clip.timeline_end() <= from || clip.timeline_start >= to {
                 continue;
             }
-            if !seen.insert(media_id) {
+            let Some(item) = self.session.project.media_pool.get(media_id) else {
                 continue;
-            }
-            if let Some(item) = self.session.project.media_pool.get(media_id) {
-                bytes += vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
+            };
+            if let Some(nested_id) = item.compound {
+                let a = clip.picture_frame_at(clip.timeline_start.max(from));
+                let b = clip.picture_frame_at(clip.timeline_end().min(to) - 1);
+                let (start, end) = (a.min(b), a.max(b) + 1);
+                bytes += self.frame_bytes_within(nested_id, start, end, seen, depth + 1);
+            } else if seen.insert(media_id) {
+                bytes += vv_media::yuv420_frame_bytes(
+                    (item.meta.width / divisor).max(1),
+                    (item.meta.height / divisor).max(1),
+                );
             }
         }
         bytes
