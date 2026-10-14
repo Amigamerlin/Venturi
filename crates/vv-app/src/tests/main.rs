@@ -5182,3 +5182,12 @@ fn inside_a_compound_clip_the_view_keeps_the_root_and_the_playhead_outside() {
     assert_eq!(view.playheads.get(&root_id), Some(&130));
     assert!(!view.playheads.contains_key(&nested_id));
 }
+
+#[test]
+fn the_buffer_keeps_one_frame_per_speed_step_only_while_playing_fast() {
+    assert_eq!(frame_stride(true, true, 2.0), 2);
+    assert_eq!(frame_stride(true, true, 4.0), 4);
+    assert_eq!(frame_stride(true, true, 1.0), 1);
+    assert_eq!(frame_stride(true, false, 2.0), 1, "paused: every frame");
+    assert_eq!(frame_stride(false, true, 2.0), 1, "setting off");
+}

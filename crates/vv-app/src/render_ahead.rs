@@ -106,6 +106,8 @@ struct LiveTarget {
     /// Bumped every time the user moves the playhead (not playback): the
     /// cycle in progress serves a position no longer wanted.
     jumps: AtomicU64,
+    /// See `RenderAhead::set_frame_stride`.
+    frame_stride: AtomicI64,
 }
 
 impl LiveTarget {
@@ -113,7 +115,12 @@ impl LiveTarget {
         Self {
             frame: AtomicI64::new(frame),
             jumps: AtomicU64::new(0),
+            frame_stride: AtomicI64::new(1),
         }
+    }
+
+    fn frame_stride(&self) -> FrameIdx {
+        self.frame_stride.load(Ordering::Relaxed).max(1)
     }
 
     fn frame(&self) -> FrameIdx {
@@ -194,6 +201,16 @@ impl RenderAhead {
         self.shared.target.frame.store(frame, Ordering::Relaxed);
         self.shared.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::Wake);
+    }
+
+    /// Buffers one timeline frame every `stride` (the playback speed: fast
+    /// playback shows no others), 1 for all of them.
+    pub fn set_frame_stride(&self, stride: FrameIdx) {
+        let stride = stride.max(1);
+        if self.shared.target.frame_stride.swap(stride, Ordering::Relaxed) != stride {
+            self.shared.caught_up.store(false, Ordering::Relaxed);
+            let _ = self.tx.send(Command::Wake);
+        }
     }
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
@@ -290,7 +307,12 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
         else {
             return Ok(None);
         };
-        Ok(self.get_frame(media_id, source_frame))
+        Ok(self.shared.caches.get_near(
+            media_id,
+            source_frame,
+            clip.source_in(),
+            clip.source_out() - 1,
+        ))
     }
 }
 
@@ -758,7 +780,9 @@ fn without_already_cached_chunks(
 ) -> Vec<WantedRange> {
     chunks
         .into_iter()
-        .filter(|chunk| !caches.covers(chunk.media_id, chunk.source_start, chunk.source_end))
+        .filter(|chunk| {
+            !caches.covers_segment(chunk.media_id, chunk.source_start, chunk.source_end)
+        })
         .collect()
 }
 
@@ -854,6 +878,21 @@ fn first_wanted_frame(
         .fold(segment.source_start, FrameIdx::min)
 }
 
+/// Source frames of a media spanned by `timeline_stride` frames of the
+/// timeline, given the clip's `rate` (timeline frames per source frame); never
+/// below 1, so a slowed down clip keeps every frame. 1 without a stride, even
+/// on a sped up clip: its multiples need not be the frames it shows, and paused
+/// a neighbour would stand in for the exact frame.
+fn source_stride(timeline_stride: FrameIdx, rate: vv_core::Rational) -> FrameIdx {
+    if timeline_stride <= 1 {
+        return 1;
+    }
+    if rate.num <= 0 || rate.den <= 0 {
+        return timeline_stride;
+    }
+    (timeline_stride * rate.den as FrameIdx / rate.num as FrameIdx).max(1)
+}
+
 /// Outcome of one `walk_and_fill` cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalkOutcome {
@@ -926,6 +965,17 @@ fn walk_and_fill(
         .chain(&behind_segments)
         .copied()
         .collect();
+    let mut strides: HashMap<MediaId, FrameIdx> = HashMap::new();
+    for range in &window {
+        let stride = source_stride(target.frame_stride(), range.rate);
+        strides
+            .entry(range.media_id)
+            .and_modify(|s| *s = (*s).min(stride))
+            .or_insert(stride);
+    }
+    for (media_id, stride) in strides {
+        caches.set_stride(media_id, stride);
+    }
     // Discards what is outside both windows and, past the budget, the
     // farthest from the playhead.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
@@ -1046,7 +1096,7 @@ fn fill_segments(
         // trusted.
         if ctx
             .caches
-            .covers(segment.media_id, segment.source_start, segment.source_end)
+            .covers_segment(segment.media_id, segment.source_start, segment.source_end)
         {
             continue;
         }
@@ -1195,6 +1245,11 @@ fn fill_segments(
                         ctx.caches.insert(segment.media_id, idx, frame);
                         od.next_frame = idx + 1;
                         resumed = true;
+                        let stride = ctx.caches.stride(segment.media_id);
+                        if stride > 1 && idx >= segment.source_start {
+                            od.decoder
+                                .skip_before((idx.div_euclid(stride) + 1) * stride);
+                        }
                     }
                     Ok(None) => {
                         if debug_enabled() {

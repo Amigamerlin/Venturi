@@ -1519,6 +1519,7 @@ impl VenturiApp {
         // At speeds >1x the playhead advances faster in real time: more margin
         // ahead is needed, and it must still fit the budget (see the docs of
         // `effective_window_secs`).
+        render_ahead.set_frame_stride(self.playback_frame_stride());
         let (ahead_secs, behind_secs) = self.effective_window_secs(timeline_id);
         render_ahead.set_lookahead_secs(ahead_secs);
         render_ahead.set_behind_secs(behind_secs);
@@ -1547,8 +1548,9 @@ impl VenturiApp {
         let frame_bytes = self.window_frame_bytes(timeline_id, from, to).max(1);
         // Headroom: the transit frames decoded before a segment sit in the
         // cache until the next reconcile.
+        let cached_per_sec = fps / self.playback_frame_stride() as f64;
         let affordable =
-            self.settings.cache_budget_bytes as f64 * 0.85 / (frame_bytes as f64 * fps);
+            self.settings.cache_budget_bytes as f64 * 0.85 / (frame_bytes as f64 * cached_per_sec);
         let wanted_total = wanted_ahead + self.settings.behind_secs;
         if wanted_total <= affordable {
             return (wanted_ahead, self.settings.behind_secs);
@@ -1557,6 +1559,14 @@ impl VenturiApp {
         (
             (wanted_ahead * scale).max(MIN_LOOKAHEAD_SECS),
             self.settings.behind_secs * scale,
+        )
+    }
+
+    fn playback_frame_stride(&self) -> FrameIdx {
+        frame_stride(
+            self.settings.fast_playback_shown_frames_only,
+            self.is_timeline_playing(),
+            self.playback_speed,
         )
     }
 
@@ -3708,6 +3718,16 @@ fn fix_iso_key(raw_input: &mut egui::RawInput, iso_key_down: &mut bool) {
                 }
             }
         }
+    }
+}
+
+/// One timeline frame every how many the buffer keeps: the speed while
+/// playing fast, if the setting asks for it.
+fn frame_stride(shown_frames_only: bool, playing: bool, speed: f64) -> FrameIdx {
+    if shown_frames_only && playing {
+        speed.round().max(1.0) as FrameIdx
+    } else {
+        1
     }
 }
 

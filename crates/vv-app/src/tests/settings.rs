@@ -230,3 +230,19 @@ fn an_audio_budget_out_of_range_in_the_file_is_clamped() {
     }
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn fast_playback_shown_frames_only_is_on_by_default_and_saved() {
+    let path = std::env::temp_dir()
+        .join(format!("vv-settings-stride-{}", std::process::id()))
+        .join("settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{}").unwrap();
+    assert!(Settings::load(&path).fast_playback_shown_frames_only);
+
+    let mut settings = Settings::default();
+    settings.fast_playback_shown_frames_only = false;
+    settings.save(&path).unwrap();
+    assert!(!Settings::load(&path).fast_playback_shown_frames_only);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

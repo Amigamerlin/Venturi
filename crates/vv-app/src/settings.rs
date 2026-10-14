@@ -543,6 +543,8 @@ pub struct Settings {
     /// Seconds buffered ahead of/behind the playhead.
     pub lookahead_secs: f64,
     pub behind_secs: f64,
+    /// At speeds above 1x, buffer only the frames playback shows.
+    pub fast_playback_shown_frames_only: bool,
     /// Memory budget for the decoded frame cache of every `RenderAhead`.
     pub cache_budget_bytes: usize,
     /// Memory budget for the timeline audio (`MixBufferCache`).
@@ -622,6 +624,7 @@ impl Default for Settings {
             preview_resolution: PreviewResolution::default(),
             lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: crate::render_ahead::DEFAULT_BEHIND_SECS,
+            fast_playback_shown_frames_only: true,
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
             audio_budget_bytes: crate::mix_buffers::DEFAULT_AUDIO_BUDGET_BYTES,
             hw_decode: Default::default(),
@@ -679,6 +682,8 @@ struct SettingsFile {
     lookahead_secs: Option<f64>,
     #[serde(default)]
     behind_secs: Option<f64>,
+    #[serde(default)]
+    fast_playback_shown_frames_only: Option<bool>,
     #[serde(default)]
     cache_budget_mb: Option<u32>,
     #[serde(default)]
@@ -778,6 +783,9 @@ impl Settings {
             .unwrap_or_default();
         settings.lookahead_secs = file.lookahead_secs.unwrap_or(settings.lookahead_secs);
         settings.behind_secs = file.behind_secs.unwrap_or(settings.behind_secs);
+        settings.fast_playback_shown_frames_only = file
+            .fast_playback_shown_frames_only
+            .unwrap_or(settings.fast_playback_shown_frames_only);
         settings.cache_budget_bytes = file
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
@@ -876,6 +884,7 @@ impl Settings {
             preview_resolution: Some(self.preview_resolution.id().to_owned()),
             lookahead_secs: Some(self.lookahead_secs),
             behind_secs: Some(self.behind_secs),
+            fast_playback_shown_frames_only: Some(self.fast_playback_shown_frames_only),
             cache_budget_mb: Some((self.cache_budget_bytes / 1_000_000) as u32),
             audio_budget_mb: Some((self.audio_budget_bytes / 1_000_000) as u32),
             hw_decode: Some(self.hw_decode.id().to_owned()),

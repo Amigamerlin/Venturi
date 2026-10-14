@@ -577,6 +577,13 @@ fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             }
             ui.end_row();
         });
+    changed |= ui
+        .checkbox(
+            &mut settings.fast_playback_shown_frames_only,
+            t!("settings.fast_playback_shown_frames_only"),
+        )
+        .on_hover_text(t!("settings.fast_playback_shown_frames_only_hint"))
+        .changed();
 
     ui.add_space(12.0);
     changed |= hw_decode_settings(ui, settings);

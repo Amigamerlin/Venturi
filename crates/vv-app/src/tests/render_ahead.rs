@@ -3917,3 +3917,198 @@ fn bench_backward_scrub_with_proxy() {
         );
     }
 }
+
+#[test]
+fn source_stride_follows_the_clip_rate_and_is_one_without_a_stride() {
+    assert_eq!(source_stride(2, Rational::one()), 2);
+    assert_eq!(source_stride(4, Rational::one()), 4);
+    assert_eq!(source_stride(2, Rational::new(2, 1)), 1, "25 fps media on 50 fps");
+    assert_eq!(source_stride(4, Rational::new(2, 1)), 2);
+    assert_eq!(source_stride(2, Rational::new(1, 2)), 4, "a clip at 200%");
+    assert_eq!(source_stride(1, Rational::new(1, 2)), 1);
+    assert_eq!(source_stride(3, Rational::new(4, 5)), 3);
+}
+
+/// 75 frames at 25 fps, cut at frame 0 of the timeline.
+fn project_with_one_clip(
+    file_name: &str,
+    clip: impl FnOnce(MediaId) -> Clip,
+) -> (Project, TimelineId, MediaId) {
+    let path = make_test_clip("vv-app-render-ahead-test", file_name, 3);
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path,
+        meta: MediaMeta {
+            duration_frames: 75,
+            fps: Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 0,
+        compound: None,
+        folder: None,
+    });
+    let clip = clip(media);
+    let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+        kind: TrackKind::Video,
+        clips: vec![clip],
+        ..Track::new(TrackKind::Video)
+    }]));
+    (project, timeline_id, media)
+}
+
+fn fill_once(
+    project: &Project,
+    timeline_id: TimelineId,
+    caches: &SharedFrameCache,
+    from: FrameIdx,
+    target: &LiveTarget,
+) -> WalkOutcome {
+    let mut open = HashMap::new();
+    let mut open_behind = HashMap::new();
+    walk_and_fill(
+        project,
+        timeline_id,
+        caches,
+        &mut open,
+        &mut open_behind,
+        from,
+        320 * 240 * 4 * 200,
+        false,
+        None,
+        1,
+        DEFAULT_LOOKAHEAD_SECS,
+        0.0,
+        target,
+    )
+}
+
+fn strided_target(frame: FrameIdx, stride: FrameIdx) -> LiveTarget {
+    let target = LiveTarget::still(frame);
+    target.frame_stride.store(stride, Ordering::Relaxed);
+    target
+}
+
+#[test]
+fn walk_and_fill_with_a_stride_caches_only_its_multiples() {
+    let (project, timeline_id, media) =
+        project_with_one_clip("stride_multiples.mp4", |m| media_clip(1, m, 0, 60));
+    let caches = SharedFrameCache::new();
+
+    let outcome = fill_once(&project, timeline_id, &caches, 0, &strided_target(0, 2));
+
+    assert!(outcome.caught_up);
+    assert_eq!(caches.stride(media), 2);
+    assert!((0..60).step_by(2).all(|i| caches.contains(media, i)));
+    let odd: Vec<FrameIdx> = (1..60).step_by(2).filter(|&i| caches.contains(media, i)).collect();
+    assert!(odd.is_empty(), "skipped, not decoded into the cache: {odd:?}");
+}
+
+/// Paused again after fast playback: every frame is wanted, the gaps are
+/// filled and no neighbour stands in for the exact frame any more.
+#[test]
+fn walk_and_fill_fills_the_gaps_when_the_stride_goes_back_to_one() {
+    let (project, timeline_id, media) =
+        project_with_one_clip("stride_back.mp4", |m| media_clip(1, m, 0, 60));
+    let caches = SharedFrameCache::new();
+    fill_once(&project, timeline_id, &caches, 0, &strided_target(0, 2));
+
+    let outcome = fill_once(&project, timeline_id, &caches, 31, &LiveTarget::still(31));
+
+    assert!(outcome.caught_up);
+    assert_eq!(caches.stride(media), 1);
+    assert!((31..60).all(|i| caches.contains(media, i)));
+    assert!(caches.get_near(media, 33, 0, 59).is_some());
+}
+
+/// A freeze frame is one source frame, here not a multiple: it must still be
+/// decoded, or the layer would vanish during fast playback.
+#[test]
+fn walk_and_fill_with_a_stride_still_decodes_a_freeze_frame() {
+    let (project, timeline_id, media) = project_with_one_clip("stride_freeze.mp4", |m| {
+        let mut clip = media_clip(1, m, 0, 40);
+        clip.freeze = Some(13);
+        clip
+    });
+    let caches = SharedFrameCache::new();
+
+    let outcome = fill_once(&project, timeline_id, &caches, 0, &strided_target(0, 4));
+
+    assert!(outcome.caught_up);
+    assert!(caches.contains(media, 13));
+}
+
+/// A clip at 25 fps on a 50 fps timeline shows each source frame twice: at
+/// 2x every source frame is still shown, none may be skipped.
+#[test]
+fn walk_and_fill_keeps_every_frame_of_a_conformed_clip_at_2x() {
+    let (mut project, timeline_id, media) = project_with_one_clip("stride_conformed.mp4", |m| {
+        Clip::from_source_range(ClipId(1), ClipSource::Media(m), 0, 40, 0, Rational::new(2, 1))
+    });
+    project.timelines[timeline_id].fps = Rational::new(50, 1);
+    let caches = SharedFrameCache::new();
+
+    fill_once(&project, timeline_id, &caches, 0, &strided_target(0, 2));
+
+    assert_eq!(caches.stride(media), 1);
+    assert!((0..40).all(|i| caches.contains(media, i)));
+}
+
+/// Two clips of one media, one sped up: the media takes the smaller stride,
+/// or the other clip would miss frames it shows.
+#[test]
+fn walk_and_fill_gives_a_media_the_smallest_stride_of_its_clips() {
+    let (mut project, timeline_id, media) =
+        project_with_one_clip("stride_two_rates.mp4", |m| media_clip_trimmed(1, m, 0, 0, 20));
+    let fast = Clip::from_source_range(
+        ClipId(2),
+        ClipSource::Media(media),
+        30,
+        70,
+        20,
+        Rational::new(1, 2),
+    );
+    project.timelines[timeline_id].tracks[0].insert_sorted(fast);
+    let caches = SharedFrameCache::new();
+
+    fill_once(&project, timeline_id, &caches, 0, &strided_target(0, 2));
+
+    assert_eq!(caches.stride(media), 2, "not the 4 of the clip at 200%");
+}
+
+/// With a stride the decoder skips the frames between two multiples: a
+/// segment starting on one of them (39, stride 4) is no hole behind a decoder
+/// already at 40. Taking it for one sought back a GOP every cycle.
+#[test]
+fn position_decoder_sees_no_hole_in_the_frames_a_stride_skips() {
+    let path = make_test_clip("vv-app-render-ahead-test", "stride_hole.mp4", 3);
+    let (media, _) = two_media_ids();
+    let caches = SharedFrameCache::new();
+    caches.set_stride(media, 4);
+    caches.insert(media, 36, Arc::new(dummy_frame()));
+    let mut open = HashMap::new();
+    let mut od = OpenDecoder::fresh(Decoder::open(&path).unwrap(), path.clone(), false);
+    od.next_frame = 40;
+    open.insert(media, od);
+
+    let positioned = position_decoder(
+        &caches,
+        &mut open,
+        media,
+        &path,
+        39,
+        false,
+        false,
+        false,
+        HwPriority::Normal,
+        None,
+    );
+
+    assert_eq!(positioned, Positioned::Reused);
+}

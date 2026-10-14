@@ -55,6 +55,8 @@ impl WantedRange {
 struct SharedInner {
     entries: HashMap<(MediaId, FrameIdx), Arc<FrameYuv420>>,
     bytes_used: usize,
+    /// See `set_stride`; absent means 1.
+    strides: HashMap<MediaId, FrameIdx>,
 }
 
 /// Cache of the frames of every media in the window, keyed by
@@ -76,6 +78,7 @@ impl SharedFrameCache {
             inner: Mutex::new(SharedInner {
                 entries: HashMap::new(),
                 bytes_used: 0,
+                strides: HashMap::new(),
             }),
         }
     }
@@ -87,6 +90,42 @@ impl SharedFrameCache {
             .entries
             .get(&(media_id, idx))
             .cloned()
+    }
+
+    /// `idx`, or else the nearest cached frame within the stride of the media
+    /// and within `lo..=hi` (the clip's source frames, widened to `idx`: a
+    /// transition shows frames past the trim), earlier first: with a stride
+    /// the frames in between are not decoded at all.
+    pub fn get_near(
+        &self,
+        media_id: MediaId,
+        idx: FrameIdx,
+        lo: FrameIdx,
+        hi: FrameIdx,
+    ) -> Option<Arc<FrameYuv420>> {
+        let inner = self.inner.lock().unwrap();
+        let stride = inner.stride(media_id);
+        let clip = lo.min(idx)..=hi.max(idx);
+        (0..stride)
+            .flat_map(|d| [idx - d, idx + d])
+            .filter(|i| clip.contains(i))
+            .find_map(|i| inner.entries.get(&(media_id, i)).cloned())
+    }
+
+    /// Only the frames at multiples of `stride` are wanted for `media_id`
+    /// (fast playback shows no others): `covers` and `cached_ranges` count the
+    /// ones in between as there.
+    pub fn set_stride(&self, media_id: MediaId, stride: FrameIdx) {
+        let mut inner = self.inner.lock().unwrap();
+        if stride > 1 {
+            inner.strides.insert(media_id, stride);
+        } else {
+            inner.strides.remove(&media_id);
+        }
+    }
+
+    pub fn stride(&self, media_id: MediaId) -> FrameIdx {
+        self.inner.lock().unwrap().stride(media_id)
     }
 
     pub fn contains(&self, media_id: MediaId, idx: FrameIdx) -> bool {
@@ -126,6 +165,7 @@ impl SharedFrameCache {
     pub fn remove_media(&self, media_id: MediaId) {
         let mut inner = self.inner.lock().unwrap();
         let inner = &mut *inner;
+        inner.strides.remove(&media_id);
         let bytes_used = &mut inner.bytes_used;
         inner.entries.retain(|&(m, _), frame| {
             let keep = m != media_id;
@@ -180,17 +220,34 @@ impl SharedFrameCache {
         }
     }
 
-    /// All the frames `start..=end` of the media are cached. Stops at the
-    /// first missing one, without building the intervals.
+    /// All the wanted frames `start..=end` of the media are cached: all of
+    /// them, or with a stride its multiples (none in the range: covered).
+    /// Stops at the first missing one, without building the intervals.
     pub fn covers(&self, media_id: MediaId, start: FrameIdx, end: FrameIdx) -> bool {
         let inner = self.inner.lock().unwrap();
-        (start..=end).all(|idx| inner.entries.contains_key(&(media_id, idx)))
+        let stride = inner.stride(media_id);
+        let first_multiple = start + (-start).rem_euclid(stride);
+        (first_multiple..=end)
+            .step_by(stride as usize)
+            .all(|idx| inner.entries.contains_key(&(media_id, idx)))
+    }
+
+    /// `covers` for a whole segment to show: one with no multiple of the
+    /// stride in it (a freeze frame, a clip of a frame or two) still wants
+    /// its first frame, or it would show nothing.
+    pub fn covers_segment(&self, media_id: MediaId, start: FrameIdx, end: FrameIdx) -> bool {
+        let stride = self.stride(media_id);
+        let has_multiple = start + (-start).rem_euclid(stride) <= end;
+        start > end
+            || self.covers(media_id, start, end) && (has_multiple || self.contains(media_id, start))
     }
 
     /// Contiguous (inclusive) intervals currently cached for a media — for
-    /// the "buffered" indicator in the UI.
+    /// the "buffered" indicator in the UI. With a stride, the gaps it leaves
+    /// do not split them.
     pub fn cached_ranges(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
         let inner = self.inner.lock().unwrap();
+        let stride = inner.stride(media_id);
         let mut indices: Vec<FrameIdx> = inner
             .entries
             .keys()
@@ -202,11 +259,17 @@ impl SharedFrameCache {
         let mut ranges: Vec<(FrameIdx, FrameIdx)> = Vec::new();
         for idx in indices {
             match ranges.last_mut() {
-                Some((_, end)) if idx == *end + 1 => *end = idx,
+                Some((_, end)) if idx <= *end + stride => *end = idx,
                 _ => ranges.push((idx, idx)),
             }
         }
         ranges
+    }
+}
+
+impl SharedInner {
+    fn stride(&self, media_id: MediaId) -> FrameIdx {
+        self.strides.get(&media_id).copied().unwrap_or(1)
     }
 }
 

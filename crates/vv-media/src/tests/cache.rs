@@ -252,3 +252,66 @@ fn shared_cache_cached_ranges_filters_by_media() {
     assert_eq!(cache.cached_ranges(media_a), vec![(5, 6)]);
     assert_eq!(cache.cached_ranges(media_b), vec![(5, 5)]);
 }
+
+#[test]
+fn shared_cache_with_a_stride_covers_and_ranges_only_count_its_multiples() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    for idx in [10, 12, 14, 20] {
+        cache.insert(media_a, idx, frame_of_size(4));
+    }
+    assert!(!cache.covers(media_a, 10, 14), "every frame without a stride");
+
+    cache.set_stride(media_a, 2);
+    assert!(cache.covers(media_a, 9, 15));
+    assert!(!cache.covers(media_a, 10, 16), "16 is a multiple and missing");
+    assert_eq!(cache.cached_ranges(media_a), [(10, 14), (20, 20)]);
+
+    cache.set_stride(media_a, 1);
+    assert!(!cache.covers(media_a, 10, 14), "back to every frame");
+    assert_eq!(cache.cached_ranges(media_a), [(10, 10), (12, 12), (14, 14), (20, 20)]);
+}
+
+#[test]
+fn shared_cache_with_a_stride_still_wants_a_range_with_no_multiple_in_it() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    cache.set_stride(media_a, 4);
+    assert!(
+        cache.covers(media_a, 5, 7),
+        "no frame wanted: a decoder that skipped 5 to 7 left no hole"
+    );
+    assert!(!cache.covers_segment(media_a, 5, 7), "a freeze frame or a 1-frame clip");
+    cache.insert(media_a, 5, frame_of_size(4));
+    assert!(cache.covers_segment(media_a, 5, 7));
+    assert!(cache.covers_segment(media_a, 6, 5), "empty");
+}
+
+#[test]
+fn shared_cache_get_near_stays_within_the_stride_and_the_clip() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    cache.insert(media_a, 10, frame_of_size(4));
+    cache.insert(media_a, 14, frame_of_size(8));
+
+    assert!(cache.get_near(media_a, 11, 0, 100).is_none(), "exact without a stride");
+
+    cache.set_stride(media_a, 2);
+    assert_eq!(cache.get_near(media_a, 11, 0, 100).unwrap().byte_len(), 4, "earlier first");
+    assert_eq!(cache.get_near(media_a, 13, 0, 100).unwrap().byte_len(), 8, "12 missing");
+    assert!(cache.get_near(media_a, 12, 0, 100).is_none(), "neither neighbour is cached");
+    assert!(
+        cache.get_near(media_a, 11, 11, 100).is_none(),
+        "10 is outside the clip"
+    );
+    assert!(cache.get_near(media_a, 9, 0, 100).is_some());
+}
+
+#[test]
+fn shared_cache_remove_media_forgets_its_stride() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    cache.set_stride(media_a, 3);
+    cache.remove_media(media_a);
+    assert_eq!(cache.stride(media_a), 1);
+}

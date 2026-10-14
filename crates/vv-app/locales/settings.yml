@@ -60,6 +60,12 @@ settings.read_ahead_behind:
 settings.read_ahead_behind_hint:
   en: "How many seconds of timeline to keep buffered behind the playhead too, besides the forward window: makes short back-and-forth scrubbing cheap without decoding again every time. A minimum margin remains even at 0."
   it: "Quanti secondi di timeline tenere bufferizzati anche dietro la testina, oltre alla finestra in avanti: rende economico uno scrub avanti-indietro ravvicinato senza dover ridecodificare ogni volta. Resta comunque un margine minimo anche a 0."
+settings.fast_playback_shown_frames_only:
+  en: "Fast playback: buffer only the frames shown"
+  it: "Playback veloce: bufferizza solo i frame mostrati"
+settings.fast_playback_shown_frames_only_hint:
+  en: "At 2x only one frame in 2 is shown (at 4x one in 4, and so on): buffering only those leaves decoding and RAM to the frames that are seen, so fast playback stays smooth on heavy sources. When playback stops, the frames in between are decoded again."
+  it: "A 2x si vede solo un frame ogni 2 (a 4x uno ogni 4, e così via): bufferizzando solo quelli, decodifica e RAM restano ai frame che si vedono e il playback veloce resta fluido anche con sorgenti pesanti. Quando la riproduzione si ferma, i frame intermedi vengono decodificati di nuovo."
 settings.video_cache:
   en: "Video cache:"
   it: "Cache video:"
