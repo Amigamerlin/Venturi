@@ -166,6 +166,55 @@ fn shared_cache_reconcile_measures_distance_in_timeline_frames() {
     assert!(!cache.contains(media_a, 30));
 }
 
+/// During playback the frames just played are as close to the playhead as
+/// the coming ones: the coming ones must win the budget.
+#[test]
+fn shared_cache_reconcile_evicts_behind_the_playhead_before_ahead() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    let window = [WantedRange {
+        media_id: media_a,
+        source_start: 0,
+        source_end: 99,
+        timeline_start: 0,
+        rate: vv_core::Rational::one(),
+    }];
+    cache.insert(media_a, 40, frame_of_size(4));
+    cache.insert(media_a, 70, frame_of_size(4));
+
+    cache.reconcile(50, &window, 4);
+
+    assert!(cache.contains(media_a, 70), "20 frames ahead");
+    assert!(!cache.contains(media_a, 40), "10 frames behind");
+}
+
+#[test]
+fn wanted_range_seen_through_a_compound_clip_lands_on_the_outer_timeline() {
+    let (media_a, media_b) = two_media_ids();
+    // The compound clip shows nested frames from 10 at outer frame 100, each
+    // nested frame lasting two outer ones.
+    let outer = WantedRange {
+        media_id: media_b,
+        source_start: 10,
+        source_end: 59,
+        timeline_start: 100,
+        rate: vv_core::Rational::new(2, 1),
+    };
+    let nested = WantedRange {
+        media_id: media_a,
+        source_start: 500,
+        source_end: 520,
+        timeline_start: 30,
+        rate: vv_core::Rational::one(),
+    };
+
+    let seen = nested.seen_through(&outer);
+
+    assert_eq!(seen.timeline_start, 140);
+    assert_eq!(seen.rate, vv_core::Rational::new(2, 1));
+    assert_eq!(seen.sub_range(505, 510).timeline_start, 150);
+}
+
 #[test]
 fn shared_cache_insert_overwrite_updates_bytes_used_correctly() {
     let (media_a, _) = two_media_ids();

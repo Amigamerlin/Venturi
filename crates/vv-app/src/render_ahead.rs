@@ -592,13 +592,17 @@ fn push_or_recurse(
     {
         Some(nested_id) => {
             if let Some(nested) = project.timelines.get(nested_id) {
-                real.extend(clipped_media_segments(
-                    project,
-                    nested,
-                    segment.source_start,
-                    segment.source_end + 1,
-                    depth + 1,
-                ));
+                real.extend(
+                    clipped_media_segments(
+                        project,
+                        nested,
+                        segment.source_start,
+                        segment.source_end + 1,
+                        depth + 1,
+                    )
+                    .into_iter()
+                    .map(|(track, s)| (track, s.seen_through(&segment))),
+                );
             }
         }
         None => real.push((track_index, segment)),
@@ -687,13 +691,17 @@ fn push_borrowed_segment(
     match item.compound {
         Some(nested_id) => {
             if let Some(nested) = project.timelines.get(nested_id) {
-                real.extend(strip_track(clipped_media_segments(
-                    project,
-                    nested,
-                    segment.source_start,
-                    segment.source_end + 1,
-                    1,
-                )));
+                real.extend(
+                    strip_track(clipped_media_segments(
+                        project,
+                        nested,
+                        segment.source_start,
+                        segment.source_end + 1,
+                        1,
+                    ))
+                    .into_iter()
+                    .map(|s| s.seen_through(&segment)),
+                );
             }
         }
         None => real.push(segment),

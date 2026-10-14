@@ -520,6 +520,21 @@ fn collect_media_segments_recurses_into_a_compound_clips_nested_timeline() {
     assert_eq!(real[0].source_end, 29);
 }
 
+/// The nested segments are placed on the root timeline: the cache measures
+/// their distance from the root playhead, and the chunks interleave with the
+/// root's own media by that position.
+#[test]
+fn collect_media_segments_places_a_compound_clips_segments_on_the_root_timeline() {
+    let (project, mut root, real_media, compound_media) = project_with_compound_clip();
+    root.tracks[0].clips = vec![media_clip_trimmed(1, compound_media, 100, 0, 40)];
+
+    let real = collect_media_segments(&project, &root, 110, 130);
+
+    assert_eq!(real[0].media_id, real_media);
+    assert_eq!(real[0].source_start, 10);
+    assert_eq!(real[0].timeline_start, 110, "not 10, its frame in the nested timeline");
+}
+
 /// Since the project timeline shows up in the media pool too
 /// (see `MediaItem::compound`), a user can drag it inside
 /// itself: a cycle, not just a deep nesting. Without

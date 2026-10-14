@@ -28,6 +28,19 @@ impl WantedRange {
         self.timeline_start + self.rate.scale_round(idx) - self.rate.scale_round(self.source_start)
     }
 
+    /// A range of a compound clip's nested timeline placed on the timeline
+    /// of `outer`, the compound clip's own range: positions in two
+    /// different timelines cannot be compared with each other.
+    pub fn seen_through(self, outer: &WantedRange) -> Self {
+        Self {
+            timeline_start: outer.timeline_position_of(self.timeline_start),
+            rate: outer
+                .rate
+                .divided_by(vv_core::Rational::new(self.rate.den, self.rate.num)),
+            ..self
+        }
+    }
+
     /// The part `source_start..=source_end` of this range.
     pub fn sub_range(&self, source_start: FrameIdx, source_end: FrameIdx) -> Self {
         Self {
@@ -147,15 +160,15 @@ impl SharedFrameCache {
 
         // Tier B.
         if inner.bytes_used > budget_bytes {
-            let mut scored: Vec<((MediaId, FrameIdx), FrameIdx)> = inner
+            let mut scored: Vec<((MediaId, FrameIdx), (u8, FrameIdx))> = inner
                 .entries
                 .keys()
                 .map(|&(media_id, idx)| {
-                    ((media_id, idx), distance(media_id, idx, playhead, window))
+                    ((media_id, idx), eviction_rank(media_id, idx, playhead, window))
                 })
                 .collect();
-            // Farthest first: eviction works from the tail.
-            scored.sort_unstable_by_key(|&(_, dist)| std::cmp::Reverse(dist));
+            // Eviction works from the tail.
+            scored.sort_unstable_by_key(|&(_, rank)| std::cmp::Reverse(rank));
             for (key, _) in scored {
                 if inner.bytes_used <= budget_bytes {
                     break;
@@ -197,19 +210,29 @@ impl SharedFrameCache {
     }
 }
 
-/// Distance in timeline frames from the playhead; `MAX` if outside the window.
-fn distance(
+/// Eviction order, greatest first: outside the window, then behind the
+/// playhead, then ahead, farthest first within each (in timeline frames).
+/// Behind goes before ahead: measured both ways alike, during playback the
+/// frames just played would push out the ones about to be.
+fn eviction_rank(
     media_id: MediaId,
     idx: FrameIdx,
     playhead: FrameIdx,
     window: &[WantedRange],
-) -> FrameIdx {
+) -> (u8, FrameIdx) {
     window
         .iter()
         .filter(|w| w.media_id == media_id && w.contains(idx))
-        .map(|w| (w.timeline_position_of(idx) - playhead).abs())
+        .map(|w| {
+            let offset = w.timeline_position_of(idx) - playhead;
+            if offset < 0 {
+                (1, -offset)
+            } else {
+                (0, offset)
+            }
+        })
         .min()
-        .unwrap_or(FrameIdx::MAX)
+        .unwrap_or((2, FrameIdx::MAX))
 }
 
 #[cfg(test)]
