@@ -1341,9 +1341,44 @@ impl VenturiApp {
         if self.timeline_id == Some(timeline_id) {
             return;
         }
+        self.store_view();
         self.timeline_stack.clear();
         self.entered_from.clear();
         self.switch_to_timeline(timeline_id);
+        self.restore_playhead();
+    }
+
+    /// Records the active timeline and its playhead in `project.view`; from
+    /// inside compound clips, the root of the breadcrumb.
+    pub(crate) fn store_view(&mut self) {
+        let Some(current) = self.timeline_id else {
+            return;
+        };
+        let (timeline, playhead) = match self.timeline_stack.first() {
+            Some(&root) => (root, self.playhead_at_stack_level(0)),
+            None => (current, self.timeline_state.playhead),
+        };
+        let project = &mut self.session.project;
+        project.view.active_timeline = Some(timeline);
+        project.view.playheads.insert(timeline, playhead);
+        project
+            .view
+            .playheads
+            .retain(|id, _| project.timelines.contains_key(*id));
+    }
+
+    /// Puts the playhead of the active timeline back where `project.view`
+    /// left it.
+    pub(crate) fn restore_playhead(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let Some(&frame) = self.session.project.view.playheads.get(&timeline_id) else {
+            return;
+        };
+        let end = self.session.project.timelines[timeline_id].total_frames();
+        self.timeline_state.playhead = frame.clamp(0, (end - 1).max(0));
+        self.timeline_state.reveal_playhead = true;
     }
 
     /// Spawns `render_ahead` the first time a timeline exists (one
@@ -1400,6 +1435,17 @@ impl VenturiApp {
         let Some(target) = self.timeline_stack.get(index).copied() else {
             return;
         };
+        let frame = self.playhead_at_stack_level(index);
+        self.timeline_stack.truncate(index);
+        self.entered_from.truncate(index);
+        self.switch_to_timeline(target);
+        self.timeline_state.playhead = frame;
+        self.timeline_state.reveal_playhead = true;
+    }
+
+    /// The playhead brought out of the compound clips to the timeline at
+    /// position `index` of `timeline_stack`.
+    fn playhead_at_stack_level(&self, index: usize) -> FrameIdx {
         let mut frame = self.timeline_state.playhead;
         for level in (index..self.timeline_stack.len()).rev() {
             let (clip_id, entry_playhead) = self.entered_from[level];
@@ -1419,11 +1465,7 @@ impl VenturiApp {
                 _ => entry_playhead,
             };
         }
-        self.timeline_stack.truncate(index);
-        self.entered_from.truncate(index);
-        self.switch_to_timeline(target);
-        self.timeline_state.playhead = frame;
-        self.timeline_state.reveal_playhead = true;
+        frame
     }
 
     /// The part common to the two functions above: it clears the state

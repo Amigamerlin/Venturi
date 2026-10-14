@@ -214,3 +214,21 @@ fn projects_saved_without_a_precision_load_with_high() {
     let project: Project = ron::from_str(&old).unwrap();
     assert_eq!(project.precision, ProcessingPrecision::High);
 }
+
+#[test]
+fn the_view_round_trips_and_an_older_file_without_it_still_loads() {
+    let mut project = Project::default();
+    project.view.active_timeline = Some(TimelineId::from_raw(3));
+    project.view.playheads.insert(TimelineId::from_raw(3), 1234);
+
+    let dir = std::env::temp_dir().join("vv-core-persistence-view-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("project.vvproj");
+    save_project(&project, &path).unwrap();
+    assert_eq!(load_project(&path).unwrap().view, project.view);
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let view = contents.find("    view:").expect("the view is the last field");
+    std::fs::write(&path, format!("{})", &contents[..view])).unwrap();
+    assert_eq!(load_project(&path).unwrap().view, ProjectView::default());
+}

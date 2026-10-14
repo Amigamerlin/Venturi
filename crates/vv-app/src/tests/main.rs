@@ -4233,7 +4233,7 @@ fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
     // UI state of the previous project cleared, not inherited from the
     // old `app` nor left over from the project just overwritten.
     assert!(app.timeline_state.selected.is_empty());
-    assert_eq!(app.timeline_state.playhead, 0);
+    assert_eq!(app.timeline_state.playhead, 5, "the saved one, not 42");
 }
 
 #[test]
@@ -5087,4 +5087,98 @@ fn a_paste_in_the_copying_instance_reuses_its_own_media() {
             .len(),
         2
     );
+}
+
+/// A timeline `frames` long, with one solid color clip.
+fn timeline_of_length(app: &mut VenturiApp, frames: FrameIdx) -> TimelineId {
+    let mut track = Track::new(TrackKind::Video);
+    track.insert_sorted(vv_core::Clip::from_source_range(
+        app.session.project.alloc_clip_id(),
+        vv_core::ClipSource::SolidColor,
+        0,
+        frames,
+        0,
+        vv_core::Rational::one(),
+    ));
+    app.session.project.timelines.insert(vv_core::Timeline {
+        name: "T".into(),
+        fps: vv_core::Rational::new(25, 1),
+        resolution: (1920, 1080),
+        tracks: vec![track],
+        markers: Vec::new(),
+        master: Default::default(),
+    })
+}
+
+#[test]
+fn each_timeline_keeps_its_playhead_when_switching_between_them() {
+    let mut app = VenturiApp::default();
+    let a = timeline_of_length(&mut app, 100);
+    let b = timeline_of_length(&mut app, 100);
+    app.open_timeline(a);
+    app.timeline_state.playhead = 30;
+
+    app.open_timeline(b);
+    assert_eq!(app.timeline_state.playhead, 0, "never visited");
+    app.timeline_state.playhead = 70;
+
+    app.open_timeline(a);
+    assert_eq!(app.timeline_state.playhead, 30);
+    assert!(app.timeline_state.reveal_playhead);
+    app.open_timeline(b);
+    assert_eq!(app.timeline_state.playhead, 70);
+}
+
+#[test]
+fn a_reopened_project_resumes_on_its_timeline_and_playhead() {
+    let mut app = VenturiApp::default();
+    let _first = timeline_of_length(&mut app, 100);
+    let second = timeline_of_length(&mut app, 100);
+    app.session.project.view.active_timeline = Some(second);
+    app.session.project.view.playheads.insert(second, 250);
+
+    app.reset_for_replaced_project();
+
+    assert_eq!(app.timeline_id, Some(second));
+    assert_eq!(app.timeline_state.playhead, 99, "kept within the timeline");
+    assert!(app.timeline_state.reveal_playhead);
+}
+
+#[test]
+fn a_project_whose_saved_timeline_is_gone_opens_the_first_one() {
+    let mut app = VenturiApp::default();
+    let first = timeline_of_length(&mut app, 100);
+    app.session.project.view.active_timeline = Some(<TimelineId as vv_core::Id>::from_raw(99));
+
+    app.reset_for_replaced_project();
+
+    assert_eq!(app.timeline_id, Some(first));
+    assert_eq!(app.timeline_state.playhead, 0);
+}
+
+#[test]
+fn inside_a_compound_clip_the_view_keeps_the_root_and_the_playhead_outside() {
+    let mut app = VenturiApp::default();
+    let root_id = app.ensure_timeline();
+    let nested_id = timeline_of_length(&mut app, 100);
+    let media = insert_compound_media(&mut app, nested_id);
+    let clip_id = app.session.project.alloc_clip_id();
+    let root = &mut app.session.project.timelines[root_id];
+    let (video, _) = root.tracks_of_kind(TrackKind::Video).next().unwrap();
+    root.tracks[video].insert_sorted(vv_core::Clip::from_source_range(
+        clip_id,
+        vv_core::ClipSource::Media(media),
+        0,
+        50,
+        100,
+        vv_core::Rational::one(),
+    ));
+
+    app.enter_compound_timeline(nested_id, 30, Some(clip_id));
+    app.store_view();
+
+    let view = &app.session.project.view;
+    assert_eq!(view.active_timeline, Some(root_id));
+    assert_eq!(view.playheads.get(&root_id), Some(&130));
+    assert!(!view.playheads.contains_key(&nested_id));
 }

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use vv_core::{
     AddEntities, Command, CommandLabel, History, MediaFileInfo, PersistenceError, Project,
-    Timeline, TimelineId,
+    ProjectView, Timeline, TimelineId,
 };
 
 use std::collections::HashMap;
@@ -19,6 +19,8 @@ pub struct Session {
     pub history: History,
     path: Option<PathBuf>,
     saved_generation: u64,
+    /// `project.view` as it is in the file.
+    saved_view: ProjectView,
     synced_timeline_generation: u64,
     /// Bumped whenever the project is replaced.
     epoch: u64,
@@ -54,6 +56,20 @@ impl Session {
 
     pub fn mark_saved(&mut self) {
         self.saved_generation = self.history.generation();
+        self.saved_view = self.project.view.clone();
+    }
+
+    /// Writes the file again when only `project.view` changed since the
+    /// last save. With unsaved edits it does nothing: saving the view would
+    /// save them too.
+    pub fn save_view(&mut self) -> Result<(), PersistenceError> {
+        if self.has_unsaved_changes() || self.project.view == self.saved_view {
+            return Ok(());
+        }
+        match self.path.clone() {
+            Some(path) => self.save_to(&path),
+            None => Ok(()),
+        }
     }
 
     pub fn change_mark(&self) -> ChangeMark {

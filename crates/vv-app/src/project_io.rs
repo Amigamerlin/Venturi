@@ -422,6 +422,7 @@ impl VenturiApp {
     }
 
     pub(crate) fn save_project_to(&mut self, path: &Path) {
+        self.store_view();
         match self.session.save_to(path) {
             Ok(()) => {
                 self.project_error = None;
@@ -481,7 +482,17 @@ impl VenturiApp {
         if self.has_unsaved_changes() {
             self.pending_project_switch = Some(switch);
         } else {
+            self.save_view();
             self.run_project_switch(switch);
+        }
+    }
+
+    /// Leaving a project with no unsaved edits: its file still gets where the
+    /// playhead is, to resume from there.
+    fn save_view(&mut self) {
+        self.store_view();
+        if let Err(e) = self.session.save_view() {
+            eprintln!("[project_io] saving the playhead failed: {e}");
         }
     }
 
@@ -501,10 +512,15 @@ impl VenturiApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_changes() {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if self.has_unsaved_changes() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending_project_switch = Some(ProjectSwitch::Quit);
             ctx.request_repaint();
+        } else {
+            self.save_view();
         }
     }
 
@@ -694,7 +710,14 @@ impl VenturiApp {
     /// one goes, the first timeline opens.
     pub(crate) fn reset_for_replaced_project(&mut self) {
         self.seen_epoch = self.session.epoch();
-        self.timeline_id = self.session.project.timelines.keys().next();
+        let project = &self.session.project;
+        self.timeline_id = project
+            .view
+            .active_timeline
+            .filter(|id| project.timelines.contains_key(*id))
+            .or_else(|| project.timelines.keys().next());
+        self.timeline_stack.clear();
+        self.entered_from.clear();
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();
         self.media_pool_state.invalidate_offline();
@@ -731,6 +754,8 @@ impl VenturiApp {
         for media_id in media_ids {
             self.enqueue_media_background_jobs(media_id);
         }
+        // Audio and render_ahead follow it in `ensure_active_clip_matches_playhead`.
+        self.restore_playhead();
     }
 
     /// Opens the settings window: the export starts only from there

@@ -2575,6 +2575,16 @@ pub struct Project {
     next_compound_generation: u64,
     #[serde(default)]
     pub precision: ProcessingPrecision,
+    #[serde(default)]
+    pub view: ProjectView,
+}
+
+/// Where the user left the project, to resume from there when it is reopened.
+/// Not an edit: it goes around the history, so it never makes the project unsaved.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectView {
+    pub active_timeline: Option<TimelineId>,
+    pub playheads: std::collections::BTreeMap<TimelineId, FrameIdx>,
 }
 
 impl Project {

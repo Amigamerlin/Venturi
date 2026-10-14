@@ -5141,6 +5141,10 @@ fn sync_timeline_scroll(
             {
                 scroll_state.offset.x = target;
                 scroll_state.store(ctx, scroll_id);
+            } else {
+                // The ScrollArea has no state before its first `show` (a
+                // project opened at startup): try again next frame.
+                state.reveal_playhead = reveal;
             }
         }
     }

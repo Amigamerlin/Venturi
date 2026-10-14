@@ -548,3 +548,28 @@ fn timeline_revisions_follow_edits_undo_and_outside_changes() {
     )));
     assert_ne!(session.timeline_revision(timeline), first, "renamed");
 }
+
+#[test]
+fn save_view_writes_the_file_only_when_nothing_else_is_unsaved() {
+    let dir = test_dir("save-view");
+    let path = dir.join("project.vvproj");
+    let mut session = Session::default();
+    let timeline_id = add_timeline(&mut session);
+    session.save_to(&path).unwrap();
+    let written = || vv_core::load_project(&path).unwrap().view;
+
+    session.project.view.playheads.insert(timeline_id, 40);
+    assert!(!session.has_unsaved_changes(), "the view is not an edit");
+    session.save_view().unwrap();
+    assert_eq!(written().playheads.get(&timeline_id), Some(&40));
+
+    add_timeline(&mut session);
+    session.project.view.playheads.insert(timeline_id, 80);
+    session.save_view().unwrap();
+    assert_eq!(
+        written().playheads.get(&timeline_id),
+        Some(&40),
+        "saving the view would save the edit too"
+    );
+    assert!(session.has_unsaved_changes());
+}
