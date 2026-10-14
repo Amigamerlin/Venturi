@@ -310,6 +310,9 @@ struct OpenDecoder {
     /// Last seek landing and GOP estimated from the distance between landings.
     last_keyframe_landed: Option<FrameIdx>,
     estimated_gop: Option<FrameIdx>,
+    /// The longest stretch a seek had to cross from its landing to its
+    /// target: no keyframe in it, so the GOP is at least this long.
+    min_gop: FrameIdx,
 }
 
 impl OpenDecoder {
@@ -321,6 +324,7 @@ impl OpenDecoder {
             next_frame: 0,
             last_keyframe_landed: None,
             estimated_gop: None,
+            min_gop: 0,
         }
     }
 
@@ -329,12 +333,19 @@ impl OpenDecoder {
         if self.is_all_intra {
             return PROXY_SEEK_THRESHOLD_FRAMES;
         }
-        self.estimated_gop.unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
+        // Below `min_gop` an interrupted transit would seek again, landing on
+        // the same keyframe and starting over: at 2x on a long GOP, forever.
+        self.estimated_gop
+            .unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
+            .max(self.min_gop)
     }
 
-    /// Updates the GOP estimate with a new landing. It keeps the minimum:
-    /// a jump of several GOPs would overestimate it.
-    fn record_keyframe_landing(&mut self, idx: FrameIdx) {
+    /// Updates the GOP estimate with a new landing of a seek to `target`. It
+    /// keeps the minimum: a jump of several GOPs would overestimate it.
+    fn record_keyframe_landing(&mut self, idx: FrameIdx, target: FrameIdx) {
+        self.min_gop = self
+            .min_gop
+            .max((target - idx).min(MAX_SEEK_THRESHOLD_FRAMES));
         if let Some(prev) = self.last_keyframe_landed
             && idx > prev
         {
@@ -346,8 +357,8 @@ impl OpenDecoder {
         }
         if debug_enabled() {
             eprintln!(
-                "[render_ahead] LANDING idx={idx} last_keyframe_landed_before={:?} estimated_gop_after={:?}",
-                self.last_keyframe_landed, self.estimated_gop
+                "[render_ahead] LANDING idx={idx} target={target} last_keyframe_landed_before={:?} estimated_gop_after={:?} min_gop={}",
+                self.last_keyframe_landed, self.estimated_gop, self.min_gop
             );
         }
         self.last_keyframe_landed = Some(idx);
@@ -1088,7 +1099,7 @@ fn fill_segments(
             Positioned::Seeked | Positioned::Opened => {
                 let od = open.get_mut(&segment.media_id).unwrap();
                 if let Some(landing) = od.decoder.landing() {
-                    od.record_keyframe_landing(landing);
+                    od.record_keyframe_landing(landing, segment.source_start);
                     od.decoder
                         .skip_before(first_wanted_frame(ctx.window, segment, landing));
                 }

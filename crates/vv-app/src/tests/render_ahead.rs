@@ -1030,8 +1030,8 @@ fn open_decoder_records_the_observed_gap_between_two_consecutive_landings() {
     let decoder = Decoder::open(&path).unwrap();
     let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
-    od.record_keyframe_landing(25);
-    od.record_keyframe_landing(50);
+    od.record_keyframe_landing(25, 25);
+    od.record_keyframe_landing(50, 50);
 
     assert_eq!(od.seek_threshold_frames(), 25);
 }
@@ -1046,19 +1046,40 @@ fn open_decoder_gop_estimate_never_grows_from_a_wider_observation() {
     let decoder = Decoder::open(&path).unwrap();
     let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
-    od.record_keyframe_landing(0);
-    od.record_keyframe_landing(25); // distance 25: estimate = 25
+    od.record_keyframe_landing(0, 0);
+    od.record_keyframe_landing(25, 25); // distance 25: estimate = 25
     assert_eq!(od.seek_threshold_frames(), 25);
 
-    od.record_keyframe_landing(225); // distance 200: must not rise to 200
+    od.record_keyframe_landing(225, 225); // distance 200: must not rise to 200
     assert_eq!(
         od.seek_threshold_frames(),
         25,
         "a jump wider than one already observed must not grow the estimate"
     );
 
-    od.record_keyframe_landing(235); // distance 10: must narrow
+    od.record_keyframe_landing(235, 235); // distance 10: must narrow
     assert_eq!(od.seek_threshold_frames(), 10);
+}
+
+/// A seek landing short of its target proves there is no keyframe in
+/// between: below that distance an interrupted transit would seek back to
+/// the same keyframe and start over, as at 2x on a 250-frame GOP.
+#[test]
+fn open_decoder_threshold_covers_the_stretch_a_seek_had_to_cross() {
+    let path = make_test_clip("vv-app-render-ahead-test", "gop_crossed.mp4", 2);
+    let decoder = Decoder::open(&path).unwrap();
+    let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
+
+    od.record_keyframe_landing(3750, 3922);
+    assert_eq!(od.seek_threshold_frames(), 172);
+    od.record_keyframe_landing(4000, 4010);
+    assert_eq!(
+        od.seek_threshold_frames(),
+        250,
+        "the distance between landings, wider than either crossing"
+    );
+    od.record_keyframe_landing(4000, 4290);
+    assert_eq!(od.seek_threshold_frames(), 290);
 }
 
 /// Without the cap (`MAX_SEEK_THRESHOLD_FRAMES`), the *first*
@@ -1071,8 +1092,8 @@ fn open_decoder_gop_estimate_is_capped_even_on_the_first_observation() {
     let decoder = Decoder::open(&path).unwrap();
     let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
-    od.record_keyframe_landing(0);
-    od.record_keyframe_landing(10_000);
+    od.record_keyframe_landing(0, 0);
+    od.record_keyframe_landing(10_000, 10_000);
 
     assert_eq!(od.seek_threshold_frames(), MAX_SEEK_THRESHOLD_FRAMES);
 }
@@ -1097,9 +1118,9 @@ fn open_decoder_ignores_the_learned_gop_estimate_for_an_all_intra_proxy() {
     // monotonic scrub: for a "normal" decoder the estimate
     // would converge on a large value (the minimum observed so far,
     // here 90) instead of narrowing towards the real GOP.
-    od.record_keyframe_landing(90);
-    od.record_keyframe_landing(180);
-    od.record_keyframe_landing(270);
+    od.record_keyframe_landing(90, 90);
+    od.record_keyframe_landing(180, 180);
+    od.record_keyframe_landing(270, 270);
 
     assert_eq!(
         od.seek_threshold_frames(),
@@ -3232,8 +3253,8 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
     // reachable.
     let frame_bytes = 320 * 240 * 3 / 2;
     let mut od = OpenDecoder::fresh(Decoder::open(&path).unwrap(), path, false);
-    od.record_keyframe_landing(0);
-    od.record_keyframe_landing(25);
+    od.record_keyframe_landing(0, 0);
+    od.record_keyframe_landing(25, 25);
     open.insert(media_a, od);
 
     let segment = WantedRange {
