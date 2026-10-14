@@ -1725,11 +1725,11 @@ impl VenturiApp {
                                             let (source_w, source_h) =
                                                 (source_size.0 as f32, source_size.1 as f32);
 
-                                            // Diamond of a row: on a keyframe if all its parameters are.
+                                            // Diamond of a row: on a keyframe if any of its parameters is (X and Y can be keyed separately).
                                             let row_keyframe = |params: &[P]| RowKeyframe {
                                                 on_keyframe: params
                                                     .iter()
-                                                    .all(|p| info.params[p.index()].on_keyframe),
+                                                    .any(|p| info.params[p.index()].on_keyframe),
                                                 prev: params
                                                     .iter()
                                                     .filter_map(|p| info.params[p.index()].prev)
@@ -2045,7 +2045,7 @@ impl VenturiApp {
                                                 if row.toggled_keyframe {
                                                     let on_keyframe = params
                                                         .iter()
-                                                        .all(|p| info.params[p.index()].on_keyframe);
+                                                        .any(|p| info.params[p.index()].on_keyframe);
                                                     for t in targets {
                                                         // The keyframe pins the value
                                                         // each clip already has.
