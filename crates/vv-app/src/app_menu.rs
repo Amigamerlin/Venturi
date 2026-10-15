@@ -24,8 +24,12 @@ impl VenturiApp {
             .is_some_and(|d| d.is_capturing());
         let keymap = self.settings.keymap.clone();
         let menu_paste = std::mem::take(&mut self.menu_paste_pending);
+        let mut open_compound = false;
+        let mut exit_compound = false;
         ui.input(|i| {
             arrow_input.1 = i.time;
+            // Mouse "back" button, as in a web browser.
+            exit_compound = i.pointer.button_pressed(egui::PointerButton::Extra1);
             if typing || capturing_shortcut {
                 return;
             }
@@ -58,6 +62,9 @@ impl VenturiApp {
             if pressed(Action::SelectTool) {
                 self.timeline_state.tool = timeline_ui::TimelineTool::Select;
             }
+            // Enter also ends the mask being drawn in the viewer.
+            open_compound = pressed(Action::OpenCompound) && !self.mask_overlay.drawing;
+            exit_compound |= pressed(Action::ExitCompound);
             if pressed(Action::SlipTool) {
                 self.timeline_state.tool = timeline_ui::TimelineTool::Slip;
             }
@@ -174,6 +181,15 @@ impl VenturiApp {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
         }
+        // Served by the timeline panel, where the double click and the
+        // breadcrumb are: there playback follows the jumping playhead. Plain
+        // assignments, so a request not served this frame does not fire later.
+        let pool_focused = self.media_pool_state.focused;
+        if open_compound && pool_focused {
+            self.open_selected_pool_compound();
+        }
+        self.timeline_state.open_selected_compound = open_compound && !pool_focused;
+        self.exit_compound_requested = exit_compound;
         self.handle_clipboard_events(ui, &clipboard_events);
         if self.step_playhead_with_arrows(arrow_input.0, arrow_input.1) {
             ui.ctx().request_repaint();

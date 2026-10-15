@@ -485,6 +485,29 @@ impl VenturiApp {
         }
     }
 
+    /// Enter in the pool: the same as double clicking the only selected item.
+    pub(crate) fn open_selected_pool_compound(&mut self) {
+        let mut selected = self.media_pool_state.selected.iter();
+        if let (Some(&id), None) = (selected.next(), selected.next()) {
+            self.media_pool_state.rename_pending = None;
+            self.open_pool_compound(id);
+        }
+    }
+
+    /// Opens `id` if it is a compound clip or timeline; false otherwise.
+    fn open_pool_compound(&mut self, id: MediaId) -> bool {
+        let compound = self
+            .session
+            .project
+            .media_pool
+            .get(id)
+            .and_then(|m| m.compound);
+        if let Some(timeline_id) = compound {
+            self.open_timeline(timeline_id);
+        }
+        compound.is_some()
+    }
+
     /// Selects `media` and makes it visible: opens the pool and the folders
     /// containing it, drops a search hiding it, scrolls to it.
     pub(crate) fn reveal_in_media_pool(&mut self, media: MediaId) {
@@ -1222,15 +1245,8 @@ impl VenturiApp {
                                 // `MediaItem::compound`) opens as a top level timeline:
                                 // from the pool there is no parent to stack in the
                                 // breadcrumb. "Preview" makes no sense for it.
-                                match self
-                                    .session
-                                    .project
-                                    .media_pool
-                                    .get(id)
-                                    .and_then(|m| m.compound)
-                                {
-                                    Some(timeline_id) => self.open_timeline(timeline_id),
-                                    None => *preview_action = Some(id),
+                                if !self.open_pool_compound(id) {
+                                    *preview_action = Some(id);
                                 }
                             }
                             if resp.dragged() {

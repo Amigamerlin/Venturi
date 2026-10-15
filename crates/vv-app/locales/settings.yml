@@ -285,6 +285,12 @@ action.select_from_playhead:
 action.rename:
   en: Rename selected media pool item
   it: Rinomina l'elemento selezionato nel media pool
+action.open_compound:
+  en: Open selected compound clip
+  it: Apri la compound clip selezionata
+action.exit_compound:
+  en: Back to parent timeline
+  it: Torna alla timeline superiore
 action.new_project:
   en: New project
   it: Nuovo progetto

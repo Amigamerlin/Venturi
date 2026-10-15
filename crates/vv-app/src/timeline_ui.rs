@@ -109,6 +109,8 @@ pub struct TimelineState {
     /// (Ctrl+V) at the playhead position. Empty if nothing has ever
     /// been copied in this session yet.
     pub clipboard: Vec<ClipboardEntry>,
+    /// Enter pressed: open the selected compound clip the way a double click does.
+    pub open_selected_compound: bool,
     /// Height of the Video box if the user dragged the separator
     /// (see `GROUP_DIVIDER_HEIGHT`); `None` = groups centered by default.
     video_pane_height: Option<f32>,
@@ -427,6 +429,7 @@ impl Default for TimelineState {
             selected_gap: None,
             selected_transition: None,
             clipboard: Vec::new(),
+            open_selected_compound: false,
             video_pane_height: None,
             video_scroll: 0.0,
             audio_scroll: 0.0,
@@ -1850,6 +1853,36 @@ pub type MediaDrop = (TimelineDrag, FrameIdx, MediaDropTarget);
 /// `Some((drag, frame, target))` if in this frame something dragged from the
 /// media pool or from the Effects panel was released; the caller
 /// takes care of it.
+/// Where opening compound clip `clip` lands: its nested timeline, and the
+/// frame of it under `playhead` (clamped onto the clip).
+pub fn compound_entry(
+    project: &Project,
+    clip: &Clip,
+    playhead: FrameIdx,
+) -> Option<(TimelineId, ClipId, FrameIdx)> {
+    let ClipSource::Media(media_id) = clip.source else {
+        return None;
+    };
+    let nested_id = project.media_pool.get(media_id)?.compound?;
+    let outer = playhead.clamp(clip.timeline_start, clip.timeline_end() - 1);
+    Some((nested_id, clip.id, clip.picture_frame_at(outer)))
+}
+
+/// `compound_entry` of the selected compound clip; its linked video and
+/// audio parts count as one.
+pub fn selected_compound_entry(
+    project: &Project,
+    timeline_id: TimelineId,
+    state: &TimelineState,
+) -> Option<(TimelineId, ClipId, FrameIdx)> {
+    let timeline = &project.timelines[timeline_id];
+    let mut entries = state.selected.iter().filter_map(|&(track, id)| {
+        compound_entry(project, timeline.clip(track, id)?, state.playhead)
+    });
+    let entry = entries.next()?;
+    entries.all(|(other, ..)| other == entry.0).then_some(entry)
+}
+
 pub fn show_timeline(
     ui: &mut egui::Ui,
     project: &mut Project,
@@ -3434,17 +3467,7 @@ pub fn show_timeline(
                             _ => gesture_finished = false,
                         }
                     } else if resp.double_clicked() {
-                        if let ClipSource::Media(media_id) = visual.clip.source
-                            && let Some(nested_id) =
-                                project.media_pool.get(media_id).and_then(|m| m.compound)
-                        {
-                            let clip = &visual.clip;
-                            let outer = state
-                                .playhead
-                                .clamp(clip.timeline_start, clip.timeline_end() - 1);
-                            enter_compound =
-                                Some((nested_id, clip.id, clip.picture_frame_at(outer)));
-                        }
+                        enter_compound = compound_entry(project, &visual.clip, state.playhead);
                     } else if resp.clicked() {
                         let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {
                             if transition_in_x.is_some_and(|x| {
@@ -3808,6 +3831,10 @@ pub fn show_timeline(
     }
     if let Some(mark) = volume_drag_group {
         history.end_group(mark);
+    }
+
+    if std::mem::take(&mut state.open_selected_compound) && enter_compound.is_none() {
+        enter_compound = selected_compound_entry(project, timeline_id, state);
     }
 
     (media_drop, enter_compound)

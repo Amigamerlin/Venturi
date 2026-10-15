@@ -234,6 +234,56 @@ fn leaving_a_compound_puts_the_playhead_where_its_frame_is_outside() {
 }
 
 #[test]
+fn enter_targets_the_selected_compound_counting_linked_parts_as_one() {
+    let mut app = VenturiApp::default();
+    let root_id = app.ensure_timeline();
+    let mut track = Track::new(TrackKind::Video);
+    track.insert_sorted(vv_core::Clip::from_source_range(
+        vv_core::ClipId(1),
+        vv_core::ClipSource::SolidColor,
+        0,
+        100,
+        0,
+        vv_core::Rational::one(),
+    ));
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
+        name: "Nested".into(),
+        fps: vv_core::Rational::new(25, 1),
+        resolution: (1920, 1080),
+        tracks: vec![track],
+        markers: Vec::new(),
+        master: Default::default(),
+    });
+    let media = insert_compound_media(&mut app, nested_id);
+    let clip_id = app.session.project.alloc_clip_id();
+    let mut clip = vv_core::Clip::from_source_range(
+        clip_id,
+        vv_core::ClipSource::Media(media),
+        0,
+        50,
+        100,
+        vv_core::Rational::one(),
+    );
+    clip.source_offset = 10;
+    let mut audio_part = clip.clone();
+    audio_part.id = app.session.project.alloc_clip_id();
+    let root = &mut app.session.project.timelines[root_id];
+    let (video, _) = root.tracks_of_kind(TrackKind::Video).next().unwrap();
+    let (audio, _) = root.tracks_of_kind(TrackKind::Audio).next().unwrap();
+    root.tracks[video].insert_sorted(clip);
+    root.tracks[audio].insert_sorted(audio_part.clone());
+
+    app.timeline_state.playhead = 120;
+    let entry = |app: &VenturiApp| {
+        timeline_ui::selected_compound_entry(&app.session.project, root_id, &app.timeline_state)
+    };
+    assert_eq!(entry(&app), None, "nothing selected");
+
+    app.timeline_state.selected = BTreeSet::from([(video, clip_id), (audio, audio_part.id)]);
+    assert_eq!(entry(&app), Some((nested_id, clip_id, 30)));
+}
+
+#[test]
 fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();

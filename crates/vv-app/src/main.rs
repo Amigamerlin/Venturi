@@ -247,6 +247,9 @@ struct VenturiApp {
     /// Parallel to `timeline_stack`: the compound clip opened in that
     /// timeline, and its playhead then, to go back to where one was.
     entered_from: Vec<(Option<ClipId>, FrameIdx)>,
+    /// Alt+Left or the mouse back button: handled as a click on the
+    /// breadcrumb's parent segment.
+    exit_compound_requested: bool,
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
     keyframe_editor: keyframe_editor::KeyframeEditorState,
@@ -471,6 +474,7 @@ impl Default for VenturiApp {
             session: vv_session::Session::default(),
             timeline_id: None,
             timeline_stack: Vec::new(),
+            exit_compound_requested: false,
             entered_from: Vec::new(),
             timeline_state: timeline_ui::TimelineState::default(),
             media_pool_state: media_pool::MediaPoolState::default(),
@@ -4103,9 +4107,10 @@ impl VenturiApp {
                             self.draw_audiometer(ui);
                         });
                 }
+                let exit_requested = std::mem::take(&mut self.exit_compound_requested);
                 if let Some(timeline_id) = self.timeline_id {
                     if !self.timeline_stack.is_empty() {
-                        let mut jump_to = None;
+                        let mut jump_to = exit_requested.then(|| self.timeline_stack.len() - 1);
                         ui.horizontal(|ui| {
                             for i in 0..self.timeline_stack.len() {
                                 let name = self.timeline_display_name(self.timeline_stack[i]);

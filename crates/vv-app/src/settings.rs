@@ -49,10 +49,12 @@ pub enum Action {
     AddMarker,
     SelectTool,
     SlipTool,
+    OpenCompound,
+    ExitCompound,
 }
 
 impl Action {
-    pub const ALL: [Action; 35] = [
+    pub const ALL: [Action; 37] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -88,6 +90,8 @@ impl Action {
         Action::AddMarker,
         Action::SelectTool,
         Action::SlipTool,
+        Action::OpenCompound,
+        Action::ExitCompound,
     ];
 
     /// Key in the settings file: must never be changed.
@@ -128,6 +132,8 @@ impl Action {
             Action::AddMarker => "add_marker",
             Action::SelectTool => "select_tool",
             Action::SlipTool => "slip_tool",
+            Action::OpenCompound => "open_compound",
+            Action::ExitCompound => "exit_compound",
         }
     }
 
@@ -171,7 +177,9 @@ impl Action {
             | Action::ZoomOut
             | Action::AddMarker
             | Action::SelectTool
-            | Action::SlipTool => {
+            | Action::SlipTool
+            | Action::OpenCompound
+            | Action::ExitCompound => {
                 t!("action_category.timeline")
             }
         }
@@ -233,6 +241,11 @@ impl Action {
             Action::AddMarker => vec![plain(Key::M)],
             Action::SelectTool => vec![plain(Key::V)],
             Action::SlipTool => vec![plain(Key::B)],
+            Action::OpenCompound => vec![plain(Key::Enter)],
+            Action::ExitCompound => vec![Shortcut {
+                alt: true,
+                ..plain(Key::ArrowLeft)
+            }],
         }
     }
 
