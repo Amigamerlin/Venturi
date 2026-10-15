@@ -142,7 +142,7 @@ fn the_old_grayscale_filter_loads_as_a_black_and_white_color_correction() {
 #[test]
 fn every_filter_kind_survives_save_and_load() {
     use FilterKind::*;
-    for kind in [ColorCorrection, BoxBlur, GaussianBlur, Exposure] {
+    for kind in [ColorCorrection, BoxBlur, GaussianBlur, Exposure, DropShadow] {
         let filter = ClipFilter::new(kind);
         let text = ron::to_string(&filter).unwrap();
         assert_eq!(

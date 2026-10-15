@@ -2315,3 +2315,45 @@ fn auto_balance_removes_a_cast_from_the_render() {
         cast(&after)
     );
 }
+
+#[test]
+fn a_drop_shadow_is_cast_under_the_layer_by_its_offset() {
+    let compositor = Compositor::new_headless();
+    let shadow = |radius| {
+        [vv_core::FilterValue {
+            radius,
+            amount: 100.0,
+            offset: [4.0, -4.0],
+            ..vv_core::FilterValue::new(vv_core::FilterKind::DropShadow)
+        }]
+    };
+    let render = |filters: &[vv_core::FilterValue]| {
+        let out = compositor.render_layers(
+            &[
+                Layer::new(LayerContent::Solid(WHITE), Transform::default()),
+                Layer {
+                    filters,
+                    ..Layer::new(
+                        LayerContent::Solid(RED),
+                        Transform {
+                            zoom: [0.25, 0.25],
+                            ..Transform::default()
+                        },
+                    )
+                },
+            ],
+            OutputFrame::exact(32, 16),
+        );
+        out.as_chunks::<4>().0.to_vec()
+    };
+    // The red square covers x 12..20, y 6..10.
+    let sharp = render(&shadow(0.0));
+    assert_close_rgba(at(&sharp, 18, 9), [255, 0, 0, 255]);
+    assert_close_rgba(at(&sharp, 22, 12), [0, 0, 0, 255]);
+    assert_close_rgba(at(&sharp, 10, 12), [255, 255, 255, 255]);
+    assert_close_rgba(at(&sharp, 25, 12), [255, 255, 255, 255]);
+
+    let soft = render(&shadow(6.0));
+    let edge = at(&soft, 25, 12);
+    assert!(edge[0] < 250, "the blur spreads past the edge: {edge:?}");
+}

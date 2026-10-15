@@ -683,6 +683,22 @@ impl RowKeyframe {
             next: track.keyframe_after(frame).filter(&reachable),
         }
     }
+
+    /// One row for two tracks.
+    pub(crate) fn merge(self, other: Self) -> Self {
+        let nearest =
+            |a: Option<FrameIdx>, b: Option<FrameIdx>, pick: fn(FrameIdx, FrameIdx) -> FrameIdx| {
+                match (a, b) {
+                    (Some(a), Some(b)) => Some(pick(a, b)),
+                    _ => a.or(b),
+                }
+            };
+        Self {
+            on_keyframe: self.on_keyframe || other.on_keyframe,
+            prev: nearest(self.prev, other.prev, FrameIdx::max),
+            next: nearest(self.next, other.next, FrameIdx::min),
+        }
+    }
 }
 
 /// A keyframed row edited in the panel, before knowing whether the target
@@ -1456,6 +1472,10 @@ impl VenturiApp {
                     amount: f.amount.value_at(frame),
                     amount_key: RowKeyframe::of(&f.amount, frame, in_clip),
                     grade: crate::grade_panel::GradeInfo::of(&f.grade, frame, in_clip),
+                    offset: [f.offset[0].value_at(frame), f.offset[1].value_at(frame)],
+                    offset_key: RowKeyframe::of(&f.offset[0], frame, in_clip)
+                        .merge(RowKeyframe::of(&f.offset[1], frame, in_clip)),
+                    color: f.color,
                 })
                 .collect(),
             blend_mode: clip.effects.blend_mode,
@@ -2111,6 +2131,9 @@ impl VenturiApp {
                                                     let mut reset_radius = reset;
                                                     let mut reset_direction = reset;
                                                     let mut reset_amount = reset;
+                                                    let mut reset_offset = reset;
+                                                    let mut reset_color = reset;
+                                                    let mut new_color = None;
                                                     let mut keyframes: Vec<(KeyframeEdit, vv_core::KeyframeTarget)> = Vec::new();
                                                     let mut goto = None;
                                                     if kind.has_amount() {
@@ -2180,6 +2203,57 @@ impl VenturiApp {
                                                         reset_direction |= row.reset;
                                                         goto = goto.or(row.goto);
                                                     }
+                                                    if kind == vv_core::FilterKind::DropShadow {
+                                                        let mut color = filter.color;
+                                                        let row = color_row(ui, &t!("props.color"), &mut color);
+                                                        if row.changed {
+                                                            new_color = Some(color);
+                                                        }
+                                                        reset_color |= row.reset;
+
+                                                        let mut offset = filter.offset;
+                                                        let (frame_w, frame_h) = (timeline_size.0 as f32, timeline_size.1 as f32);
+                                                        let row = param_row(ui, &t!("props.offset"), Some(filter.offset_key), |ui| {
+                                                            axis_field(ui, "X", &mut offset[0], 0.5, 1, -frame_w..=frame_w)
+                                                                | axis_field(ui, "Y", &mut offset[1], 0.5, 1, -frame_h..=frame_h)
+                                                        });
+                                                        for (axis, (&value, &before)) in offset.iter().zip(&filter.offset).enumerate() {
+                                                            let target = vv_core::KeyframeTarget::FilterOffset(kind, axis);
+                                                            if row.changed && value != before {
+                                                                keyframes.push((KeyframeEdit::Set(vv_core::KeyframeValue::FilterOffset(kind, axis, value)), target));
+                                                            }
+                                                            if row.toggled_keyframe {
+                                                                keyframes.push((KeyframeEdit::Toggle(filter.offset_key.on_keyframe), target));
+                                                            }
+                                                        }
+                                                        reset_offset |= row.reset;
+                                                        goto = goto.or(row.goto);
+
+                                                        for (label, value, key, max, is_radius) in [
+                                                            (t!("props.softness"), filter.radius, filter.radius_key, vv_core::BLUR_RADIUS_MAX, true),
+                                                            (t!("props.opacity"), filter.amount, filter.amount_key, 100.0, false),
+                                                        ] {
+                                                            let mut value = value;
+                                                            let row = param_row(ui, &label, Some(key), |ui| slider_field(ui, &mut value, 0.0..=max, 0.5, 1));
+                                                            let (set, target) = if is_radius {
+                                                                (vv_core::KeyframeValue::FilterRadius(kind, value), vv_core::KeyframeTarget::FilterRadius(kind))
+                                                            } else {
+                                                                (vv_core::KeyframeValue::FilterAmount(kind, value), vv_core::KeyframeTarget::FilterAmount(kind))
+                                                            };
+                                                            if row.changed {
+                                                                keyframes.push((KeyframeEdit::Set(set), target));
+                                                            }
+                                                            if row.toggled_keyframe {
+                                                                keyframes.push((KeyframeEdit::Toggle(key.on_keyframe), target));
+                                                            }
+                                                            if is_radius {
+                                                                reset_radius |= row.reset;
+                                                            } else {
+                                                                reset_amount |= row.reset;
+                                                            }
+                                                            goto = goto.or(row.goto);
+                                                        }
+                                                    }
                                                     if kind.has_grade() {
                                                         if self.settings.panels.color_window_open {
                                                             ui.label(egui::RichText::new(t!("color.in_window")).weak());
@@ -2203,7 +2277,16 @@ impl VenturiApp {
                                                             })
                                                             .map(|c| c.timeline_frame_at(source_frame));
                                                     }
-                                                    if !reset && !reset_radius && !reset_direction && !reset_amount && keyframes.is_empty() && enabled == filter.enabled {
+                                                    if !reset
+                                                        && !reset_radius
+                                                        && !reset_direction
+                                                        && !reset_amount
+                                                        && !reset_offset
+                                                        && !reset_color
+                                                        && new_color.is_none()
+                                                        && keyframes.is_empty()
+                                                        && enabled == filter.enabled
+                                                    {
                                                         continue;
                                                     }
                                                     let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
@@ -2233,6 +2316,15 @@ impl VenturiApp {
                                                         if reset {
                                                             own.grade = defaults.grade;
                                                         }
+                                                        if reset_offset {
+                                                            own.offset = defaults.offset.clone();
+                                                        }
+                                                        if reset_color {
+                                                            own.color = defaults.color;
+                                                        }
+                                                        if let Some(color) = new_color {
+                                                            own.color = color;
+                                                        }
                                                         let mut pending_keyframes = Vec::new();
                                                         for (edit, target) in &keyframes {
                                                             let own = &mut new_filters[pos];
@@ -2247,6 +2339,9 @@ impl VenturiApp {
                                                                 KeyframeEdit::Set(vv_core::KeyframeValue::FilterAmount(_, v)) if own.amount.is_constant() => {
                                                                     own.amount.default = v;
                                                                 }
+                                                                KeyframeEdit::Set(vv_core::KeyframeValue::FilterOffset(_, axis, v)) if own.offset[axis].is_constant() => {
+                                                                    own.offset[axis].default = v;
+                                                                }
                                                                 KeyframeEdit::Set(value) => {
                                                                     pending_keyframes.push(upsert_keyframe(clip_ref, t.source_frame, value));
                                                                 }
@@ -2260,6 +2355,9 @@ impl VenturiApp {
                                                                         }
                                                                         vv_core::KeyframeTarget::FilterAmount(_) => {
                                                                             vv_core::KeyframeValue::FilterAmount(kind, own.amount.value_at(t.source_frame))
+                                                                        }
+                                                                        vv_core::KeyframeTarget::FilterOffset(_, axis) => {
+                                                                            vv_core::KeyframeValue::FilterOffset(kind, *axis, own.offset[*axis].value_at(t.source_frame))
                                                                         }
                                                                         _ => vv_core::KeyframeValue::FilterDirection(kind, own.direction.value_at(t.source_frame)),
                                                                     };

@@ -1719,7 +1719,7 @@ impl TimelineDrag {
 /// (no ghost on the empty zones, no new tracks). The type shared
 /// with `EffectStack::filters` (`vv_core::FilterKind`) remains the single source
 /// of truth on "which filters exist": here their entries and labels.
-pub const FILTER_ENTRIES: [FilterEntry; 5] = [
+pub const FILTER_ENTRIES: [FilterEntry; 6] = [
     FilterEntry::plain(vv_core::FilterKind::ColorCorrection),
     FilterEntry {
         kind: vv_core::FilterKind::ColorCorrection,
@@ -1728,6 +1728,7 @@ pub const FILTER_ENTRIES: [FilterEntry; 5] = [
     FilterEntry::plain(vv_core::FilterKind::Exposure),
     FilterEntry::plain(vv_core::FilterKind::BoxBlur),
     FilterEntry::plain(vv_core::FilterKind::GaussianBlur),
+    FilterEntry::plain(vv_core::FilterKind::DropShadow),
 ];
 
 /// A filter of the Effects panel, the drag payload: a kind and, for the
@@ -1757,6 +1758,7 @@ pub fn filter_label(kind: vv_core::FilterKind) -> std::borrow::Cow<'static, str>
         vv_core::FilterKind::BoxBlur => t!("filter.box_blur"),
         vv_core::FilterKind::GaussianBlur => t!("filter.gaussian_blur"),
         vv_core::FilterKind::Exposure => t!("filter.exposure"),
+        vv_core::FilterKind::DropShadow => t!("filter.drop_shadow"),
     }
 }
 

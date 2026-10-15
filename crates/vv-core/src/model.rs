@@ -1028,6 +1028,7 @@ pub enum FilterKind {
     BoxBlur,
     GaussianBlur,
     Exposure,
+    DropShadow,
 }
 
 impl FilterKind {
@@ -1036,7 +1037,7 @@ impl FilterKind {
         matches!(self, Self::BoxBlur | Self::GaussianBlur)
     }
 
-    /// Whether `ClipFilter::amount` applies to it.
+    /// Whether `ClipFilter::amount` is the exposure in stops.
     pub fn has_amount(self) -> bool {
         self == Self::Exposure
     }
@@ -1052,6 +1053,10 @@ impl FilterKind {
 /// (about +18).
 pub const EXPOSURE_MIN: f32 = -20.0;
 pub const EXPOSURE_MAX: f32 = 20.0;
+
+/// Defaults of a `DropShadow` filter.
+pub const DEFAULT_SHADOW_OFFSET: [f32; 2] = [10.0, -10.0];
+pub const DEFAULT_SHADOW_OPACITY: f32 = 75.0;
 
 /// Bounds of `ClipFilter::radius`, in timeline pixels.
 pub const BLUR_RADIUS_MAX: f32 = 250.0;
@@ -1102,13 +1107,18 @@ impl Lerp for BlurDirection {
 pub struct ClipFilter {
     pub kind: FilterKind,
     pub enabled: bool,
-    /// Blurs only: in timeline pixels, as seen with the clip at zoom 1.
+    /// Blurs and drop shadow (its softness): in timeline pixels, for blurs as
+    /// seen with the clip at zoom 1.
     pub radius: Keyframed<f32>,
     pub direction: Keyframed<BlurDirection>,
-    /// Exposure only: in stops.
+    /// Exposure: in stops. Drop shadow: opacity, 0-100.
     pub amount: Keyframed<f32>,
     /// Color correction only.
     pub grade: GradeTracks,
+    /// Drop shadow only: in timeline pixels, Y upwards.
+    pub offset: [Keyframed<f32>; 2],
+    /// Drop shadow only.
+    pub color: Rgba,
 }
 
 /// `ClipFilter` as saved, older files included.
@@ -1124,6 +1134,18 @@ struct StoredClipFilter {
     amount: Keyframed<f32>,
     #[serde(default)]
     grade: GradeTracks,
+    #[serde(default = "default_shadow_offset")]
+    offset: [Keyframed<f32>; 2],
+    #[serde(default = "default_shadow_color")]
+    color: Rgba,
+}
+
+fn default_shadow_offset() -> [Keyframed<f32>; 2] {
+    DEFAULT_SHADOW_OFFSET.map(Keyframed::constant)
+}
+
+fn default_shadow_color() -> Rgba {
+    Rgba::BLACK
 }
 
 /// `FilterKind` plus the kinds that no longer exist.
@@ -1135,6 +1157,7 @@ enum StoredFilterKind {
     BoxBlur,
     GaussianBlur,
     Exposure,
+    DropShadow,
 }
 
 impl From<StoredClipFilter> for ClipFilter {
@@ -1148,6 +1171,7 @@ impl From<StoredClipFilter> for ClipFilter {
             StoredFilterKind::BoxBlur => (FilterKind::BoxBlur, stored.grade),
             StoredFilterKind::GaussianBlur => (FilterKind::GaussianBlur, stored.grade),
             StoredFilterKind::Exposure => (FilterKind::Exposure, stored.grade),
+            StoredFilterKind::DropShadow => (FilterKind::DropShadow, stored.grade),
         };
         Self {
             kind,
@@ -1156,6 +1180,8 @@ impl From<StoredClipFilter> for ClipFilter {
             direction: stored.direction,
             amount: stored.amount,
             grade,
+            offset: stored.offset,
+            color: stored.color,
         }
     }
 }
@@ -1172,6 +1198,8 @@ pub struct FilterValue {
     pub direction: BlurDirection,
     pub amount: f32,
     pub grade: GradeValue,
+    pub offset: [f32; 2],
+    pub color: Rgba,
 }
 
 impl FilterValue {
@@ -1180,9 +1208,18 @@ impl FilterValue {
             kind,
             radius: DEFAULT_BLUR_RADIUS,
             direction: BlurDirection::Both,
-            amount: 0.0,
+            amount: default_amount(kind),
             grade: GradeValue::NEUTRAL,
+            offset: DEFAULT_SHADOW_OFFSET,
+            color: Rgba::BLACK,
         }
+    }
+}
+
+const fn default_amount(kind: FilterKind) -> f32 {
+    match kind {
+        FilterKind::DropShadow => DEFAULT_SHADOW_OPACITY,
+        _ => 0.0,
     }
 }
 
@@ -1193,8 +1230,10 @@ impl ClipFilter {
             enabled: true,
             radius: Keyframed::constant(DEFAULT_BLUR_RADIUS),
             direction: Keyframed::constant(BlurDirection::Both),
-            amount: Keyframed::constant(0.0),
+            amount: Keyframed::constant(default_amount(kind)),
             grade: GradeTracks::default(),
+            offset: default_shadow_offset(),
+            color: Rgba::BLACK,
         }
     }
 
@@ -1205,6 +1244,11 @@ impl ClipFilter {
             direction: self.direction.value_at(frame),
             amount: self.amount.value_at(frame),
             grade: self.grade.value_at(frame),
+            offset: [
+                self.offset[0].value_at(frame),
+                self.offset[1].value_at(frame),
+            ],
+            color: self.color,
         }
     }
 }
@@ -1468,6 +1512,7 @@ impl EffectStack {
         for filter in &mut self.filters {
             f(&mut filter.radius);
             f(&mut filter.amount);
+            filter.offset.iter_mut().for_each(&mut f);
             filter.grade.tracks_mut().for_each(&mut f);
         }
         for mask in &mut self.masks {

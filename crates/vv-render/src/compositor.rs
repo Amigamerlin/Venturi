@@ -64,6 +64,7 @@ fn shader_matrix_id(matrix: ColorMatrix) -> f32 {
 }
 
 /// 8-bit YUV420 frame with the color metadata. Dense planes, no padding.
+#[derive(Clone, Copy)]
 pub struct YuvFrame<'a> {
     pub y: &'a [u8],
     pub width: u32,
@@ -128,6 +129,7 @@ impl<'a> Layer<'a> {
 
 /// `Solid` and `Text` are treated as sources as large as the timeline: same
 /// transform/crop.
+#[derive(Clone, Copy)]
 pub enum LayerContent<'a> {
     Video {
         frame: YuvFrame<'a>,
@@ -167,7 +169,9 @@ fn filter_shader_id(kind: vv_core::FilterKind) -> f32 {
     match kind {
         vv_core::FilterKind::ColorCorrection => 1.0,
         vv_core::FilterKind::Exposure => 2.0,
-        vv_core::FilterKind::BoxBlur | vv_core::FilterKind::GaussianBlur => 0.0,
+        vv_core::FilterKind::BoxBlur
+        | vv_core::FilterKind::GaussianBlur
+        | vv_core::FilterKind::DropShadow => 0.0,
     }
 }
 
@@ -191,6 +195,8 @@ struct FilterChain {
     leading: Vec<vv_core::FilterValue>,
     /// Each blur with the per-pixel filters following it.
     blurs: Vec<(Blur, Vec<vv_core::FilterValue>)>,
+    /// Cast by the layer as it ends up, wherever it is in the list.
+    shadow: Option<vv_core::FilterValue>,
 }
 
 impl FilterChain {
@@ -198,7 +204,9 @@ impl FilterChain {
     fn new(filters: &[vv_core::FilterValue], uniform: bool) -> Self {
         let mut chain = Self::default();
         for filter in filters {
-            if filter.kind.is_blur() {
+            if filter.kind == vv_core::FilterKind::DropShadow {
+                chain.shadow = Some(*filter);
+            } else if filter.kind.is_blur() {
                 if filter.radius > 0.0 && !uniform {
                     let blur = Blur {
                         gaussian: filter.kind == vv_core::FilterKind::GaussianBlur,
@@ -216,6 +224,13 @@ impl FilterChain {
         }
         chain
     }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ShadowUniform {
+    color: [f32; 4],
+    offset: [f32; 4],
 }
 
 #[repr(C)]
@@ -542,6 +557,7 @@ struct WorkPipelines {
     /// other than Normal (see `blend_shader_id`).
     blend: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
 }
 
 impl WorkPipelines {
@@ -609,41 +625,54 @@ impl WorkPipelines {
             format,
         );
 
-        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vv-render blur shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
-        });
-        let blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vv-render blur pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &blur_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blur_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let fullscreen_pipeline = |label, source: &str, blend| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blur = fullscreen_pipeline(
+            "vv-render blur pipeline",
+            include_str!("shaders/blur.wgsl"),
+            wgpu::BlendState::REPLACE,
+        );
+        let shadow = fullscreen_pipeline(
+            "vv-render shadow pipeline",
+            include_str!("shaders/shadow.wgsl"),
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
 
         Self {
             format,
             normal,
             blend,
             blur,
+            shadow,
         }
     }
 }
@@ -1354,6 +1383,39 @@ impl Compositor {
                 &self.work.blend
             };
             let chain = FilterChain::new(filters, matches!(content, LayerContent::Solid(_)));
+            // An adjustment has no shape of its own to cast.
+            if let Some(shadow) = chain.shadow.filter(|_| !is_adjustment) {
+                if first {
+                    self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
+                    first = false;
+                }
+                let unshadowed: Vec<_> = filters
+                    .iter()
+                    .filter(|f| f.kind != vv_core::FilterKind::DropShadow)
+                    .copied()
+                    .collect();
+                let alone = Layer {
+                    content: *content,
+                    transform: *transform,
+                    opacity: *opacity,
+                    filters: &unshadowed,
+                    blend: BlendMode::Normal,
+                    masks,
+                };
+                let cast = self.compose_into(
+                    self.scratch_texture(output.width, output.height),
+                    std::slice::from_ref(&alone),
+                    output,
+                    TRANSPARENT,
+                );
+                backdrops.extend(self.shadow_pass(
+                    &mut encoder,
+                    &output_view,
+                    cast,
+                    &shadow,
+                    output,
+                ));
+            }
             if let Some((_, trailing)) = chain.blurs.last() {
                 if first {
                     self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
@@ -1739,6 +1801,92 @@ impl Compositor {
             }
         }
         (current, texture_size, source_size)
+    }
+
+    /// Draws onto `target` the shadow of `layer`, the layer composed by
+    /// itself. Returns the textures to give back once the encoder has run.
+    fn shadow_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        layer: wgpu::Texture,
+        shadow: &vv_core::FilterValue,
+        output: OutputFrame,
+    ) -> Vec<Option<wgpu::Texture>> {
+        let (timeline_w, timeline_h) = (
+            output.timeline_size.0.max(1) as f32,
+            output.timeline_size.1.max(1) as f32,
+        );
+        let size = (output.width, output.height);
+        let radius = shadow.radius.max(0.0) * output.width as f32 / timeline_w;
+        let mut current = layer;
+        let mut used = Vec::new();
+        if radius > 0.0 {
+            let blur = Blur {
+                gaussian: true,
+                radius,
+                direction: vv_core::BlurDirection::Both,
+            };
+            for axis in 0..2 {
+                let next = self.scratch_texture(size.0, size.1);
+                self.blur_pass(
+                    encoder,
+                    &current,
+                    &next,
+                    BlurUniform::new(blur, radius, size, axis),
+                );
+                used.push(Some(std::mem::replace(&mut current, next)));
+            }
+        }
+        let uniform = ShadowUniform {
+            color: [
+                shadow.color.r,
+                shadow.color.g,
+                shadow.color.b,
+                shadow.color.a * (shadow.amount / 100.0).clamp(0.0, 1.0),
+            ],
+            // Y upwards in the timeline, downwards in uv.
+            offset: [
+                shadow.offset[0] / timeline_w,
+                -shadow.offset[1] / timeline_h,
+                0.0,
+                0.0,
+            ],
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vv-render shadow uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let layer_view = current.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vv-render shadow bind group"),
+            layout: &self.work.shadow.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&layer_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.pass(
+            encoder,
+            target,
+            wgpu::LoadOp::Load,
+            Some((&bind_group, &self.work.shadow)),
+        );
+        used.push(Some(current));
+        used
     }
 
     fn blur_pass(
