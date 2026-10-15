@@ -337,6 +337,7 @@ fn rasterize(
         let dx = scale_px(shadow.offset[0]).round() as i32;
         let dy = -scale_px(shadow.offset[1]).round() as i32;
         let mut mask = shifted(&text, dx, dy);
+        grow(&mut mask, scale_px(shadow.grow));
         blur(&mut mask, scale_px(shadow.blur).max(0.0));
         layers.push((mask, with_opacity(shadow.color, shadow.opacity)));
     }
@@ -440,6 +441,95 @@ fn blur(mask: &mut TextMask, radius: f32) {
                 mask.data[(ys.start + y) * w + x] = v
             });
         }
+    }
+}
+
+/// Thickens the mask by `radius` pixels with round corners, from the exact
+/// distance to the covered pixels, antialiasing the new edge.
+fn grow(mask: &mut TextMask, radius: f32) {
+    if radius <= 0.0 {
+        return;
+    }
+    let Some((x0, y0, x1, y1)) = coverage_bounds(mask) else {
+        return;
+    };
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let reach = radius.ceil() as usize + 1;
+    let xs = x0.saturating_sub(reach)..(x1 + reach + 1).min(w);
+    let ys = y0.saturating_sub(reach)..(y1 + reach + 1).min(h);
+    let (rw, rh) = (xs.len(), ys.len());
+    // Squared distance to the nearest pixel at least half covered.
+    let mut dist: Vec<f32> = ys
+        .clone()
+        .flat_map(|y| mask.data[y * w + xs.start..y * w + xs.end].iter())
+        .map(|&v| if v >= 128 { 0.0 } else { f32::MAX })
+        .collect();
+    let mut line = Vec::new();
+    let mut out = Vec::new();
+    for x in 0..rw {
+        line.clear();
+        line.extend((0..rh).map(|y| dist[y * rw + x]));
+        squared_distance_1d(&line, &mut out);
+        for (y, &d) in out.iter().enumerate() {
+            dist[y * rw + x] = d;
+        }
+    }
+    for row in dist.chunks_exact_mut(rw) {
+        line.clear();
+        line.extend_from_slice(row);
+        squared_distance_1d(&line, &mut out);
+        row.copy_from_slice(&out);
+    }
+    for (ry, y) in ys.enumerate() {
+        for (rx, x) in xs.clone().enumerate() {
+            // Center to center: the covered pixel's edge is half a pixel closer.
+            let cover = (radius + 1.0 - dist[ry * rw + rx].sqrt()).clamp(0.0, 1.0);
+            let value = &mut mask.data[y * w + x];
+            *value = (*value).max((cover * 255.0).round() as u8);
+        }
+    }
+}
+
+/// One pass of the Felzenszwalb–Huttenlocher distance transform: `out[q]` =
+/// min over p of `f[p] + (q - p)²`. `f32::MAX` marks the points to ignore.
+fn squared_distance_1d(f: &[f32], out: &mut Vec<f32>) {
+    out.clear();
+    let n = f.len();
+    let sources: Vec<usize> = (0..n).filter(|&p| f[p] < f32::MAX).collect();
+    if sources.is_empty() {
+        out.resize(n, f32::MAX);
+        return;
+    }
+    // Lower envelope of the parabolas rooted at `sources`.
+    let mut roots: Vec<usize> = Vec::with_capacity(sources.len());
+    let mut bounds: Vec<f32> = Vec::with_capacity(sources.len() + 1);
+    let cross = |p: usize, q: usize| {
+        let (p_, q_) = (p as f32, q as f32);
+        ((f[q] + q_ * q_) - (f[p] + p_ * p_)) / (2.0 * (q_ - p_))
+    };
+    for &q in &sources {
+        while let Some(&p) = roots.last() {
+            if roots.len() > 1 && cross(p, q) <= bounds[roots.len() - 1] {
+                roots.pop();
+                bounds.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(&p) = roots.last() {
+            bounds.push(cross(p, q));
+        } else {
+            bounds.push(f32::NEG_INFINITY);
+        }
+        roots.push(q);
+    }
+    let mut k = 0;
+    for q in 0..n {
+        while k + 1 < roots.len() && bounds[k + 1] < q as f32 {
+            k += 1;
+        }
+        let d = q as f32 - roots[k] as f32;
+        out.push(f[roots[k]] + d * d);
     }
 }
 

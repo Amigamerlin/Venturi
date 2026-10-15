@@ -130,6 +130,9 @@ props.offset:
   en: "Offset"
   it: "Offset"
 
+props.grow:
+  en: "Grow"
+  it: "Espansione"
 props.blur:
   en: "Blur"
   it: "Sfocatura"

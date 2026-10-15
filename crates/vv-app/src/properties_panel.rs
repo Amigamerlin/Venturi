@@ -460,6 +460,7 @@ pub(crate) fn title_editor(
                 shadow.offset = d.offset;
             }
             for (label, value, default, range) in [
+                (t!("props.grow"), &mut shadow.grow, d.grow, 0.0..=100.0),
                 (t!("props.blur"), &mut shadow.blur, d.blur, 0.0..=200.0),
                 (
                     t!("props.opacity"),
@@ -624,7 +625,7 @@ pub(crate) fn apply_title_edit(
             })*
         };
     }
-    copy_changed!(shadow: enabled, color, offset, blur, opacity);
+    copy_changed!(shadow: enabled, color, offset, grow, blur, opacity);
     copy_changed!(
         background: enabled,
         color,

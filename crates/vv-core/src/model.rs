@@ -899,6 +899,10 @@ pub struct TitleShadow {
     pub color: Rgba,
     /// In timeline pixels, Y upwards.
     pub offset: [f32; 2],
+    /// How much the shadow is thickened around the text before the blur, in
+    /// timeline pixels.
+    #[serde(default)]
+    pub grow: f32,
     /// Blur radius, in timeline pixels.
     pub blur: f32,
     /// 0-100.
@@ -911,6 +915,7 @@ impl Default for TitleShadow {
             enabled: false,
             color: Rgba::BLACK,
             offset: [8.0, -8.0],
+            grow: 0.0,
             blur: 6.0,
             opacity: 75.0,
         }

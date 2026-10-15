@@ -112,6 +112,46 @@ fn shadow_follows_the_offset_and_spreads_with_blur() {
 }
 
 #[test]
+fn grow_thickens_by_the_radius_with_round_corners() {
+    let (w, h) = (40usize, 40usize);
+    let mut mask = TextMask {
+        width: w as u32,
+        height: h as u32,
+        data: vec![0; w * h],
+    };
+    for y in 18..22 {
+        for x in 18..22 {
+            mask.data[y * w + x] = 255;
+        }
+    }
+    grow(&mut mask, 5.0);
+    assert_eq!(covered_bounds(&mask), Some((13, 13, 26, 26)));
+    let at = |x: usize, y: usize| mask.data[y * w + x];
+    assert_eq!(at(13, 20), 255, "full on the sides");
+    assert_eq!(at(13, 13), 0, "corner rounded off");
+}
+
+#[test]
+fn shadow_grows_before_the_blur() {
+    let shadow = |grow| TitleParams {
+        shadow: vv_core::TitleShadow {
+            enabled: true,
+            grow,
+            blur: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let width = |m: &TextMask| {
+        let (x0, _, x1, _) = covered_bounds(m).unwrap();
+        x1 - x0
+    };
+    let thin = render_title(&shadow(0.0), (640, 360), (640, 360));
+    let thick = render_title(&shadow(6.0), (640, 360), (640, 360));
+    assert_eq!(width(&thick.layers[0].0), width(&thin.layers[0].0) + 12);
+}
+
+#[test]
 fn output_smaller_than_timeline_scales_the_text() {
     let full = render_title(&TitleParams::default(), (640, 360), (640, 360));
     let half = render_title(&TitleParams::default(), (640, 360), (320, 180));
