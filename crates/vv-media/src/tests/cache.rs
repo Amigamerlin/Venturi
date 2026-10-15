@@ -297,8 +297,8 @@ fn shared_cache_get_near_stays_within_the_stride_and_the_clip() {
     assert!(cache.get_near(media_a, 11, 0, 100).is_none(), "exact without a stride");
 
     cache.set_stride(media_a, 2);
-    assert_eq!(cache.get_near(media_a, 11, 0, 100).unwrap().byte_len(), 4, "earlier first");
-    assert_eq!(cache.get_near(media_a, 13, 0, 100).unwrap().byte_len(), 8, "12 missing");
+    assert_eq!(cache.get_near(media_a, 11, 0, 100).unwrap().0.byte_len(), 4, "earlier first");
+    assert_eq!(cache.get_near(media_a, 13, 0, 100).unwrap().0.byte_len(), 8, "12 missing");
     assert!(cache.get_near(media_a, 12, 0, 100).is_none(), "neither neighbour is cached");
     assert!(
         cache.get_near(media_a, 11, 11, 100).is_none(),
@@ -314,4 +314,65 @@ fn shared_cache_remove_media_forgets_its_stride() {
     cache.set_stride(media_a, 3);
     cache.remove_media(media_a);
     assert_eq!(cache.stride(media_a), 1);
+}
+
+#[test]
+fn shared_cache_get_near_says_how_it_served() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    cache.insert(media_a, 10, frame_of_size(4));
+    cache.set_stride(media_a, 2);
+    assert_eq!(cache.get_near(media_a, 10, 0, 100).unwrap().1, Served::Exact);
+    assert_eq!(cache.get_near(media_a, 11, 0, 100).unwrap().1, Served::Neighbour);
+}
+
+/// Keyframes only: the latest frame before, within the clip; at the clip's
+/// start, before its first keyframe, the next one inside it rather than a
+/// frame of the footage trimmed away.
+#[test]
+fn shared_cache_with_keyframes_only_stands_in_the_nearest_keyframe_in_the_clip() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    cache.insert(media_a, 5500, frame_of_size(4));
+    cache.insert(media_a, 5750, frame_of_size(8));
+    cache.insert(media_a, 6000, frame_of_size(12));
+    assert!(cache.get_near(media_a, 5800, 5607, 6084).is_none(), "off: exact only");
+
+    cache.set_keyframes_only(media_a, true);
+    let served = |idx| {
+        cache
+            .get_near(media_a, idx, 5607, 6084)
+            .map(|(f, how)| (f.byte_len(), how))
+    };
+    assert_eq!(served(5800), Some((8, Served::Keyframe)));
+    assert_eq!(served(6000), Some((12, Served::Exact)));
+    assert_eq!(served(5610), Some((8, Served::Keyframe)), "5500 is trimmed away");
+
+    cache.set_keyframes_only(media_a, false);
+    assert!(served(5800).is_none());
+}
+
+#[test]
+fn shared_cache_keyframes_only_media_replaces_the_whole_set() {
+    let (media_a, media_b) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    assert!(!cache.any_keyframes_only());
+    cache.set_keyframes_only(media_a, true);
+    cache.set_keyframes_only_media([media_b].into());
+    assert!(!cache.keyframes_only(media_a), "out of the set: off");
+    assert!(cache.keyframes_only(media_b));
+    cache.set_keyframes_only_media(Default::default());
+    assert!(!cache.any_keyframes_only());
+}
+
+#[test]
+fn shared_cache_keyframe_ranges_join_the_keyframes_of_a_media_in_keyframe_mode() {
+    let (media_a, _) = two_media_ids();
+    let cache = SharedFrameCache::new();
+    for idx in [250, 500, 750, 5000] {
+        cache.insert(media_a, idx, frame_of_size(4));
+    }
+    assert!(cache.keyframe_ranges(media_a).is_empty(), "not in keyframe mode");
+    cache.set_keyframes_only(media_a, true);
+    assert_eq!(cache.keyframe_ranges(media_a), [(250, 750), (5000, 5000)]);
 }

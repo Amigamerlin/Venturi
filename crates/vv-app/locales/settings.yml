@@ -66,6 +66,12 @@ settings.fast_playback_shown_frames_only:
 settings.fast_playback_shown_frames_only_hint:
   en: "At 2x only one frame in 2 is shown (at 4x one in 4, and so on): buffering only those leaves decoding and RAM to the frames that are seen, so fast playback stays smooth on heavy sources. When playback stops, the frames in between are decoded again."
   it: "A 2x si vede solo un frame ogni 2 (a 4x uno ogni 4, e così via): bufferizzando solo quelli, decodifica e RAM restano ai frame che si vedono e il playback veloce resta fluido anche con sorgenti pesanti. Quando la riproduzione si ferma, i frame intermedi vengono decodificati di nuovo."
+settings.keyframes_when_behind:
+  en: "Show keyframes when decoding falls behind"
+  it: "Mostra i keyframe quando la decodifica resta indietro"
+settings.keyframes_when_behind_hint:
+  en: "Above 1x, a source the computer cannot decode fast enough shows only its keyframes, smoothly, instead of freezing; in a scrub, a far frame shows its keyframe at once while the exact one is decoded. A KEYFRAMES badge appears in the viewer meanwhile. Paused, the frame shown is always the exact one."
+  it: "Sopra 1x, una sorgente che il computer non riesce a decodificare abbastanza in fretta mostra solo i suoi keyframe, senza bloccarsi; durante uno scrub, un frame lontano mostra subito il suo keyframe mentre quello esatto viene decodificato. Nel frattempo nel viewer compare il badge KEYFRAME. In pausa il frame mostrato è sempre quello esatto."
 settings.video_cache:
   en: "Video cache:"
   it: "Cache video:"

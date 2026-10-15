@@ -545,6 +545,9 @@ pub struct Settings {
     pub behind_secs: f64,
     /// At speeds above 1x, buffer only the frames playback shows.
     pub fast_playback_shown_frames_only: bool,
+    /// A media the decoder cannot keep up with, above 1x or in a scrub,
+    /// shows its keyframes meanwhile.
+    pub keyframes_when_behind: bool,
     /// Memory budget for the decoded frame cache of every `RenderAhead`.
     pub cache_budget_bytes: usize,
     /// Memory budget for the timeline audio (`MixBufferCache`).
@@ -625,6 +628,7 @@ impl Default for Settings {
             lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: crate::render_ahead::DEFAULT_BEHIND_SECS,
             fast_playback_shown_frames_only: true,
+            keyframes_when_behind: true,
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
             audio_budget_bytes: crate::mix_buffers::DEFAULT_AUDIO_BUDGET_BYTES,
             hw_decode: Default::default(),
@@ -684,6 +688,8 @@ struct SettingsFile {
     behind_secs: Option<f64>,
     #[serde(default)]
     fast_playback_shown_frames_only: Option<bool>,
+    #[serde(default)]
+    keyframes_when_behind: Option<bool>,
     #[serde(default)]
     cache_budget_mb: Option<u32>,
     #[serde(default)]
@@ -786,6 +792,9 @@ impl Settings {
         settings.fast_playback_shown_frames_only = file
             .fast_playback_shown_frames_only
             .unwrap_or(settings.fast_playback_shown_frames_only);
+        settings.keyframes_when_behind = file
+            .keyframes_when_behind
+            .unwrap_or(settings.keyframes_when_behind);
         settings.cache_budget_bytes = file
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
@@ -885,6 +894,7 @@ impl Settings {
             lookahead_secs: Some(self.lookahead_secs),
             behind_secs: Some(self.behind_secs),
             fast_playback_shown_frames_only: Some(self.fast_playback_shown_frames_only),
+            keyframes_when_behind: Some(self.keyframes_when_behind),
             cache_budget_mb: Some((self.cache_budget_bytes / 1_000_000) as u32),
             audio_budget_mb: Some((self.audio_budget_bytes / 1_000_000) as u32),
             hw_decode: Some(self.hw_decode.id().to_owned()),

@@ -6,6 +6,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use vv_core::{FrameIdx, MediaId};
 
+/// How far `get_near` looks for a keyframe standing in: past the longest GOPs
+/// cameras write (10 s at 60 fps is 600 frames).
+const MAX_KEYFRAME_DISTANCE: FrameIdx = 1200;
+
+/// How `get_near` found the frame it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    Exact,
+    /// Within the stride: fast playback shows no frame in between.
+    Neighbour,
+    /// A keyframe in place of a frame the decoder cannot reach in time.
+    Keyframe,
+}
+
 /// Stretch of source frames wanted by the current window, with its
 /// position on the timeline: used to measure the distance from the playhead.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +71,8 @@ struct SharedInner {
     bytes_used: usize,
     /// See `set_stride`; absent means 1.
     strides: HashMap<MediaId, FrameIdx>,
+    /// See `set_keyframes_only`.
+    keyframes_only: std::collections::HashSet<MediaId>,
 }
 
 /// Cache of the frames of every media in the window, keyed by
@@ -79,6 +95,7 @@ impl SharedFrameCache {
                 entries: HashMap::new(),
                 bytes_used: 0,
                 strides: HashMap::new(),
+                keyframes_only: Default::default(),
             }),
         }
     }
@@ -95,21 +112,63 @@ impl SharedFrameCache {
     /// `idx`, or else the nearest cached frame within the stride of the media
     /// and within `lo..=hi` (the clip's source frames, widened to `idx`: a
     /// transition shows frames past the trim), earlier first: with a stride
-    /// the frames in between are not decoded at all.
+    /// the frames in between are not decoded at all. With `set_keyframes_only`,
+    /// else the nearest earlier frame in the clip, or the nearest later one
+    /// at its start, before the first keyframe inside it.
     pub fn get_near(
         &self,
         media_id: MediaId,
         idx: FrameIdx,
         lo: FrameIdx,
         hi: FrameIdx,
-    ) -> Option<Arc<FrameYuv420>> {
+    ) -> Option<(Arc<FrameYuv420>, Served)> {
         let inner = self.inner.lock().unwrap();
         let stride = inner.stride(media_id);
         let clip = lo.min(idx)..=hi.max(idx);
-        (0..stride)
-            .flat_map(|d| [idx - d, idx + d])
-            .filter(|i| clip.contains(i))
-            .find_map(|i| inner.entries.get(&(media_id, i)).cloned())
+        let cached = |i: FrameIdx| {
+            clip.contains(&i)
+                .then(|| inner.entries.get(&(media_id, i)).cloned())
+                .flatten()
+        };
+        if let Some(frame) = cached(idx) {
+            return Some((frame, Served::Exact));
+        }
+        if let Some(frame) = (1..stride).flat_map(|d| [idx - d, idx + d]).find_map(cached) {
+            return Some((frame, Served::Neighbour));
+        }
+        if !inner.keyframes_only.contains(&media_id) {
+            return None;
+        }
+        (1..=MAX_KEYFRAME_DISTANCE)
+            .map(|d| idx - d)
+            .chain((1..=MAX_KEYFRAME_DISTANCE).map(|d| idx + d))
+            .find_map(cached)
+            .map(|frame| (frame, Served::Keyframe))
+    }
+
+    /// The decoder cannot keep up with `media_id`: only keyframes are
+    /// decoded, and `get_near` stands one in for any frame missing.
+    pub fn set_keyframes_only(&self, media_id: MediaId, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if on {
+            inner.keyframes_only.insert(media_id);
+        } else {
+            inner.keyframes_only.remove(&media_id);
+        }
+    }
+
+    /// `set_keyframes_only` for exactly `media`, off for any other.
+    pub fn set_keyframes_only_media(&self, media: std::collections::HashSet<MediaId>) {
+        self.inner.lock().unwrap().keyframes_only = media;
+    }
+
+    /// Some media has keyframes standing in for its frames.
+    pub fn any_keyframes_only(&self) -> bool {
+        !self.inner.lock().unwrap().keyframes_only.is_empty()
+    }
+
+    pub fn keyframes_only(&self, media_id: MediaId) -> bool {
+        self.inner.lock().unwrap().keyframes_only.contains(&media_id)
     }
 
     /// Only the frames at multiples of `stride` are wanted for `media_id`
@@ -166,6 +225,7 @@ impl SharedFrameCache {
         let mut inner = self.inner.lock().unwrap();
         let inner = &mut *inner;
         inner.strides.remove(&media_id);
+        inner.keyframes_only.remove(&media_id);
         let bytes_used = &mut inner.bytes_used;
         inner.entries.retain(|&(m, _), frame| {
             let keep = m != media_id;
@@ -240,6 +300,30 @@ impl SharedFrameCache {
         let has_multiple = start + (-start).rem_euclid(stride) <= end;
         start > end
             || self.covers(media_id, start, end) && (has_multiple || self.contains(media_id, start))
+    }
+
+    /// For a media with `set_keyframes_only`, the stretches its cached frames
+    /// stand in for, from one to the next: empty for any other.
+    pub fn keyframe_ranges(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
+        let inner = self.inner.lock().unwrap();
+        if !inner.keyframes_only.contains(&media_id) {
+            return Vec::new();
+        }
+        let mut indices: Vec<FrameIdx> = inner
+            .entries
+            .keys()
+            .filter(|&&(m, _)| m == media_id)
+            .map(|&(_, idx)| idx)
+            .collect();
+        indices.sort_unstable();
+        let mut ranges: Vec<(FrameIdx, FrameIdx)> = Vec::new();
+        for idx in indices {
+            match ranges.last_mut() {
+                Some((_, end)) if idx <= *end + MAX_KEYFRAME_DISTANCE => *end = idx,
+                _ => ranges.push((idx, idx)),
+            }
+        }
+        ranges
     }
 
     /// Contiguous (inclusive) intervals currently cached for a media — for

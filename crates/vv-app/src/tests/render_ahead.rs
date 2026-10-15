@@ -3112,6 +3112,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         timeline_start: 5,
         rate: Rational::one(),
     };
+    let pacing = RefCell::new(Pacing::default());
     let ctx = FillContext {
         project: &project,
         caches: &caches,
@@ -3124,6 +3125,9 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         jumps: 0,
         window: &[],
         hw_priority: HwPriority::Normal,
+        keyframe_first: false,
+        pacing: &pacing,
+        decide_by: None,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3187,6 +3191,7 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         timeline_start: 80,
         rate: Rational::one(),
     };
+    let pacing = RefCell::new(Pacing::default());
     let ctx = FillContext {
         project: &project,
         caches: &caches,
@@ -3199,6 +3204,9 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         jumps: 0,
         window: &[],
         hw_priority: HwPriority::Normal,
+        keyframe_first: false,
+        pacing: &pacing,
+        decide_by: None,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3285,6 +3293,7 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
     // if that space is not needed by the transit at all) blocked it
     // anyway.
     let budget_enough_for_the_wanted_range_but_not_the_full_transit = frame_bytes * 20;
+    let pacing = RefCell::new(Pacing::default());
     let ctx = FillContext {
         project: &project,
         caches: &caches,
@@ -3297,6 +3306,9 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
         jumps: 0,
         window: &[],
         hw_priority: HwPriority::Normal,
+        keyframe_first: false,
+        pacing: &pacing,
+        decide_by: None,
     };
     let outcome = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3471,6 +3483,7 @@ fn fill_segments_caches_only_the_transit_some_window_wants() {
     let window = [range(60, 79), segment];
     let caches = SharedFrameCache::new();
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    let pacing = RefCell::new(Pacing::default());
     let ctx = FillContext {
         project: &project,
         caches: &caches,
@@ -3483,6 +3496,9 @@ fn fill_segments_caches_only_the_transit_some_window_wants() {
         jumps: 0,
         window: &window,
         hw_priority: HwPriority::Normal,
+        keyframe_first: false,
+        pacing: &pacing,
+        decide_by: None,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3526,6 +3542,7 @@ fn fill_segments_is_interrupted_by_a_jump_below_the_seek_threshold() {
     target.jumps.fetch_add(1, Ordering::Relaxed);
     let caches = SharedFrameCache::new();
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    let pacing = RefCell::new(Pacing::default());
     let ctx = FillContext {
         project: &project,
         caches: &caches,
@@ -3538,6 +3555,9 @@ fn fill_segments_is_interrupted_by_a_jump_below_the_seek_threshold() {
         jumps: 0,
         window: std::slice::from_ref(&segment),
         hw_priority: HwPriority::Normal,
+        keyframe_first: false,
+        pacing: &pacing,
+        decide_by: None,
     };
 
     let flow = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -4024,7 +4044,7 @@ fn walk_and_fill_fills_the_gaps_when_the_stride_goes_back_to_one() {
     assert!(outcome.caught_up);
     assert_eq!(caches.stride(media), 1);
     assert!((31..60).all(|i| caches.contains(media, i)));
-    assert!(caches.get_near(media, 33, 0, 59).is_some());
+    assert_eq!(caches.get_near(media, 33, 0, 59).map(|(_, how)| how), Some(vv_media::Served::Exact));
 }
 
 /// A freeze frame is one source frame, here not a multiple: it must still be
@@ -4081,6 +4101,433 @@ fn walk_and_fill_gives_a_media_the_smallest_stride_of_its_clips() {
 
     assert_eq!(caches.stride(media), 2, "not the 4 of the clip at 200%");
 }
+
+/// 8 s at 25 fps with a keyframe every 25 frames, one clip over all of it.
+fn project_with_gop_25(file_name: &str) -> (Project, TimelineId, MediaId) {
+    let path = make_test_clip_with_short_gop("vv-app-render-ahead-test", file_name, 8, 25);
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path,
+        meta: MediaMeta {
+            duration_frames: 200,
+            fps: Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 0,
+        compound: None,
+        folder: None,
+    });
+    let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+        kind: TrackKind::Video,
+        clips: vec![media_clip(1, media, 0, 200)],
+        ..Track::new(TrackKind::Video)
+    }]));
+    (project, timeline_id, media)
+}
+
+fn playing_target(frame: FrameIdx, speed: f64) -> LiveTarget {
+    let target = LiveTarget::still(frame);
+    store_secs(&target.speed, speed);
+    target.keyframes_when_behind.store(true, Ordering::Relaxed);
+    target
+}
+
+fn fill_paced(
+    project: &Project,
+    timeline_id: TimelineId,
+    caches: &SharedFrameCache,
+    open: &mut HashMap<MediaId, OpenDecoder>,
+    from: FrameIdx,
+    target: &LiveTarget,
+    pacing: &RefCell<Pacing>,
+) -> WalkOutcome {
+    walk_and_fill_paced(
+        project,
+        timeline_id,
+        caches,
+        open,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        from,
+        320 * 240 * 4 * 400,
+        false,
+        None,
+        1,
+        DEFAULT_LOOKAHEAD_SECS,
+        0.0,
+        target,
+        pacing,
+    )
+}
+
+fn decide(
+    project: &Project,
+    timeline_id: TimelineId,
+    caches: &SharedFrameCache,
+    speed: f64,
+    pacing: &mut Pacing,
+) -> bool {
+    let timeline = &project.timelines[timeline_id];
+    let segments = collect_media_segments(project, timeline, 0, 75);
+    let gops = HashMap::from([(segments[0].media_id, 25)]);
+    !keyframes_only_media(project, 25.0, &segments, caches, None, &gops, 0, speed, true, pacing)
+        .is_empty()
+}
+
+#[test]
+fn keyframes_only_follows_the_measured_throughput_above_1x() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_throughput.mp4");
+    let caches = SharedFrameCache::new();
+    caches.insert(media, 0, Arc::new(dummy_frame()));
+    let mut pacing = Pacing::default();
+
+    pacing.throughput.insert((media, 1), 10.0);
+    assert!(!decide(&project, timeline_id, &caches, 1.0, &mut pacing), "never at 1x");
+    assert!(decide(&project, timeline_id, &caches, 2.0, &mut pacing), "50 needed: 2x too");
+    decide(&project, timeline_id, &caches, 0.0, &mut pacing);
+    pacing.throughput.insert((media, 1), 70.0);
+    assert!(!decide(&project, timeline_id, &caches, 4.0, &mut pacing), "100 needed, not 1.5 x 70");
+    pacing.throughput.insert((media, 1), 60.0);
+    assert!(decide(&project, timeline_id, &caches, 4.0, &mut pacing), "but 1.5 x 60");
+
+    pacing.throughput.insert((media, 1), 500.0);
+    assert!(
+        decide(&project, timeline_id, &caches, 4.0, &mut pacing),
+        "decided once per playback and speed"
+    );
+    assert!(!decide(&project, timeline_id, &caches, 8.0, &mut pacing), "a new speed decides again");
+    assert!(!decide(&project, timeline_id, &caches, 0.0, &mut pacing));
+    assert!(pacing.keyframes_only.is_empty(), "stopped: forgotten");
+}
+
+/// A playback of `media` watched for `secs`, with its frame missing all along.
+fn missing_all_along(pacing: &mut Pacing, media: MediaId, secs: u64) {
+    let now = Instant::now();
+    pacing.presence.insert(
+        media,
+        Presence {
+            since: now - Duration::from_secs(secs),
+            checked: now,
+            was_missing: true,
+            missing: Duration::from_secs(secs),
+        },
+    );
+}
+
+/// No throughput yet: the frame at the playhead missing for long enough sends
+/// the media to keyframes, and the next playback at that speed starts there.
+#[test]
+fn keyframes_only_starts_when_the_frame_at_the_playhead_stays_missing() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_stall.mp4");
+    let caches = SharedFrameCache::new();
+    let mut pacing = Pacing::default();
+
+    assert!(!decide(&project, timeline_id, &caches, 4.0, &mut pacing), "missing, not for long");
+    missing_all_along(&mut pacing, media, 3);
+    pacing
+        .missing_since
+        .insert(media, Instant::now() - Duration::from_millis(200));
+    assert!(!decide(&project, timeline_id, &caches, 4.0, &mut pacing), "under 250 ms");
+    pacing
+        .missing_since
+        .insert(media, Instant::now() - Duration::from_millis(260));
+    assert!(decide(&project, timeline_id, &caches, 4.0, &mut pacing));
+
+    decide(&project, timeline_id, &caches, 0.0, &mut pacing);
+    caches.insert(media, 0, Arc::new(dummy_frame()));
+    assert!(
+        decide(&project, timeline_id, &caches, 4.0, &mut pacing),
+        "fell behind at 4x before: straight to keyframes"
+    );
+    assert!(!decide(&project, timeline_id, &caches, 2.0, &mut pacing));
+}
+
+/// A long freeze in a playback that otherwise had its frames is a one-off (a
+/// cut, the disk): keyframes for the rest of it would be worse.
+#[test]
+fn keyframes_only_ignores_a_one_off_freeze() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_one_off.mp4");
+    let caches = SharedFrameCache::new();
+    let mut pacing = Pacing::default();
+    let now = Instant::now();
+    pacing.missing_since.insert(media, now - Duration::from_secs(2));
+    pacing.presence.insert(
+        media,
+        Presence {
+            since: now - Duration::from_secs(20),
+            checked: now - Duration::from_secs(2),
+            was_missing: true,
+            missing: Duration::ZERO,
+        },
+    );
+    assert!(!decide(&project, timeline_id, &caches, 4.0, &mut pacing), "2 s missing in 20");
+
+    pacing.presence.get_mut(&media).unwrap().missing = Duration::from_secs(12);
+    assert!(decide(&project, timeline_id, &caches, 4.0, &mut pacing), "14 s in 20");
+}
+
+/// The first frame of a clip coming late, at a cut, says nothing about the
+/// decoder keeping up: 2 s of the media's playback are watched first.
+#[test]
+fn keyframes_only_ignores_a_freeze_at_the_start_of_a_clip() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_clip_start.mp4");
+    let caches = SharedFrameCache::new();
+    let mut pacing = Pacing::default();
+    let now = Instant::now();
+    pacing.missing_since.insert(media, now - Duration::from_millis(400));
+    pacing.presence.insert(media, Presence::new(now - Duration::from_millis(400)));
+
+    assert!(!decide(&project, timeline_id, &caches, 4.0, &mut pacing));
+    assert!(pacing.fell_behind.is_empty(), "nothing remembered");
+}
+
+#[test]
+fn presence_counts_the_time_the_frame_was_missing() {
+    let start = Instant::now();
+    let mut presence = Presence::new(start);
+    presence.was_missing = false;
+    let share = presence.missing_share(start + Duration::from_secs(1), true);
+    assert_eq!(share, 0.0, "shown for the first second");
+    let share = presence.missing_share(start + Duration::from_secs(4), false);
+    assert!((share - 0.75).abs() < 1e-9, "{share}");
+}
+
+/// A GOP of 250 frames at 4x on 25 fps: keyframes only would show one every
+/// 2.5 s, so a shorter freeze in normal playback is still the lesser evil.
+#[test]
+fn keyframes_only_waits_for_a_freeze_longer_than_the_gap_between_keyframes() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_long_gop.mp4");
+    let caches = SharedFrameCache::new();
+    let mut pacing = Pacing::default();
+    let timeline = &project.timelines[timeline_id];
+    let segments = collect_media_segments(&project, timeline, 0, 75);
+    let gops = HashMap::from([(media, 250)]);
+    let mut decide_after = |ms: u64| {
+        pacing.keyframes_only.clear();
+        missing_all_along(&mut pacing, media, 3);
+        pacing
+            .missing_since
+            .insert(media, Instant::now() - Duration::from_millis(ms));
+        !keyframes_only_media(&project, 25.0, &segments, &caches, None, &gops, 0, 4.0, true, &mut pacing)
+            .is_empty()
+    };
+    assert!(!decide_after(1000));
+    assert!(decide_after(2600));
+}
+
+#[test]
+fn keyframes_only_is_off_when_disabled_and_for_images() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_disabled.mp4");
+    let caches = SharedFrameCache::new();
+    let mut pacing = Pacing::default();
+    pacing.fell_behind.insert((media, 4.0f64.to_bits()));
+    let timeline = &project.timelines[timeline_id];
+    let segments = collect_media_segments(&project, timeline, 0, 75);
+    assert!(
+        keyframes_only_media(
+            &project,
+            25.0,
+            &segments,
+            &caches,
+            None,
+            &HashMap::new(),
+            0,
+            4.0,
+            false,
+            &mut pacing
+        )
+        .is_empty()
+    );
+
+    let path = make_test_image("vv-app-render-ahead-test", "kf_still.png");
+    let mut project = Project::default();
+    let image = project.media_pool.insert(MediaItem {
+        path,
+        meta: MediaMeta {
+            duration_frames: vv_core::IMAGE_DURATION_FRAMES,
+            fps: vv_media::IMAGE_FPS,
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 0,
+        compound: None,
+        folder: None,
+    });
+    pacing.fell_behind.insert((image, 4.0f64.to_bits()));
+    let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+        kind: TrackKind::Video,
+        clips: vec![media_clip(1, image, 0, 60)],
+        ..Track::new(TrackKind::Video)
+    }]));
+    assert!(!decide(&project, timeline_id, &caches, 4.0, &mut pacing));
+}
+
+/// Keyframes only: the one before the playhead and those in the window, and
+/// no frame in between; the one before survives the next cycle's eviction.
+#[test]
+fn walk_and_fill_in_keyframe_mode_caches_only_keyframes() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_fill.mp4");
+    let caches = SharedFrameCache::new();
+    let mut open = HashMap::new();
+    let pacing = RefCell::new(Pacing::default());
+    pacing
+        .borrow_mut()
+        .fell_behind
+        .insert((media, 4.0f64.to_bits()));
+    let target = playing_target(30, 4.0);
+
+    let outcome = fill_paced(&project, timeline_id, &caches, &mut open, 30, &target, &pacing);
+
+    assert!(outcome.caught_up);
+    assert!(caches.keyframes_only(media));
+    let cached: Vec<FrameIdx> = (0..200).filter(|&i| caches.contains(media, i)).collect();
+    assert_eq!(cached, [25, 50, 75, 100], "the window reaches 105");
+
+    store_secs(&target.speed, 4.0);
+    target.frame.store(40, Ordering::Relaxed);
+    fill_paced(&project, timeline_id, &caches, &mut open, 40, &target, &pacing);
+    assert!(caches.contains(media, 25), "still standing in at frame 40");
+    assert_eq!(
+        caches.get_near(media, 40, 0, 199).map(|(_, how)| how),
+        Some(vv_media::Served::Keyframe)
+    );
+}
+
+fn landed_at_50(file_name: &str) -> (Project, MediaId, OpenDecoder) {
+    let (project, _, media) = project_with_gop_25(file_name);
+    let path = project.media_pool[media].path.clone();
+    let mut decoder = Decoder::open(&path).unwrap();
+    decoder.seek_to_time(70.0 / 25.0).unwrap();
+    (project, media, OpenDecoder::fresh(decoder, path, false))
+}
+
+fn paused_context<'a>(
+    project: &'a Project,
+    caches: &'a SharedFrameCache,
+    target: &'a LiveTarget,
+    pacing: &'a RefCell<Pacing>,
+) -> FillContext<'a> {
+    FillContext {
+        project,
+        caches,
+        went_backward: false,
+        cache_budget_bytes: usize::MAX,
+        from_frame: 70,
+        proxy: None,
+        preview_divisor: 1,
+        target,
+        jumps: 0,
+        window: &[],
+        hw_priority: HwPriority::Normal,
+        keyframe_first: true,
+        pacing,
+        decide_by: None,
+    }
+}
+
+/// Paused, a seek whose way to the frame is long shows the keyframe it
+/// landed on first, as a stand-in.
+#[test]
+fn a_slow_seek_while_paused_shows_its_keyframe_first() {
+    let (project, media, mut od) = landed_at_50("kf_scrub.mp4");
+    let caches = SharedFrameCache::new();
+    let pacing = RefCell::new(Pacing::default());
+    pacing.borrow_mut().throughput.insert((media, 1), 10.0);
+    let target = LiveTarget::still(70);
+
+    show_landing_first(&paused_context(&project, &caches, &target, &pacing), &mut od, media, 20);
+
+    assert!(caches.contains(media, 50));
+    assert!(caches.keyframes_only(media));
+    assert!(pacing.borrow().scrub_keyframes.contains(&media));
+    assert_eq!(od.decoder.landing(), Some(50), "still to be handed out");
+}
+
+#[test]
+fn a_quick_seek_while_paused_goes_straight_to_the_frame() {
+    let (project, media, mut od) = landed_at_50("kf_scrub_quick.mp4");
+    let caches = SharedFrameCache::new();
+    let pacing = RefCell::new(Pacing::default());
+    pacing.borrow_mut().throughput.insert((media, 1), 10_000.0);
+    let target = LiveTarget::still(70);
+
+    show_landing_first(&paused_context(&project, &caches, &target, &pacing), &mut od, media, 20);
+
+    assert!(!caches.contains(media, 50));
+    assert!(!caches.keyframes_only(media));
+}
+
+/// Once every frame of the window is there no keyframe stands in any more.
+#[test]
+fn a_settled_window_while_paused_drops_the_stand_in() {
+    let (project, timeline_id, media) = project_with_gop_25("kf_scrub_settled.mp4");
+    let caches = SharedFrameCache::new();
+    let mut open = HashMap::new();
+    let pacing = RefCell::new(Pacing::default());
+    pacing.borrow_mut().throughput.insert((media, 1), 10.0);
+    let target = playing_target(70, 0.0);
+
+    let outcome = fill_paced(&project, timeline_id, &caches, &mut open, 70, &target, &pacing);
+
+    assert!(outcome.caught_up);
+    assert!(caches.contains(media, 70));
+    assert!(pacing.borrow().scrub_keyframes.is_empty());
+    fill_paced(&project, timeline_id, &caches, &mut open, 70, &target, &pacing);
+    assert!(!caches.keyframes_only(media));
+}
+
+#[test]
+fn frame_for_reports_a_keyframe_standing_in() {
+    let mut project = Project::default();
+    let timeline_id = project.timelines.insert(timeline_with(vec![]));
+    let (media, _) = two_media_ids();
+    let mut ra = RenderAhead::spawn(project.clone(), timeline_id, 1 << 30, None, 3.0, 2.0);
+    ra.shared.caches.insert(media, 10, Arc::new(dummy_frame()));
+    let clip = media_clip(1, media, 0, 100);
+    use crate::frame_provider::FrameProvider;
+
+    assert!(ra.frame_for(&project, &clip, 10).unwrap().is_some());
+    assert!(!ra.take_served_keyframe());
+    ra.shared.caches.set_keyframes_only(media, true);
+    assert!(ra.frame_for(&project, &clip, 30).unwrap().is_some());
+    assert!(ra.take_served_keyframe());
+    assert!(!ra.take_served_keyframe(), "taken");
+}
+
+#[test]
+fn keyframe_spans_answer_only_where_a_seek_proved_no_keyframe() {
+    let (media, other) = two_media_ids();
+    let mut pacing = Pacing::default();
+    pacing.record_keyframe_span(media, 25, 30);
+    pacing.record_keyframe_span(media, 25, 45);
+    pacing.record_keyframe_span(media, 50, 60);
+
+    assert_eq!(pacing.keyframe_span_at(media, 40), Some((25, 45)));
+    assert_eq!(pacing.keyframe_span_at(media, 46), None, "unproven past 45");
+    assert_eq!(pacing.keyframe_span_at(media, 55), Some((50, 60)));
+    assert_eq!(pacing.keyframe_span_at(media, 10), None);
+    assert_eq!(pacing.keyframe_span_at(other, 40), None);
+
+    for k in 0..(MAX_KEYFRAME_SPANS as FrameIdx + 10) {
+        pacing.record_keyframe_span(media, 1000 + k, 1000 + k);
+    }
+    assert_eq!(pacing.keyframe_spans[&media].len(), MAX_KEYFRAME_SPANS);
+    assert_eq!(pacing.keyframe_span_at(media, 40), None, "the oldest went");
+}
+
 
 /// With a stride the decoder skips the frames between two multiples: a
 /// segment starting on one of them (39, stride 4) is no hole behind a decoder

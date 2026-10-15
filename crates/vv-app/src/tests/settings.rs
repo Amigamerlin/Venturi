@@ -246,3 +246,19 @@ fn fast_playback_shown_frames_only_is_on_by_default_and_saved() {
     assert!(!Settings::load(&path).fast_playback_shown_frames_only);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn keyframes_when_behind_is_on_by_default_and_saved() {
+    let path = std::env::temp_dir()
+        .join(format!("vv-settings-keyframes-{}", std::process::id()))
+        .join("settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{}").unwrap();
+    assert!(Settings::load(&path).keyframes_when_behind);
+
+    let mut settings = Settings::default();
+    settings.keyframes_when_behind = false;
+    settings.save(&path).unwrap();
+    assert!(!Settings::load(&path).keyframes_when_behind);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

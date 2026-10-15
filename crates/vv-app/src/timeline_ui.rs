@@ -1861,6 +1861,8 @@ pub fn show_timeline(
     kinetic_scroll_enabled: bool,
     // Timeline intervals already cached: "buffered" strip in the ruler.
     buffered_ranges: &[(FrameIdx, FrameIdx)],
+    // Timeline intervals keyframes stand in for: the strip in orange.
+    keyframe_ranges: &[(FrameIdx, FrameIdx)],
     // Timeline intervals of the clips served by the proxy: strip on the clip.
     proxy_ranges: &[(FrameIdx, FrameIdx)],
     // Loaded waveforms, per `(content_hash, stream_index)`.
@@ -2160,6 +2162,7 @@ pub fn show_timeline(
                     px_per_frame,
                     snapping_enabled,
                     buffered_ranges,
+                    keyframe_ranges,
                     max_end_frames,
                     &mut pending,
                 );
@@ -5202,6 +5205,7 @@ fn show_ruler(
     px_per_frame: f32,
     snapping_enabled: bool,
     buffered_ranges: &[(FrameIdx, FrameIdx)],
+    keyframe_ranges: &[(FrameIdx, FrameIdx)],
     max_end_frames: FrameIdx,
     pending: &mut Option<PendingAction>,
 ) {
@@ -5263,14 +5267,20 @@ fn show_ruler(
     // Below the playhead line, so it stays visible.
     const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
     let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
-    for &(start, end) in buffered_ranges {
+    // Orange as the KEYFRAMES badge, under the frames decoded one by one.
+    let keyframe_color = crate::theme::ACCENT.gamma_multiply(0.75);
+    let strips = keyframe_ranges
+        .iter()
+        .map(|r| (r, keyframe_color))
+        .chain(buffered_ranges.iter().map(|r| (r, buffered_color)));
+    for (&(start, end), color) in strips {
         let x0 = origin.x + start as f32 * px_per_frame;
         let x1 = origin.x + (end + 1) as f32 * px_per_frame;
         let strip_rect = egui::Rect::from_min_max(
             egui::pos2(x0, origin.y + RULER_TICKS_HEIGHT - BUFFERED_STRIP_HEIGHT),
             egui::pos2(x1, origin.y + RULER_TICKS_HEIGHT),
         );
-        painter.rect_filled(strip_rect, 0.0, buffered_color);
+        painter.rect_filled(strip_rect, 0.0, color);
     }
 
     if !state.export_marks.is_full(max_end_frames) {

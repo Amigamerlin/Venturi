@@ -584,6 +584,13 @@ fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
         )
         .on_hover_text(t!("settings.fast_playback_shown_frames_only_hint"))
         .changed();
+    changed |= ui
+        .checkbox(
+            &mut settings.keyframes_when_behind,
+            t!("settings.keyframes_when_behind"),
+        )
+        .on_hover_text(t!("settings.keyframes_when_behind_hint"))
+        .changed();
 
     ui.add_space(12.0);
     changed |= hw_decode_settings(ui, settings);

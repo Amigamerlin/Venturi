@@ -90,6 +90,9 @@ toolbar.color:
   en: "Color"
   it: "Colore"
 
+viewer.keyframes_badge:
+  en: KEYFRAMES
+  it: KEYFRAME
 viewer.zoom_hint:
   en: "Player zoom · mouse wheel on the player zooms, middle button drags"
   it: "Zoom del player · la rotella sul player fa zoom, il tasto centrale trascina"

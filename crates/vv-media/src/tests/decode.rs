@@ -867,3 +867,42 @@ fn a_low_priority_lease_leaves_half_of_the_budget_to_the_others() {
     );
     crate::hw::set_budget_bytes(usize::MAX);
 }
+
+#[test]
+fn landing_frame_is_the_keyframe_and_still_comes_out_of_next_frame() {
+    let path = make_test_clip_with_gop_and_bframes("landing_frame.mp4", 4, 25, 2);
+    let mut decoder = Decoder::open(&path).unwrap();
+    decoder.seek_to_time(60.0 / 25.0).unwrap();
+
+    let (idx, frame) = decoder.landing_frame().unwrap().expect("a landing");
+    assert_eq!(idx, 50, "the keyframe before frame 60");
+    assert_eq!(decoder.landing(), Some(50));
+    let (next_idx, next) = decoder.next_frame().unwrap().unwrap();
+    assert_eq!(next_idx, 50);
+    assert_eq!(next.y, frame.y);
+}
+
+#[test]
+fn landing_frame_is_none_without_a_seek_pending() {
+    let path = make_test_clip_with_gop_and_bframes("landing_none.mp4", 1, 25, 0);
+    let mut decoder = Decoder::open(&path).unwrap();
+    assert!(decoder.landing_frame().unwrap().is_none());
+}
+
+#[test]
+fn keyframe_before_decodes_the_keyframe_alone_and_a_seek_resumes_after_it() {
+    let path = make_test_clip_with_gop_and_bframes("keyframe_before.mp4", 4, 25, 2);
+    let mut decoder = Decoder::open(&path).unwrap();
+    let mut reference = Decoder::open(&path).unwrap();
+    reference.seek_to_time(2.0).unwrap();
+    let (_, expected) = reference.next_frame().unwrap().unwrap();
+
+    let (idx, frame) = decoder.keyframe_before(60).unwrap().unwrap();
+    assert_eq!(idx, 50);
+    assert_eq!(frame.y, expected.y);
+    assert_eq!(decoder.keyframe_before(49).unwrap().unwrap().0, 25);
+    assert_eq!(decoder.keyframe_before(0).unwrap().unwrap().0, 0);
+
+    decoder.seek_to_time(70.0 / 25.0).unwrap();
+    assert_eq!(decoder.next_frame().unwrap().unwrap().0, 50, "usable again after a seek");
+}

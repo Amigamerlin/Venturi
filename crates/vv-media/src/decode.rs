@@ -310,6 +310,81 @@ impl Decoder {
         self.pending.as_ref().map(|(idx, _)| *idx)
     }
 
+    /// The keyframe at or before `idx`, decoded alone: its packet is sent and
+    /// the stream drained at once, so frame threading does not first decode
+    /// as many frames as it has threads. Leaves the decoder with nothing in
+    /// flight: `next_frame` needs a seek after it.
+    pub fn keyframe_before(
+        &mut self,
+        idx: FrameIdx,
+    ) -> Result<Option<(FrameIdx, Arc<FrameYuv420>)>, crate::MediaError> {
+        if let Some(frame) = self.still_image.clone() {
+            return Ok(Some((idx, frame)));
+        }
+        self.skip_before = None;
+        self.set_skip_nonref(false);
+        self.pending = None;
+        self.emit_idx = None;
+        self.held = None;
+        let secs = idx.max(0) as f64 / self.fps.as_f64().max(1e-9);
+        let mut ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+        // As in `seek_to_time`: a seek may land past the target, retried
+        // further back.
+        let mut step = i64::from(ffmpeg::ffi::AV_TIME_BASE);
+        for _ in 0..20 {
+            self.ictx.seek(ts, ..ts)?;
+            self.decoder.flush();
+            self.eof_sent = false;
+            let key = loop {
+                let mut packet = ffmpeg::Packet::empty();
+                match packet.read(&mut self.ictx) {
+                    Ok(()) if packet.stream() == self.video_stream_index && packet.is_key() => {
+                        break Some(packet);
+                    }
+                    Ok(()) => {}
+                    Err(ffmpeg::Error::Eof) => break None,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            let Some(packet) = key else {
+                return Ok(None);
+            };
+            if packet.pts().is_some_and(|pts| self.frame_idx(pts) > idx) && ts > 0 {
+                ts = ts.saturating_sub(step).max(0);
+                step = step.saturating_mul(2);
+                continue;
+            }
+            self.decoder.send_packet(&packet)?;
+            self.decoder.send_eof()?;
+            let mut decoded = ffmpeg::frame::Video::empty();
+            let received = self.decoder.receive_frame(&mut decoded);
+            self.decoder.flush();
+            if received.is_err() {
+                return Ok(None);
+            }
+            let (key_idx, mut raw) = self.raw_frame(decoded);
+            return Ok(Some((key_idx, self.convert(&mut raw)?)));
+        }
+        Ok(None)
+    }
+
+    /// The frame `landing` names, converted, without handing it out: it stays
+    /// the next one `next_frame` gives or a skip drops. Costs no decoding, the
+    /// seek already did it.
+    pub fn landing_frame(
+        &mut self,
+    ) -> Result<Option<(FrameIdx, Arc<FrameYuv420>)>, crate::MediaError> {
+        if let Some(frame) = self.still_image.clone() {
+            return Ok(Some((self.synthetic_idx, frame)));
+        }
+        let Some((idx, mut raw)) = self.pending.take() else {
+            return Ok(None);
+        };
+        let converted = self.convert(&mut raw);
+        self.pending = Some((idx, raw));
+        Ok(Some((idx, converted?)))
+    }
+
     /// After a seek: the frames before `idx` are wanted by nobody, only
     /// decoded as far as later frames reference them. `next_frame` skips them
     /// without converting them, and the non-reference ones (most B-frames)

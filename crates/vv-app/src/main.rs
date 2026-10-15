@@ -274,6 +274,8 @@ struct VenturiApp {
     /// What the viewer shows: the last composition, even if in this
     /// frame no new one was made (no empty flash).
     last_viewer_frame_kind: Option<ViewerFrameKind>,
+    /// The frame in the viewer has a keyframe standing in for a media.
+    viewer_keyframe: bool,
     /// egui-wgpu device/queue, shared with the compositor: a texture from
     /// another device cannot be registered in egui. `None` in the tests.
     egui_render_state: Option<eframe::egui_wgpu::RenderState>,
@@ -484,6 +486,7 @@ impl Default for VenturiApp {
             viewer_zoom: viewer_zoom::ViewerZoom::default(),
             viewer_geometry: None,
             last_viewer_frame_kind: None,
+            viewer_keyframe: false,
             egui_render_state: None,
             scope_target: None,
             scope_frame: None,
@@ -1069,18 +1072,29 @@ impl VenturiApp {
             return Vec::new();
         }
         let mut cached: HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>> = HashMap::new();
-        self.cached_ranges_of_timeline(timeline_id, &mut cached, 0)
+        self.cached_ranges_of_timeline(timeline_id, &mut cached, 0, false)
+    }
+
+    /// Timeline intervals keyframes stand in for, for the strip in orange.
+    fn keyframe_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
+        let Some(timeline_id) = self.timeline_id else {
+            return Vec::new();
+        };
+        let mut cached: HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>> = HashMap::new();
+        self.cached_ranges_of_timeline(timeline_id, &mut cached, 0, true)
     }
 
     /// Decoded intervals of `timeline_id`, in frames of that
     /// timeline. A compound clip has no cached frames of its own (it is not a
     /// media to decode): its intervals are those of its nested
-    /// timeline, remapped through the clip.
+    /// timeline, remapped through the clip. With `keyframes`, the intervals
+    /// keyframes stand in for instead.
     fn cached_ranges_of_timeline(
         &self,
         timeline_id: TimelineId,
         cached: &mut HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>>,
         depth: u32,
+        keyframes: bool,
     ) -> Vec<(FrameIdx, FrameIdx)> {
         let (Some(render_ahead), Some(timeline)) = (
             &self.render_ahead,
@@ -1106,7 +1120,10 @@ impl VenturiApp {
                     .and_then(|item| item.compound)
                     .filter(|_| depth < vv_core::MAX_COMPOUND_DEPTH);
                 let source_ranges = match nested {
-                    Some(nested_id) => self.cached_ranges_of_timeline(nested_id, cached, depth + 1),
+                    Some(nested_id) => {
+                        self.cached_ranges_of_timeline(nested_id, cached, depth + 1, keyframes)
+                    }
+                    None if keyframes => render_ahead.keyframe_ranges_for(media_id),
                     None => render_ahead.cached_ranges_for(media_id),
                 };
                 cached.insert(media_id, source_ranges);
@@ -1520,6 +1537,12 @@ impl VenturiApp {
         // ahead is needed, and it must still fit the budget (see the docs of
         // `effective_window_secs`).
         render_ahead.set_frame_stride(self.playback_frame_stride());
+        render_ahead.set_playback_speed(if self.is_timeline_playing() {
+            self.playback_speed
+        } else {
+            0.0
+        });
+        render_ahead.set_keyframes_when_behind(self.settings.keyframes_when_behind);
         let (ahead_secs, behind_secs) = self.effective_window_secs(timeline_id);
         render_ahead.set_lookahead_secs(ahead_secs);
         render_ahead.set_behind_secs(behind_secs);
@@ -1936,11 +1959,15 @@ impl VenturiApp {
     ) -> Option<Vec<frame_provider::OwnedLayer>> {
         self.sync_compositor_precision();
         let timeline = &self.session.project.timelines[self.timeline_id?];
+        // With keyframes standing in, a clip with none inside it has nothing
+        // to show yet: the frame shown stays rather than going black.
         let still_filling = self
             .render_ahead
             .as_ref()
-            .is_some_and(|r| !r.is_caught_up());
+            .is_some_and(|r| !r.is_caught_up() || r.is_standing_in());
         let render_ahead = self.render_ahead.as_mut()?;
+        // Left over by another composition: the caller reads it for this one.
+        render_ahead.take_served_keyframe();
         let playhead = self.timeline_state.playhead;
         let clips = timeline.active_video_clips_at(playhead);
         let mut layers = Vec::with_capacity(clips.len());
@@ -2360,6 +2387,9 @@ impl VenturiApp {
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
+                    if self.viewer_keyframe {
+                        paint_keyframes_badge(ui.painter(), rect);
+                    }
                 } else if self.last_viewer_frame_kind == Some(ViewerFrameKind::Offline) {
                     ui.painter().text(
                         screen.center(),
@@ -3746,6 +3776,22 @@ fn fix_iso_key(raw_input: &mut egui::RawInput, iso_key_down: &mut bool) {
     }
 }
 
+/// In the top left corner of the frame: a keyframe stands in for a media the
+/// decoder cannot keep up with.
+fn paint_keyframes_badge(painter: &egui::Painter, frame: egui::Rect) {
+    let galley = painter.layout_no_wrap(
+        t!("viewer.keyframes_badge").into_owned(),
+        egui::FontId::proportional(11.0),
+        egui::Color32::WHITE,
+    );
+    let badge = egui::Rect::from_min_size(
+        frame.left_top() + egui::vec2(8.0, 8.0),
+        galley.size() + egui::vec2(10.0, 4.0),
+    );
+    painter.rect_filled(badge, 3.0, theme::ACCENT_FILL);
+    painter.galley(badge.min + egui::vec2(5.0, 2.0), galley, egui::Color32::WHITE);
+}
+
 /// One timeline frame every how many the buffer keeps: the speed while
 /// playing fast, if the setting asks for it.
 fn frame_stride(shown_frames_only: bool, playing: bool, speed: f64) -> FrameIdx {
@@ -4081,6 +4127,7 @@ impl VenturiApp {
                         .map(|(id, item)| (id, file_label(&item.path)))
                         .collect();
                     let buffered_ranges = self.buffered_timeline_ranges();
+                    let keyframe_ranges = self.keyframe_timeline_ranges();
                     let proxy_ranges = self.proxy_timeline_ranges();
                     // The buffer advances on another thread: without a repaint the
                     // "buffered" strip would not update.
@@ -4106,6 +4153,7 @@ impl VenturiApp {
                         self.snapping_enabled,
                         self.settings.kinetic_scroll,
                         &buffered_ranges,
+                        &keyframe_ranges,
                         &proxy_ranges,
                         &self.waveform_cache,
                         is_playing,
@@ -4322,11 +4370,22 @@ impl VenturiApp {
             // Browsing a "raw" media from the media pool there is no
             // timeline to compose: a single layer, its frame as it is.
             let layers = if let Some(split) = slip_split {
+                self.viewer_keyframe = false;
                 split
             } else if media_offline || self.browsing_media.is_some() {
+                self.viewer_keyframe = false;
                 None
             } else {
-                self.timeline_video_layers(None)
+                let layers = self.timeline_video_layers(None);
+                let served_keyframe = self
+                    .render_ahead
+                    .as_mut()
+                    .is_some_and(|r| r.take_served_keyframe());
+                // No layers: the frame already shown stays, and its badge.
+                if layers.is_some() {
+                    self.viewer_keyframe = served_keyframe;
+                }
+                layers
             };
 
             if media_offline {
@@ -4370,6 +4429,9 @@ impl VenturiApp {
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             egui::Color32::WHITE,
                         );
+                        if self.viewer_keyframe {
+                            paint_keyframes_badge(ui.painter(), rect.intersect(area));
+                        }
                         self.viewer_geometry = Some((area, tex_size));
                         viewer_area = Some(area);
                         viewer_rect = Some(rect);

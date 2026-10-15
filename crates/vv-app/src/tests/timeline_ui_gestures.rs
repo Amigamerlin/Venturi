@@ -75,6 +75,7 @@ impl Harness {
                     false,
                     &[],
                     &[],
+                    &[],
                     &std::collections::HashMap::new(),
                     false,
                 );

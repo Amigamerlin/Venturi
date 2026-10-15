@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::proxy::ProxyQuality;
@@ -67,6 +68,41 @@ const SKIP_STEP_FRAMES: usize = 8;
 /// A cycle finding everything cached returns immediately: a short poll costs little.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Decoding demand over the throughput measured at the same stride past
+/// which fast playback of a media shows keyframes only: well over it, or the
+/// normal playback would still beat a keyframe every GOP.
+const KEYFRAMES_ABOVE_LOAD: f64 = 1.5;
+
+/// The frame at the playhead missing at least this long during fast playback
+/// (and longer than keyframes only would take to show the next one): the
+/// decoder has fallen behind.
+const FELL_BEHIND_AFTER: Duration = Duration::from_millis(250);
+
+/// Share of the playback so far with the frame at the playhead missing past
+/// which a freeze is no one-off.
+const SUSTAINED_MISSING: f64 = 0.3;
+
+/// Playback of a media watched at least this long before a freeze counts:
+/// the first frame of a clip coming late is no sign of anything.
+const SUSTAINED_OVER: Duration = Duration::from_secs(2);
+
+/// GOP assumed until the decoder has seen one: the longest it estimates.
+const UNKNOWN_GOP_FRAMES: FrameIdx = MAX_SEEK_THRESHOLD_FRAMES;
+
+/// A seek while paused whose way to the frame is predicted longer than this
+/// shows its keyframe first.
+const KEYFRAME_FIRST_AFTER_SECS: f64 = 0.1;
+
+/// A playhead jump this recent while paused means a scrub: a frame not cached
+/// shows its keyframe first.
+const SCRUBBING_FOR: Duration = Duration::from_millis(300);
+
+/// Source frames per second assumed until one is measured.
+const DEFAULT_THROUGHPUT_FPS: f64 = 120.0;
+
+/// Frames decoded in sequence before a throughput sample is taken.
+const THROUGHPUT_SAMPLE_FRAMES: FrameIdx = 60;
+
 /// Seek threshold until the GOP of the media has been observed. Low: one
 /// seek too many costs little, it reuses the open decoder.
 const DEFAULT_SEEK_THRESHOLD_FRAMES: FrameIdx = 30;
@@ -108,6 +144,10 @@ struct LiveTarget {
     jumps: AtomicU64,
     /// See `RenderAhead::set_frame_stride`.
     frame_stride: AtomicI64,
+    /// See `RenderAhead::set_playback_speed`: bits of an `f64`.
+    speed: AtomicU64,
+    /// See `RenderAhead::set_keyframes_when_behind`.
+    keyframes_when_behind: AtomicBool,
 }
 
 impl LiveTarget {
@@ -116,7 +156,17 @@ impl LiveTarget {
             frame: AtomicI64::new(frame),
             jumps: AtomicU64::new(0),
             frame_stride: AtomicI64::new(1),
+            speed: AtomicU64::new(0),
+            keyframes_when_behind: AtomicBool::new(false),
         }
+    }
+
+    fn speed(&self) -> f64 {
+        load_secs(&self.speed)
+    }
+
+    fn keyframes_when_behind(&self) -> bool {
+        self.keyframes_when_behind.load(Ordering::Relaxed)
     }
 
     fn frame_stride(&self) -> FrameIdx {
@@ -152,6 +202,8 @@ pub struct RenderAhead {
     shared: Arc<SharedState>,
     tx: mpsc::Sender<Command>,
     handle: Option<JoinHandle<()>>,
+    /// `frame_for` stood a keyframe in since `take_served_keyframe`.
+    served_keyframe: bool,
 }
 
 impl RenderAhead {
@@ -180,6 +232,7 @@ impl RenderAhead {
             shared,
             tx,
             handle: Some(handle),
+            served_keyframe: false,
         }
     }
 
@@ -211,6 +264,29 @@ impl RenderAhead {
             self.shared.caught_up.store(false, Ordering::Relaxed);
             let _ = self.tx.send(Command::Wake);
         }
+    }
+
+    /// The speed the timeline is playing at, 0 when it is not.
+    pub fn set_playback_speed(&self, speed: f64) {
+        if store_secs(&self.shared.target.speed, speed) {
+            self.shared.caught_up.store(false, Ordering::Relaxed);
+            let _ = self.tx.send(Command::Wake);
+        }
+    }
+
+    /// Whether a media the decoder cannot keep up with, in fast playback or
+    /// in a scrub, shows its keyframes meanwhile.
+    pub fn set_keyframes_when_behind(&self, on: bool) {
+        self.shared
+            .target
+            .keyframes_when_behind
+            .store(on, Ordering::Relaxed);
+    }
+
+    /// Whether a frame handed out since the last call was a keyframe standing
+    /// in for the one asked.
+    pub fn take_served_keyframe(&mut self) -> bool {
+        std::mem::take(&mut self.served_keyframe)
     }
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
@@ -272,10 +348,22 @@ impl RenderAhead {
         self.shared.caches.get(media_id, source_frame)
     }
 
+    /// Keyframes stand in for some media: a frame missing may just lie
+    /// between two of them, it is not lost.
+    pub fn is_standing_in(&self) -> bool {
+        self.shared.caches.any_keyframes_only()
+    }
+
     /// `false` while work remains for the current window: the UI keeps
     /// asking for repaints to advance the "buffered" strip.
     pub fn is_caught_up(&self) -> bool {
         self.shared.caught_up.load(Ordering::Relaxed)
+    }
+
+    /// Stretches of a media whose frames keyframes stand in for, in source
+    /// frames: empty unless it is in keyframe mode.
+    pub fn keyframe_ranges_for(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
+        self.shared.caches.keyframe_ranges(media_id)
     }
 
     /// Cached intervals of a media, in source frames.
@@ -307,12 +395,16 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
         else {
             return Ok(None);
         };
-        Ok(self.shared.caches.get_near(
+        let near = self.shared.caches.get_near(
             media_id,
             source_frame,
             clip.source_in(),
             clip.source_out() - 1,
-        ))
+        );
+        self.served_keyframe |= near
+            .as_ref()
+            .is_some_and(|(_, how)| *how == vv_media::Served::Keyframe);
+        Ok(near.map(|(frame, _)| frame))
     }
 }
 
@@ -347,6 +439,14 @@ impl OpenDecoder {
             last_keyframe_landed: None,
             estimated_gop: None,
             min_gop: 0,
+        }
+    }
+
+    /// The GOP as far as seeks have shown it, `None` before any.
+    fn known_gop(&self) -> Option<FrameIdx> {
+        match (self.estimated_gop, self.min_gop) {
+            (None, 0) => None,
+            (gop, min) => Some(gop.unwrap_or(0).max(min)),
         }
     }
 
@@ -397,6 +497,9 @@ fn worker_loop(
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Separate decoders for the window behind the playhead: see `walk_and_fill`.
     let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    // Separate decoders for keyframes: seeking the forward ones back to a
+    // keyframe would throw away their way towards the frame wanted.
+    let mut open_keys: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // `from` of the previous cycle (only that, never a historical min/max):
     // it says whether the playhead went backwards.
     let mut last_from_frame: Option<FrameIdx> = None;
@@ -404,6 +507,7 @@ fn worker_loop(
     // immediately instead of waiting for `POLL_INTERVAL`.
     let mut retry_immediately = false;
     let mut preview_divisor = 1;
+    let pacing = RefCell::new(Pacing::default());
     loop {
         let first = if retry_immediately {
             match rx.try_recv() {
@@ -427,6 +531,13 @@ fn worker_loop(
                 Command::Stop => return,
                 Command::UpdateProject(p, id) => {
                     forget_changed_media(&project, &p, &shared.caches, &mut open, &mut open_behind);
+                    forget_changed_media(
+                        &project,
+                        &p,
+                        &shared.caches,
+                        &mut open_keys,
+                        &mut HashMap::new(),
+                    );
                     project = *p;
                     timeline_id = id;
                 }
@@ -435,6 +546,7 @@ fn worker_loop(
                     shared.caches.clear();
                     open.clear();
                     open_behind.clear();
+                    open_keys.clear();
                 }
                 Command::SetPreviewDivisor(divisor) => {
                     if divisor != preview_divisor {
@@ -442,11 +554,13 @@ fn worker_loop(
                         shared.caches.clear();
                         open.clear();
                         open_behind.clear();
+                        open_keys.clear();
                     }
                 }
                 Command::ReopenDecoders => {
                     open.clear();
                     open_behind.clear();
+                    open_keys.clear();
                 }
                 Command::Wake => {}
             }
@@ -455,12 +569,13 @@ fn worker_loop(
         let from = shared.target.frame();
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
-        let outcome = walk_and_fill(
+        let outcome = walk_and_fill_paced(
             &project,
             timeline_id,
             &shared.caches,
             &mut open,
             &mut open_behind,
+            &mut open_keys,
             from,
             shared.cache_budget_bytes.load(Ordering::Relaxed),
             went_backward,
@@ -469,6 +584,7 @@ fn worker_loop(
             load_secs(&shared.lookahead_secs),
             load_secs(&shared.behind_secs),
             &shared.target,
+            &pacing,
         );
         retry_immediately = outcome.interrupted;
         shared.caught_up.store(outcome.caught_up, Ordering::Relaxed);
@@ -834,17 +950,9 @@ fn position_decoder(
     // No decoder open for this media: here the real open is
     // unavoidable (first time, or a media different from the one open so far).
     let debug_start = debug_enabled().then(std::time::Instant::now);
-    // An image must be opened with `open_image`, or it would hit EOF after the
-    // first frame.
-    let opened = if is_image {
-        Decoder::open_image(path)
-    } else {
-        Decoder::open_with(path, &crate::hw_decode::devices(), hw_priority)
-    };
-    let Ok(mut decoder) = opened else {
+    let Some(mut decoder) = open_decoder(path, is_image, hw_priority, max_size) else {
         return Positioned::Failed;
     };
-    decoder.set_max_size(max_size);
     let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
     let _ = decoder.seek_to_time(secs);
     if let Some(t) = debug_start {
@@ -860,6 +968,24 @@ fn position_decoder(
         OpenDecoder::fresh(decoder, path.to_path_buf(), is_all_intra),
     );
     Positioned::Opened
+}
+
+fn open_decoder(
+    path: &Path,
+    is_image: bool,
+    hw_priority: vv_media::HwPriority,
+    max_size: Option<(u32, u32)>,
+) -> Option<Decoder> {
+    // An image must be opened with `open_image`, or it would hit EOF after the
+    // first frame.
+    let opened = if is_image {
+        Decoder::open_image(path)
+    } else {
+        Decoder::open_with(path, &crate::hw_decode::devices(), hw_priority)
+    };
+    let mut decoder = opened.ok()?;
+    decoder.set_max_size(max_size);
+    Some(decoder)
 }
 
 /// The first frame from `landing` on that the transit towards `segment` must
@@ -915,6 +1041,109 @@ impl WalkOutcome {
     };
 }
 
+/// What the worker learns, cycle after cycle, about keeping up.
+#[derive(Default)]
+struct Pacing {
+    /// Source frames per second each media advanced decoding in sequence, by
+    /// stride: skipping the frames in between the decoder goes faster.
+    throughput: HashMap<(MediaId, FrameIdx), f64>,
+    /// A media fell behind at this speed (bits of the `f64`): the next time
+    /// it plays at it, keyframes only from the start.
+    fell_behind: HashSet<(MediaId, u64)>,
+    /// Media in keyframe mode for the fast playback in progress, with its speed.
+    keyframes_only: HashMap<MediaId, u64>,
+    /// Since when the frame at the playhead is missing, in fast playback.
+    missing_since: HashMap<MediaId, Instant>,
+    /// How much of the fast playback in progress had the frame missing.
+    presence: HashMap<MediaId, Presence>,
+    /// Per keyframe a seek landed on, the farthest target that landed there:
+    /// no keyframe in between.
+    keyframe_spans: HashMap<MediaId, std::collections::BTreeMap<FrameIdx, FrameIdx>>,
+    /// Media showing a keyframe while paused, until their frames are there.
+    scrub_keyframes: HashSet<MediaId>,
+    /// `LiveTarget::jumps` last seen, and when it last changed.
+    last_jumps: u64,
+    last_jump_at: Option<Instant>,
+}
+
+/// Spans remembered per media: past it the oldest go.
+const MAX_KEYFRAME_SPANS: usize = 256;
+
+/// The frame at the playhead in a fast playback, checked once per cycle.
+struct Presence {
+    since: Instant,
+    checked: Instant,
+    was_missing: bool,
+    missing: Duration,
+}
+
+impl Presence {
+    fn new(now: Instant) -> Self {
+        Self {
+            since: now,
+            checked: now,
+            was_missing: true,
+            missing: Duration::ZERO,
+        }
+    }
+
+    /// Share of the time so far with the frame missing, `missing` the state now.
+    fn missing_share(&mut self, now: Instant, missing: bool) -> f64 {
+        if self.was_missing {
+            self.missing += now.duration_since(self.checked);
+        }
+        self.checked = now;
+        self.was_missing = missing;
+        let elapsed = now.duration_since(self.since).as_secs_f64();
+        if elapsed <= 0.0 {
+            return if missing { 1.0 } else { 0.0 };
+        }
+        self.missing.as_secs_f64() / elapsed
+    }
+}
+
+impl Pacing {
+    /// The keyframe at or before `frame` with no other one up to it, as far as
+    /// seeks proved, and how far that proof goes.
+    fn keyframe_span_at(&self, media_id: MediaId, frame: FrameIdx) -> Option<(FrameIdx, FrameIdx)> {
+        let (&keyframe, &until) = self.keyframe_spans.get(&media_id)?.range(..=frame).next_back()?;
+        (frame <= until).then_some((keyframe, until))
+    }
+
+    /// The first keyframe a seek landed on past `frame`.
+    fn keyframe_after(&self, media_id: MediaId, frame: FrameIdx) -> Option<FrameIdx> {
+        let spans = self.keyframe_spans.get(&media_id)?;
+        spans.range(frame + 1..).next().map(|(&keyframe, _)| keyframe)
+    }
+
+    fn record_keyframe_span(&mut self, media_id: MediaId, keyframe: FrameIdx, target: FrameIdx) {
+        let spans = self.keyframe_spans.entry(media_id).or_default();
+        let until = spans.entry(keyframe).or_insert(target);
+        *until = (*until).max(target);
+        if spans.len() > MAX_KEYFRAME_SPANS {
+            spans.pop_first();
+        }
+    }
+
+    /// Whether the playhead was moved by hand within `SCRUBBING_FOR`.
+    fn scrubbing(&mut self, jumps: u64) -> bool {
+        let now = Instant::now();
+        if jumps != self.last_jumps {
+            self.last_jumps = jumps;
+            self.last_jump_at = Some(now);
+        }
+        self.last_jump_at
+            .is_some_and(|at| now.duration_since(at) < SCRUBBING_FOR)
+    }
+
+    fn record_throughput(&mut self, media_id: MediaId, stride: FrameIdx, fps: f64) {
+        let rate = self.throughput.entry((media_id, stride)).or_insert(fps);
+        *rate = 0.7 * *rate + 0.3 * fps;
+    }
+}
+
+/// `walk_and_fill_paced` with nothing learned yet.
+#[cfg(test)]
 fn walk_and_fill(
     project: &Project,
     timeline_id: TimelineId,
@@ -929,6 +1158,42 @@ fn walk_and_fill(
     lookahead_secs: f64,
     behind_secs: f64,
     target: &LiveTarget,
+) -> WalkOutcome {
+    walk_and_fill_paced(
+        project,
+        timeline_id,
+        caches,
+        open,
+        open_behind,
+        &mut HashMap::new(),
+        from_frame,
+        cache_budget_bytes,
+        went_backward,
+        proxy,
+        preview_divisor,
+        lookahead_secs,
+        behind_secs,
+        target,
+        &RefCell::new(Pacing::default()),
+    )
+}
+
+fn walk_and_fill_paced(
+    project: &Project,
+    timeline_id: TimelineId,
+    caches: &SharedFrameCache,
+    open: &mut HashMap<MediaId, OpenDecoder>,
+    open_behind: &mut HashMap<MediaId, OpenDecoder>,
+    open_keys: &mut HashMap<MediaId, OpenDecoder>,
+    from_frame: FrameIdx,
+    cache_budget_bytes: usize,
+    went_backward: bool,
+    proxy: Option<ProxyQuality>,
+    preview_divisor: u32,
+    lookahead_secs: f64,
+    behind_secs: f64,
+    target: &LiveTarget,
+    pacing: &RefCell<Pacing>,
 ) -> WalkOutcome {
     let jumps = target.jumps();
     let Some(timeline) = project.timelines.get(timeline_id) else {
@@ -959,8 +1224,9 @@ fn walk_and_fill(
     let behind_media: HashSet<MediaId> = behind_segments.iter().map(|s| s.media_id).collect();
     open.retain(|id, _| forward_media.contains(id));
     open_behind.retain(|id, _| behind_media.contains(id));
+    open_keys.retain(|id, _| forward_media.contains(id));
 
-    let window: Vec<WantedRange> = forward_segments
+    let mut window: Vec<WantedRange> = forward_segments
         .iter()
         .chain(&behind_segments)
         .copied()
@@ -975,6 +1241,91 @@ fn walk_and_fill(
     }
     for (media_id, stride) in strides {
         caches.set_stride(media_id, stride);
+    }
+    let speed = target.speed();
+    let paused = speed <= 0.0;
+    let gops: HashMap<MediaId, FrameIdx> = open
+        .iter()
+        .chain(open_keys.iter())
+        .filter_map(|(id, o)| Some((*id, o.known_gop()?)))
+        .collect();
+    let keyframe_media = keyframes_only_media(
+        project,
+        fps,
+        &forward_segments,
+        caches,
+        proxy,
+        &gops,
+        from_frame,
+        speed,
+        target.keyframes_when_behind(),
+        &mut pacing.borrow_mut(),
+    );
+    let mut standing_in_media = keyframe_media.clone();
+    // Scrubbing over frames not cached: the keyframe before each first, then
+    // the frame itself.
+    let scrub_segments: Vec<WantedRange> = if paused
+        && target.keyframes_when_behind()
+        && pacing.borrow_mut().scrubbing(jumps)
+    {
+        forward_segments
+            .iter()
+            .filter(|s| s.timeline_start == from_frame)
+            .filter(|s| {
+                project
+                    .media_pool
+                    .get(s.media_id)
+                    .is_some_and(|item| keyframes_help(item, proxy))
+            })
+            // A frame a GOP or less before stands in already: the cycle goes to
+            // decoding the frame itself instead.
+            .filter(|s| {
+                let gop = open
+                    .get(&s.media_id)
+                    .map_or(DEFAULT_SEEK_THRESHOLD_FRAMES, |o| o.seek_threshold_frames());
+                !(s.source_start - gop..=s.source_start).any(|i| caches.contains(s.media_id, i))
+            })
+            // A decoder about to reach the frame keeps going: seeking it back
+            // to the keyframe would throw that way away.
+            .filter(|s| {
+                !open.get(&s.media_id).is_some_and(|o| {
+                    let ahead = s.source_start - o.next_frame;
+                    let throughput = pacing
+                        .borrow()
+                        .throughput
+                        .get(&(s.media_id, caches.stride(s.media_id)))
+                        .copied()
+                        .unwrap_or(DEFAULT_THROUGHPUT_FPS);
+                    o.next_frame > 0
+                        && ahead >= 0
+                        && ahead as f64 / throughput <= KEYFRAME_FIRST_AFTER_SECS
+                })
+            })
+            .map(|s| s.sub_range(s.source_start, s.source_start))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    {
+        let mut pacing = pacing.borrow_mut();
+        pacing
+            .scrub_keyframes
+            .extend(scrub_segments.iter().map(|s| s.media_id));
+        standing_in_media.extend(pacing.scrub_keyframes.iter().copied());
+        window.extend(standing_in_ranges(&forward_segments, &standing_in_media, &pacing));
+        if !paused || !target.keyframes_when_behind() {
+            pacing.scrub_keyframes.clear();
+        }
+        // Off for the media out of the window too: a flag left on would keep
+        // the viewer waiting for frames that never come.
+        caches.set_keyframes_only_media(
+            forward_media
+                .iter()
+                .chain(&behind_media)
+                .filter(|m| keyframe_media.contains(m) || pacing.scrub_keyframes.contains(m))
+                .copied()
+                .collect(),
+        );
     }
     // Discards what is outside both windows and, past the budget, the
     // farthest from the playhead.
@@ -1004,12 +1355,33 @@ fn walk_and_fill(
         jumps,
         window: &forward_segments,
         hw_priority: vv_media::HwPriority::Normal,
+        keyframe_first: paused && target.keyframes_when_behind(),
+        pacing,
+        // In fast playback the decision on keyframes is taken between cycles:
+        // a cycle decoding for a GOP would take it a second late.
+        decide_by: (speed > 1.0 && target.keyframes_when_behind())
+            .then(|| Instant::now() + FELL_BEHIND_AFTER),
     };
+    let (keyframe_segments, frame_segments): (Vec<WantedRange>, Vec<WantedRange>) =
+        forward_segments
+            .iter()
+            .partition(|s| keyframe_media.contains(&s.media_id));
+    let keys_ctx = FillContext {
+        hw_priority: vv_media::HwPriority::Low,
+        ..ctx
+    };
+    if let ControlFlow::Break(outcome) = fill_keyframes(&keyframe_segments, &keys_ctx, open_keys) {
+        return outcome;
+    }
+    if let ControlFlow::Break(outcome) = fill_keyframes(&scrub_segments, &keys_ctx, open_keys) {
+        return outcome;
+    }
     // The forward window first: behind gets only the budget left over.
-    let forward_chunks = chunk_forward_segments_near_to_far(&forward_segments);
+    let forward_chunks = chunk_forward_segments_near_to_far(&frame_segments);
     if let ControlFlow::Break(outcome) = fill_segments(&forward_chunks, &ctx, open) {
         return outcome;
     }
+    behind_segments.retain(|s| !keyframe_media.contains(&s.media_id));
     // Decoders separate from the forward ones: a single decoder would stay
     // past every segment behind and would skip them all. For the remaining chunks
     // a seek is always needed, so `went_backward` is forced.
@@ -1043,6 +1415,7 @@ fn walk_and_fill(
         went_backward: true,
         window: &window,
         hw_priority: vv_media::HwPriority::Low,
+        keyframe_first: false,
         ..ctx
     };
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
@@ -1050,8 +1423,280 @@ fn walk_and_fill(
     }
     // Immediately removes the leftover transit frames: the UI reads the state just
     // declared `caught_up` and must not see a strip wider than the truth.
+    window.extend(standing_in_ranges(
+        &forward_segments,
+        &standing_in_media,
+        &pacing.borrow(),
+    ));
     caches.reconcile(from_frame, &window, cache_budget_bytes);
+    if paused {
+        // Every frame is there: no keyframe stands in any more.
+        pacing.borrow_mut().scrub_keyframes.clear();
+    }
     WalkOutcome::SETTLED
+}
+
+/// The media playback above 1x shows by keyframes only: those whose decoding
+/// demand exceeds the throughput measured at the same stride by
+/// `KEYFRAMES_ABOVE_LOAD`, or that already fell behind at this speed, or whose
+/// frame at the playhead has been missing longer than keyframes only would
+/// leave between two (`gops`, by media) and at least `FELL_BEHIND_AFTER`, with
+/// the frame missing for `SUSTAINED_MISSING` of the playback so far, watched
+/// for `SUSTAINED_OVER`: else the
+/// freeze was a one-off (a cut, the disk) and keyframes for the whole playback
+/// would be worse.
+/// Decided once per playback and speed: switching back and forth would cost a
+/// seek each time.
+fn keyframes_only_media(
+    project: &Project,
+    fps: f64,
+    forward_segments: &[WantedRange],
+    caches: &SharedFrameCache,
+    proxy: Option<ProxyQuality>,
+    gops: &HashMap<MediaId, FrameIdx>,
+    from_frame: FrameIdx,
+    speed: f64,
+    enabled: bool,
+    pacing: &mut Pacing,
+) -> HashSet<MediaId> {
+    let mut chosen = HashSet::new();
+    if speed <= 1.0 || !enabled {
+        pacing.keyframes_only.clear();
+        pacing.missing_since.clear();
+        pacing.presence.clear();
+        return chosen;
+    }
+    let speed_key = speed.to_bits();
+    let now = Instant::now();
+    let mut seen = HashSet::new();
+    for segment in forward_segments {
+        let media_id = segment.media_id;
+        if !seen.insert(media_id) {
+            continue;
+        }
+        let Some(item) = project.media_pool.get(media_id) else {
+            continue;
+        };
+        if !keyframes_help(item, proxy) {
+            continue;
+        }
+        if pacing.keyframes_only.get(&media_id) == Some(&speed_key) {
+            chosen.insert(media_id);
+            continue;
+        }
+        if pacing.keyframes_only.remove(&media_id).is_some() {
+            // Another speed: what was missing at the last one says nothing.
+            pacing.presence.remove(&media_id);
+        }
+        let rate = segment.rate;
+        let demand = if rate.num > 0 && rate.den > 0 {
+            speed * fps * rate.den as f64 / rate.num as f64
+        } else {
+            speed * fps
+        };
+        let predicted = pacing.fell_behind.contains(&(media_id, speed_key))
+            || pacing
+                .throughput
+                .get(&(media_id, caches.stride(media_id)))
+                .is_some_and(|&fps| demand > fps * KEYFRAMES_ABOVE_LOAD);
+        let under_playhead = segment.timeline_start == from_frame;
+        let shown = caches
+            .get_near(
+                media_id,
+                segment.source_start,
+                segment.source_start,
+                segment.source_end,
+            )
+            .is_some();
+        let between_keyframes = Duration::from_secs_f64(
+            gops.get(&media_id).copied().unwrap_or(UNKNOWN_GOP_FRAMES) as f64 / demand.max(1e-9),
+        );
+        let sustained = under_playhead && {
+            let presence = pacing
+                .presence
+                .entry(media_id)
+                .or_insert_with(|| Presence::new(now));
+            presence.missing_share(now, !shown) >= SUSTAINED_MISSING
+                && now.duration_since(presence.since) >= SUSTAINED_OVER
+        };
+        let stalled = under_playhead && !shown && sustained && {
+            let since = *pacing.missing_since.entry(media_id).or_insert(now);
+            now.duration_since(since) >= FELL_BEHIND_AFTER.max(between_keyframes)
+        };
+        if shown {
+            pacing.missing_since.remove(&media_id);
+        }
+        if stalled {
+            pacing.fell_behind.insert((media_id, speed_key));
+        }
+        if predicted || stalled {
+            if debug_enabled() {
+                eprintln!(
+                    "[render_ahead] KEYFRAMES-ONLY media={media_id:?} speed={speed} remembered={} throughput={:?} demand={demand:.0} stalled={stalled}",
+                    pacing.fell_behind.contains(&(media_id, speed_key)),
+                    pacing.throughput.get(&(media_id, caches.stride(media_id))),
+                );
+            }
+            pacing.keyframes_only.insert(media_id, speed_key);
+            chosen.insert(media_id);
+        }
+    }
+    chosen
+}
+
+/// The keyframe standing in at a segment's start, in keyframe mode or in a
+/// scrub, often lies before the window:
+/// its stretch joins the window, or each reconcile would evict it and each
+/// cycle seek it again. Only where a seek proved no keyframe in between.
+fn standing_in_ranges(
+    forward_segments: &[WantedRange],
+    media: &HashSet<MediaId>,
+    pacing: &Pacing,
+) -> Vec<WantedRange> {
+    forward_segments
+        .iter()
+        .filter(|s| media.contains(&s.media_id))
+        .filter_map(|s| {
+            let (keyframe, _) = pacing.keyframe_span_at(s.media_id, s.source_start)?;
+            (keyframe < s.source_start).then(|| s.sub_range(keyframe, s.source_start - 1))
+        })
+        .collect()
+}
+
+/// Whether showing keyframes alone saves anything: every frame of an image or
+/// of an all-intra proxy already is one.
+fn keyframes_help(item: &vv_core::MediaItem, proxy: Option<ProxyQuality>) -> bool {
+    !item.meta.is_image() && !decode_path(item, proxy).1
+}
+
+/// The file to decode for `item`, and whether it is its all-intra proxy: the
+/// proxy when on and already made, the source otherwise.
+fn decode_path(item: &vv_core::MediaItem, proxy: Option<ProxyQuality>) -> (std::path::PathBuf, bool) {
+    match proxy.filter(|&q| vv_media::proxy::proxy_exists(item.content_hash, q)) {
+        Some(q) => (vv_media::proxy::proxy_path_for(item.content_hash, q), true),
+        None => (item.path.clone(), false),
+    }
+}
+
+/// While paused, puts the keyframe a seek landed on in the cache when decoding
+/// the `transit` frames from it to the one wanted is predicted to take longer
+/// than `KEYFRAME_FIRST_AFTER_SECS`: the viewer shows it meanwhile.
+fn show_landing_first(ctx: &FillContext, od: &mut OpenDecoder, media_id: MediaId, transit: FrameIdx) {
+    let throughput = ctx
+        .pacing
+        .borrow()
+        .throughput
+        .get(&(media_id, ctx.caches.stride(media_id)))
+        .copied()
+        .unwrap_or(DEFAULT_THROUGHPUT_FPS);
+    if transit as f64 / throughput <= KEYFRAME_FIRST_AFTER_SECS {
+        return;
+    }
+    let Ok(Some((keyframe, frame))) = od.decoder.landing_frame() else {
+        return;
+    };
+    if !ctx.caches.contains(media_id, keyframe)
+        && ctx.caches.bytes_used() + frame.byte_len() <= ctx.cache_budget_bytes
+    {
+        ctx.caches.insert(media_id, keyframe, frame);
+    }
+    ctx.caches.set_keyframes_only(media_id, true);
+    ctx.pacing.borrow_mut().scrub_keyframes.insert(media_id);
+}
+
+/// Keyframes only: for each segment the keyframe before it and those inside,
+/// one seek and one decode each, nothing in between. A seek landing again on the
+/// keyframe already there proves none in between: the next one goes a GOP
+/// further.
+fn fill_keyframes(
+    segments: &[WantedRange],
+    ctx: &FillContext,
+    open: &mut HashMap<MediaId, OpenDecoder>,
+) -> ControlFlow<WalkOutcome> {
+    for segment in segments {
+        let media_id = segment.media_id;
+        let Some(item) = ctx.project.media_pool.get(media_id) else {
+            continue;
+        };
+        let (path, is_proxy) = decode_path(item, ctx.proxy);
+        let max_size = (ctx.preview_divisor > 1).then(|| {
+            (
+                (item.meta.width / ctx.preview_divisor).max(1),
+                (item.meta.height / ctx.preview_divisor).max(1),
+            )
+        });
+        let mut t = segment.source_start;
+        loop {
+            let (span, next) = {
+                let pacing = ctx.pacing.borrow();
+                let span = pacing.keyframe_span_at(media_id, t);
+                let next = span.and_then(|(_, until)| pacing.keyframe_after(media_id, until));
+                (span, next)
+            };
+            let seek_to = match span {
+                Some((keyframe, until)) if ctx.caches.contains(media_id, keyframe) => {
+                    if until >= segment.source_end {
+                        break;
+                    }
+                    let step = open
+                        .get(&media_id)
+                        .map_or(DEFAULT_SEEK_THRESHOLD_FRAMES, |o| o.seek_threshold_frames());
+                    // The next keyframe already found and still there: no
+                    // need to seek it again every cycle.
+                    if let Some(next) = next
+                        && next <= until + step
+                        && ctx.caches.contains(media_id, next)
+                    {
+                        t = next;
+                        continue;
+                    }
+                    (until + step).min(segment.source_end)
+                }
+                _ => t,
+            };
+            if open.get(&media_id).is_some_and(|o| o.resolved_path != path) {
+                open.remove(&media_id);
+            }
+            let debug_start = debug_enabled().then(Instant::now);
+            if !open.contains_key(&media_id) {
+                let Some(decoder) =
+                    open_decoder(&path, item.meta.is_image(), ctx.hw_priority, max_size)
+                else {
+                    break;
+                };
+                open.insert(media_id, OpenDecoder::fresh(decoder, path.clone(), is_proxy));
+            }
+            let od = open.get_mut(&media_id).unwrap();
+            let Ok(Some((keyframe, frame))) = od.decoder.keyframe_before(seek_to) else {
+                break;
+            };
+            if let Some(t) = debug_start {
+                eprintln!(
+                    "[render_ahead] KEYFRAME media={media_id:?} target={seek_to} landed={keyframe} elapsed={:?}",
+                    t.elapsed()
+                );
+            }
+            od.record_keyframe_landing(keyframe, seek_to);
+            if !ctx.caches.contains(media_id, keyframe) {
+                if ctx.caches.bytes_used() + frame.byte_len() > ctx.cache_budget_bytes {
+                    return ControlFlow::Break(WalkOutcome::UNFINISHED);
+                }
+                ctx.caches.insert(media_id, keyframe, frame);
+            }
+            ctx.pacing
+                .borrow_mut()
+                .record_keyframe_span(media_id, keyframe, seek_to);
+            if ctx.target.jumps() != ctx.jumps {
+                return ControlFlow::Break(WalkOutcome {
+                    interrupted: true,
+                    caught_up: false,
+                });
+            }
+            // Within the span just proven: the next seek goes past it.
+            t = seek_to;
+        }
+    }
+    ControlFlow::Continue(())
 }
 
 /// Parameters of `fill_segments` common to both windows.
@@ -1078,6 +1723,12 @@ struct FillContext<'a> {
     window: &'a [WantedRange],
     /// Behind is `Low`: the HW surfaces go to the window ahead first.
     hw_priority: vv_media::HwPriority,
+    /// Paused with keyframes allowed: a seek far from its frame shows the
+    /// keyframe it landed on first.
+    keyframe_first: bool,
+    pacing: &'a RefCell<Pacing>,
+    /// The cycle ends here, interrupted, to decide again.
+    decide_by: Option<Instant>,
 }
 
 /// Decodes what is needed to cover `segments`, stopping if the budget is
@@ -1126,12 +1777,7 @@ fn fill_segments(
         }
         // Proxy only if enabled and already generated; otherwise the source, until the
         // proxy shows up on disk.
-        let proxy_path = ctx
-            .proxy
-            .filter(|&q| vv_media::proxy::proxy_exists(item.content_hash, q))
-            .map(|q| vv_media::proxy::proxy_path_for(item.content_hash, q));
-        let is_proxy = proxy_path.is_some();
-        let path = proxy_path.unwrap_or_else(|| item.path.clone());
+        let (path, is_proxy) = decode_path(item, ctx.proxy);
         match position_decoder(
             ctx.caches,
             open,
@@ -1158,11 +1804,16 @@ fn fill_segments(
                 let od = open.get_mut(&segment.media_id).unwrap();
                 if let Some(landing) = od.decoder.landing() {
                     od.record_keyframe_landing(landing, segment.source_start);
-                    od.decoder
-                        .skip_before(first_wanted_frame(ctx.window, segment, landing));
+                    let first_wanted = first_wanted_frame(ctx.window, segment, landing);
+                    if ctx.keyframe_first && !is_proxy {
+                        show_landing_first(ctx, od, segment.media_id, first_wanted - landing);
+                    }
+                    od.decoder.skip_before(first_wanted);
                 }
             }
         }
+        // Where the decoder stood when the throughput sample started.
+        let mut sample: Option<(Instant, FrameIdx)> = None;
 
         // `next_frame` is a placeholder until the first frame after the seek
         // tells the real position.
@@ -1191,6 +1842,19 @@ fn fill_segments(
                     );
                 }
                 break;
+            }
+            match sample {
+                None if od.next_frame > 0 => sample = Some((Instant::now(), od.next_frame)),
+                Some((since, from)) if od.next_frame - from >= THROUGHPUT_SAMPLE_FRAMES => {
+                    let secs = since.elapsed().as_secs_f64().max(1e-6);
+                    ctx.pacing.borrow_mut().record_throughput(
+                        segment.media_id,
+                        ctx.caches.stride(segment.media_id),
+                        (od.next_frame - from) as f64 / secs,
+                    );
+                    sample = Some((Instant::now(), od.next_frame));
+                }
+                _ => {}
             }
             let threshold_frames = od.seek_threshold_frames();
             if od.decoder.is_skipping() {
@@ -1280,7 +1944,10 @@ fn fill_segments(
             // Live target: if the playhead moved past the threshold the prefetch is
             // obsolete and it restarts immediately.
             let live = ctx.target.frame();
-            if ctx.target.jumps() != ctx.jumps || (live - ctx.from_frame).abs() > threshold_frames {
+            if ctx.target.jumps() != ctx.jumps
+                || (live - ctx.from_frame).abs() > threshold_frames
+                || ctx.decide_by.is_some_and(|by| Instant::now() >= by)
+            {
                 if debug_enabled() {
                     eprintln!(
                         "[render_ahead] INTERROTTO media={:?} segment=[{},{}] live={live} from_frame={} threshold={threshold_frames} estimated_gop={:?} last_keyframe_landed={:?}",
