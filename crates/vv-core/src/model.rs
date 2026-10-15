@@ -1047,9 +1047,11 @@ impl FilterKind {
     }
 }
 
-/// Bounds of `ClipFilter::amount` for `Exposure`, in stops.
-pub const EXPOSURE_MIN: f32 = -5.0;
-pub const EXPOSURE_MAX: f32 = 5.0;
+/// Bounds of `ClipFilter::amount` for `Exposure`, in stops. Wide enough to
+/// take white to 8-bit black (about -20) and the darkest 8-bit grey to white
+/// (about +18).
+pub const EXPOSURE_MIN: f32 = -20.0;
+pub const EXPOSURE_MAX: f32 = 20.0;
 
 /// Bounds of `ClipFilter::radius`, in timeline pixels.
 pub const BLUR_RADIUS_MAX: f32 = 250.0;
