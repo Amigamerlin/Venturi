@@ -4650,7 +4650,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vv-app"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "arboard",
  "eframe",
@@ -4678,7 +4678,7 @@ dependencies = [
 
 [[package]]
 name = "vv-audio"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "cpal",
  "ffmpeg-next",
@@ -4687,7 +4687,7 @@ dependencies = [
 
 [[package]]
 name = "vv-core"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "ron",
  "serde",
@@ -4697,7 +4697,7 @@ dependencies = [
 
 [[package]]
 name = "vv-mcp"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "base64 0.22.1",
  "png",
@@ -4714,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "vv-media"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "ffmpeg-next",
  "thiserror 2.0.20",
@@ -4723,7 +4723,7 @@ dependencies = [
 
 [[package]]
 name = "vv-render"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -4735,7 +4735,7 @@ dependencies = [
 
 [[package]]
 name = "vv-session"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "serde_json",
  "vv-audio",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "vv-vad"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "tract-onnx",
 ]
