@@ -65,7 +65,7 @@ impl Lease {
             HwPriority::Normal => budget,
             HwPriority::Low => budget / 2,
         };
-        USED.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+        USED.try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             (used.saturating_add(bytes) <= limit).then_some(used + bytes)
         })
         .ok()
