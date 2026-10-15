@@ -904,5 +904,9 @@ fn keyframe_before_decodes_the_keyframe_alone_and_a_seek_resumes_after_it() {
     assert_eq!(decoder.keyframe_before(0).unwrap().unwrap().0, 0);
 
     decoder.seek_to_time(70.0 / 25.0).unwrap();
-    assert_eq!(decoder.next_frame().unwrap().unwrap().0, 50, "usable again after a seek");
+    assert_eq!(
+        decoder.next_frame().unwrap().unwrap().0,
+        50,
+        "usable again after a seek"
+    );
 }

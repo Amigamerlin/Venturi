@@ -10,6 +10,7 @@
 //! anyway, at any depth, to keep warm the
 //! real media that composition will read.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
-use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
@@ -260,7 +260,13 @@ impl RenderAhead {
     /// playback shows no others), 1 for all of them.
     pub fn set_frame_stride(&self, stride: FrameIdx) {
         let stride = stride.max(1);
-        if self.shared.target.frame_stride.swap(stride, Ordering::Relaxed) != stride {
+        if self
+            .shared
+            .target
+            .frame_stride
+            .swap(stride, Ordering::Relaxed)
+            != stride
+        {
             self.shared.caught_up.store(false, Ordering::Relaxed);
             let _ = self.tx.send(Command::Wake);
         }
@@ -1106,14 +1112,21 @@ impl Pacing {
     /// The keyframe at or before `frame` with no other one up to it, as far as
     /// seeks proved, and how far that proof goes.
     fn keyframe_span_at(&self, media_id: MediaId, frame: FrameIdx) -> Option<(FrameIdx, FrameIdx)> {
-        let (&keyframe, &until) = self.keyframe_spans.get(&media_id)?.range(..=frame).next_back()?;
+        let (&keyframe, &until) = self
+            .keyframe_spans
+            .get(&media_id)?
+            .range(..=frame)
+            .next_back()?;
         (frame <= until).then_some((keyframe, until))
     }
 
     /// The first keyframe a seek landed on past `frame`.
     fn keyframe_after(&self, media_id: MediaId, frame: FrameIdx) -> Option<FrameIdx> {
         let spans = self.keyframe_spans.get(&media_id)?;
-        spans.range(frame + 1..).next().map(|(&keyframe, _)| keyframe)
+        spans
+            .range(frame + 1..)
+            .next()
+            .map(|(&keyframe, _)| keyframe)
     }
 
     fn record_keyframe_span(&mut self, media_id: MediaId, keyframe: FrameIdx, target: FrameIdx) {
@@ -1264,55 +1277,57 @@ fn walk_and_fill_paced(
     let mut standing_in_media = keyframe_media.clone();
     // Scrubbing over frames not cached: the keyframe before each first, then
     // the frame itself.
-    let scrub_segments: Vec<WantedRange> = if paused
-        && target.keyframes_when_behind()
-        && pacing.borrow_mut().scrubbing(jumps)
-    {
-        forward_segments
-            .iter()
-            .filter(|s| s.timeline_start == from_frame)
-            .filter(|s| {
-                project
-                    .media_pool
-                    .get(s.media_id)
-                    .is_some_and(|item| keyframes_help(item, proxy))
-            })
-            // A frame a GOP or less before stands in already: the cycle goes to
-            // decoding the frame itself instead.
-            .filter(|s| {
-                let gop = open
-                    .get(&s.media_id)
-                    .map_or(DEFAULT_SEEK_THRESHOLD_FRAMES, |o| o.seek_threshold_frames());
-                !(s.source_start - gop..=s.source_start).any(|i| caches.contains(s.media_id, i))
-            })
-            // A decoder about to reach the frame keeps going: seeking it back
-            // to the keyframe would throw that way away.
-            .filter(|s| {
-                !open.get(&s.media_id).is_some_and(|o| {
-                    let ahead = s.source_start - o.next_frame;
-                    let throughput = pacing
-                        .borrow()
-                        .throughput
-                        .get(&(s.media_id, caches.stride(s.media_id)))
-                        .copied()
-                        .unwrap_or(DEFAULT_THROUGHPUT_FPS);
-                    o.next_frame > 0
-                        && ahead >= 0
-                        && ahead as f64 / throughput <= KEYFRAME_FIRST_AFTER_SECS
+    let scrub_segments: Vec<WantedRange> =
+        if paused && target.keyframes_when_behind() && pacing.borrow_mut().scrubbing(jumps) {
+            forward_segments
+                .iter()
+                .filter(|s| s.timeline_start == from_frame)
+                .filter(|s| {
+                    project
+                        .media_pool
+                        .get(s.media_id)
+                        .is_some_and(|item| keyframes_help(item, proxy))
                 })
-            })
-            .map(|s| s.sub_range(s.source_start, s.source_start))
-            .collect()
-    } else {
-        Vec::new()
-    };
+                // A frame a GOP or less before stands in already: the cycle goes to
+                // decoding the frame itself instead.
+                .filter(|s| {
+                    let gop = open
+                        .get(&s.media_id)
+                        .map_or(DEFAULT_SEEK_THRESHOLD_FRAMES, |o| o.seek_threshold_frames());
+                    !(s.source_start - gop..=s.source_start).any(|i| caches.contains(s.media_id, i))
+                })
+                // A decoder about to reach the frame keeps going: seeking it back
+                // to the keyframe would throw that way away.
+                .filter(|s| {
+                    !open.get(&s.media_id).is_some_and(|o| {
+                        let ahead = s.source_start - o.next_frame;
+                        let throughput = pacing
+                            .borrow()
+                            .throughput
+                            .get(&(s.media_id, caches.stride(s.media_id)))
+                            .copied()
+                            .unwrap_or(DEFAULT_THROUGHPUT_FPS);
+                        o.next_frame > 0
+                            && ahead >= 0
+                            && ahead as f64 / throughput <= KEYFRAME_FIRST_AFTER_SECS
+                    })
+                })
+                .map(|s| s.sub_range(s.source_start, s.source_start))
+                .collect()
+        } else {
+            Vec::new()
+        };
     {
         let mut pacing = pacing.borrow_mut();
         pacing
             .scrub_keyframes
             .extend(scrub_segments.iter().map(|s| s.media_id));
         standing_in_media.extend(pacing.scrub_keyframes.iter().copied());
-        window.extend(standing_in_ranges(&forward_segments, &standing_in_media, &pacing));
+        window.extend(standing_in_ranges(
+            &forward_segments,
+            &standing_in_media,
+            &pacing,
+        ));
         if !paused || !target.keyframes_when_behind() {
             pacing.scrub_keyframes.clear();
         }
@@ -1571,7 +1586,10 @@ fn keyframes_help(item: &vv_core::MediaItem, proxy: Option<ProxyQuality>) -> boo
 
 /// The file to decode for `item`, and whether it is its all-intra proxy: the
 /// proxy when on and already made, the source otherwise.
-fn decode_path(item: &vv_core::MediaItem, proxy: Option<ProxyQuality>) -> (std::path::PathBuf, bool) {
+fn decode_path(
+    item: &vv_core::MediaItem,
+    proxy: Option<ProxyQuality>,
+) -> (std::path::PathBuf, bool) {
     match proxy.filter(|&q| vv_media::proxy::proxy_exists(item.content_hash, q)) {
         Some(q) => (vv_media::proxy::proxy_path_for(item.content_hash, q), true),
         None => (item.path.clone(), false),
@@ -1581,7 +1599,12 @@ fn decode_path(item: &vv_core::MediaItem, proxy: Option<ProxyQuality>) -> (std::
 /// While paused, puts the keyframe a seek landed on in the cache when decoding
 /// the `transit` frames from it to the one wanted is predicted to take longer
 /// than `KEYFRAME_FIRST_AFTER_SECS`: the viewer shows it meanwhile.
-fn show_landing_first(ctx: &FillContext, od: &mut OpenDecoder, media_id: MediaId, transit: FrameIdx) {
+fn show_landing_first(
+    ctx: &FillContext,
+    od: &mut OpenDecoder,
+    media_id: MediaId,
+    transit: FrameIdx,
+) {
     let throughput = ctx
         .pacing
         .borrow()
@@ -1658,15 +1681,17 @@ fn fill_keyframes(
                 open.remove(&media_id);
             }
             let debug_start = debug_enabled().then(Instant::now);
-            if !open.contains_key(&media_id) {
-                let Some(decoder) =
-                    open_decoder(&path, item.meta.is_image(), ctx.hw_priority, max_size)
-                else {
-                    break;
-                };
-                open.insert(media_id, OpenDecoder::fresh(decoder, path.clone(), is_proxy));
-            }
-            let od = open.get_mut(&media_id).unwrap();
+            let od = match open.entry(media_id) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let Some(decoder) =
+                        open_decoder(&path, item.meta.is_image(), ctx.hw_priority, max_size)
+                    else {
+                        break;
+                    };
+                    e.insert(OpenDecoder::fresh(decoder, path.clone(), is_proxy))
+                }
+            };
             let Ok(Some((keyframe, frame))) = od.decoder.keyframe_before(seek_to) else {
                 break;
             };

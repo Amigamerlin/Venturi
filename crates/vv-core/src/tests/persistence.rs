@@ -228,7 +228,9 @@ fn the_view_round_trips_and_an_older_file_without_it_still_loads() {
     assert_eq!(load_project(&path).unwrap().view, project.view);
 
     let contents = std::fs::read_to_string(&path).unwrap();
-    let view = contents.find("    view:").expect("the view is the last field");
+    let view = contents
+        .find("    view:")
+        .expect("the view is the last field");
     std::fs::write(&path, format!("{})", &contents[..view])).unwrap();
     assert_eq!(load_project(&path).unwrap().view, ProjectView::default());
 }

@@ -133,7 +133,10 @@ impl SharedFrameCache {
         if let Some(frame) = cached(idx) {
             return Some((frame, Served::Exact));
         }
-        if let Some(frame) = (1..stride).flat_map(|d| [idx - d, idx + d]).find_map(cached) {
+        if let Some(frame) = (1..stride)
+            .flat_map(|d| [idx - d, idx + d])
+            .find_map(cached)
+        {
             return Some((frame, Served::Neighbour));
         }
         if !inner.keyframes_only.contains(&media_id) {
@@ -168,7 +171,11 @@ impl SharedFrameCache {
     }
 
     pub fn keyframes_only(&self, media_id: MediaId) -> bool {
-        self.inner.lock().unwrap().keyframes_only.contains(&media_id)
+        self.inner
+            .lock()
+            .unwrap()
+            .keyframes_only
+            .contains(&media_id)
     }
 
     /// Only the frames at multiples of `stride` are wanted for `media_id`
@@ -264,7 +271,10 @@ impl SharedFrameCache {
                 .entries
                 .keys()
                 .map(|&(media_id, idx)| {
-                    ((media_id, idx), eviction_rank(media_id, idx, playhead, window))
+                    (
+                        (media_id, idx),
+                        eviction_rank(media_id, idx, playhead, window),
+                    )
                 })
                 .collect();
             // Eviction works from the tail.

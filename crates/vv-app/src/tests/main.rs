@@ -5243,7 +5243,10 @@ fn window_frame_bytes_maps_the_window_into_the_compound_clip() {
     let late = hd_media(&mut app, 2, (3840, 2160));
     let nested = timeline_60_with(
         &mut app,
-        vec![media_clip_at(1, early, 0, 200), media_clip_at(2, late, 200, 200)],
+        vec![
+            media_clip_at(1, early, 0, 200),
+            media_clip_at(2, late, 200, 200),
+        ],
     );
     let compound = insert_compound_media(&mut app, nested);
     let root = timeline_60_with(&mut app, vec![media_clip_at(3, compound, 1000, 400)]);

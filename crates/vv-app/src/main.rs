@@ -3789,7 +3789,11 @@ fn paint_keyframes_badge(painter: &egui::Painter, frame: egui::Rect) {
         galley.size() + egui::vec2(10.0, 4.0),
     );
     painter.rect_filled(badge, 3.0, theme::ACCENT_FILL);
-    painter.galley(badge.min + egui::vec2(5.0, 2.0), galley, egui::Color32::WHITE);
+    painter.galley(
+        badge.min + egui::vec2(5.0, 2.0),
+        galley,
+        egui::Color32::WHITE,
+    );
 }
 
 /// One timeline frame every how many the buffer keeps: the speed while
