@@ -140,21 +140,7 @@ impl SettingsDialog {
         let Some(capture) = self.capture else {
             return false;
         };
-        let pressed = ctx.input(|i| {
-            i.events.iter().find_map(|event| match event {
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    repeat: false,
-                    modifiers,
-                    ..
-                } => Some(Shortcut::from_event(*key, *modifiers)),
-                egui::Event::Copy => Some(Shortcut::ctrl(egui::Key::C)),
-                egui::Event::Cut => Some(Shortcut::ctrl(egui::Key::X)),
-                egui::Event::Paste(_) => Some(Shortcut::ctrl(egui::Key::V)),
-                _ => None,
-            })
-        });
+        let pressed = ctx.input(|i| i.events.iter().find_map(Shortcut::captured));
         let Some(shortcut) = pressed else {
             return false;
         };

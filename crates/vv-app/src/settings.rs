@@ -289,6 +289,32 @@ impl Shortcut {
         }
     }
 
+    /// The shortcut a key press in the capture UI stands for. A modifier
+    /// alone is not one: egui reports it as a key press of its own, which
+    /// would end the capture before the rest of the combination.
+    pub fn captured(event: &egui::Event) -> Option<Self> {
+        use egui::Key::*;
+        match event {
+            egui::Event::Key {
+                key:
+                    ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft
+                    | SuperRight,
+                ..
+            } => None,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } => Some(Self::from_event(*key, *modifiers)),
+            egui::Event::Copy => Some(Self::ctrl(C)),
+            egui::Event::Cut => Some(Self::ctrl(X)),
+            egui::Event::Paste(_) => Some(Self::ctrl(V)),
+            _ => None,
+        }
+    }
+
     fn modifiers(self) -> egui::Modifiers {
         egui::Modifiers {
             alt: self.alt,

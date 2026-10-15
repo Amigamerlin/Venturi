@@ -262,3 +262,22 @@ fn keyframes_when_behind_is_on_by_default_and_saved() {
     assert!(!Settings::load(&path).keyframes_when_behind);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn capture_waits_past_a_lone_modifier_for_the_whole_combination() {
+    let key = |key, modifiers| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    assert_eq!(
+        Shortcut::captured(&key(egui::Key::ControlLeft, egui::Modifiers::COMMAND)),
+        None
+    );
+    assert_eq!(
+        Shortcut::captured(&key(egui::Key::K, egui::Modifiers::COMMAND)),
+        Some(Shortcut::ctrl(egui::Key::K))
+    );
+}
