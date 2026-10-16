@@ -712,19 +712,20 @@ fn a_text_shadow_darkens_the_layer_below() {
     let title = vv_core::TitleParams {
         content: "II".into(),
         size: 60.0,
-        shadow: vv_core::TitleShadow {
-            enabled: true,
-            offset: [10.0, -10.0],
-            blur: 0.0,
-            opacity: 100.0,
-            ..Default::default()
-        },
         ..Default::default()
     };
+    let shadow = [vv_core::FilterValue {
+        radius: 0.0,
+        amount: 100.0,
+        ..vv_core::FilterValue::new(vv_core::FilterKind::DropShadow)
+    }];
     let out = compositor.render_layers(
         &[
             Layer::new(LayerContent::Solid(RED), Transform::default()),
-            Layer::new(LayerContent::Text(&title), Transform::default()),
+            Layer {
+                filters: &shadow,
+                ..Layer::new(LayerContent::Text(&title), Transform::default())
+            },
         ],
         OutputFrame::exact(160, 90),
     );
@@ -2314,4 +2315,189 @@ fn auto_balance_removes_a_cast_from_the_render() {
         cast(&before),
         cast(&after)
     );
+}
+
+#[test]
+fn a_drop_shadow_is_cast_under_the_layer_by_its_offset() {
+    let compositor = Compositor::new_headless();
+    let shadow = |radius| {
+        [vv_core::FilterValue {
+            radius,
+            amount: 100.0,
+            offset: [4.0, -4.0],
+            ..vv_core::FilterValue::new(vv_core::FilterKind::DropShadow)
+        }]
+    };
+    let render = |filters: &[vv_core::FilterValue]| {
+        let out = compositor.render_layers(
+            &[
+                Layer::new(LayerContent::Solid(WHITE), Transform::default()),
+                Layer {
+                    filters,
+                    ..Layer::new(
+                        LayerContent::Solid(RED),
+                        Transform {
+                            zoom: [0.25, 0.25],
+                            ..Transform::default()
+                        },
+                    )
+                },
+            ],
+            OutputFrame::exact(32, 16),
+        );
+        out.as_chunks::<4>().0.to_vec()
+    };
+    // The red square covers x 12..20, y 6..10.
+    let sharp = render(&shadow(0.0));
+    assert_close_rgba(at(&sharp, 18, 9), [255, 0, 0, 255]);
+    assert_close_rgba(at(&sharp, 22, 12), [0, 0, 0, 255]);
+    assert_close_rgba(at(&sharp, 10, 12), [255, 255, 255, 255]);
+    assert_close_rgba(at(&sharp, 25, 12), [255, 255, 255, 255]);
+
+    let soft = render(&shadow(6.0));
+    let edge = at(&soft, 25, 12);
+    assert!(edge[0] < 250, "the blur spreads past the edge: {edge:?}");
+}
+
+#[test]
+fn a_wide_blur_halves_its_texture_along_its_direction_only() {
+    let compositor = Compositor::new_headless();
+    let mut rec = compositor.recording();
+    let source = compositor.scratch_texture(256, 64);
+    let (blurred, space) = compositor.blurred(
+        &mut rec,
+        &source,
+        WorkSpace::of_output(OutputFrame::exact(256, 64)),
+        Blur {
+            gaussian: true,
+            radius: 100.0,
+            direction: vv_core::BlurDirection::Horizontal,
+        },
+    );
+    assert_eq!(space.size, [64, 64]);
+    assert_eq!(space.texels(100.0, 0), 25.0);
+    assert_eq!(space.texels(100.0, 1), 100.0);
+    assert_eq!((blurred.width(), blurred.height()), (64, 64));
+    compositor.submit(rec);
+}
+
+#[test]
+fn a_wide_gaussian_blur_stays_a_symmetric_ramp() {
+    let mut frame = solid_frame(256, 4, 0, 128, 128, ColorMatrix::Bt709, true);
+    for row in frame.y.chunks_mut(256) {
+        row[128..].fill(255);
+    }
+    let filters = [blur(vv_core::FilterKind::GaussianBlur, 90.0)];
+    let out = Compositor::new_headless().render_layers(
+        &[Layer {
+            filters: &filters,
+            ..Layer::new(
+                LayerContent::Video {
+                    frame: frame.as_yuv_frame(),
+                    source_size: (256, 4),
+                },
+                Transform::default(),
+            )
+        }],
+        OutputFrame::exact(256, 4),
+    );
+    let row: Vec<u8> = out.as_chunks::<4>().0[256..512]
+        .iter()
+        .map(|px| px[0])
+        .collect();
+    assert!(
+        row.windows(2).all(|w| w[0] <= w[1].saturating_add(1)),
+        "{row:?}"
+    );
+    assert!(row[100] > 10 && row[155] < 245, "the ramp is wide: {row:?}");
+    assert!(
+        (row[127] as i32 + row[128] as i32 - 255).abs() <= 6,
+        "{row:?}"
+    );
+}
+
+#[test]
+fn a_shadowed_layer_keeps_its_blend_mode() {
+    let filters = [vv_core::FilterValue {
+        radius: 0.0,
+        amount: 100.0,
+        offset: [4.0, -4.0],
+        ..vv_core::FilterValue::new(vv_core::FilterKind::DropShadow)
+    }];
+    let out = Compositor::new_headless().render_layers(
+        &[
+            Layer::new(LayerContent::Solid(WHITE), Transform::default()),
+            Layer {
+                filters: &filters,
+                blend: BlendMode::Difference,
+                ..Layer::new(
+                    LayerContent::Solid(RED),
+                    Transform {
+                        zoom: [0.25, 0.25],
+                        ..Transform::default()
+                    },
+                )
+            },
+        ],
+        OutputFrame::exact(32, 16),
+    );
+    let pixels = out.as_chunks::<4>().0.to_vec();
+    // The red square covers x 12..20, y 6..10; its shadow x 16..24, y 10..14.
+    assert_close_rgba(at(&pixels, 13, 7), [0, 255, 255, 255]);
+    assert_close_rgba(at(&pixels, 22, 12), [0, 0, 0, 255]);
+    assert_close_rgba(at(&pixels, 5, 5), [255, 255, 255, 255]);
+}
+
+/// A red square of a quarter of a `size`x`size` frame, centered, over white,
+/// casting a sharp shadow with no offset grown by `grow`.
+fn render_grown_shadow(size: u32, grow: f32) -> Vec<[u8; 4]> {
+    let filters = [vv_core::FilterValue {
+        radius: 0.0,
+        amount: 100.0,
+        offset: [0.0, 0.0],
+        grow,
+        ..vv_core::FilterValue::new(vv_core::FilterKind::DropShadow)
+    }];
+    let out = Compositor::new_headless().render_layers(
+        &[
+            Layer::new(LayerContent::Solid(WHITE), Transform::default()),
+            Layer {
+                filters: &filters,
+                ..Layer::new(
+                    LayerContent::Solid(RED),
+                    Transform {
+                        zoom: [0.25, 0.25],
+                        ..Transform::default()
+                    },
+                )
+            },
+        ],
+        OutputFrame::exact(size, size),
+    );
+    out.as_chunks::<4>().0.to_vec()
+}
+
+fn at_in(pixels: &[[u8; 4]], width: usize, x: usize, y: usize) -> [u8; 4] {
+    pixels[y * width + x]
+}
+
+#[test]
+fn grow_thickens_the_shadow_by_its_radius_with_round_corners() {
+    let pixels = render_grown_shadow(64, 4.0);
+    let at = |x, y| at_in(&pixels, 64, x, y);
+    // The square covers 24..40.
+    assert_close_rgba(at(32, 32), [255, 0, 0, 255]);
+    assert_close_rgba(at(43, 32), [0, 0, 0, 255]);
+    assert_close_rgba(at(32, 20), [0, 0, 0, 255]);
+    assert_close_rgba(at(45, 32), [255, 255, 255, 255]);
+    assert_close_rgba(at(43, 43), [255, 255, 255, 255]);
+}
+
+#[test]
+fn a_wide_grow_reaches_as_far_at_a_lower_resolution() {
+    let pixels = render_grown_shadow(256, 40.0);
+    let at = |x| at_in(&pixels, 256, x, 128)[0];
+    // The square covers 96..160.
+    assert!(at(190) < 30, "{}", at(190));
+    assert!(at(210) > 225, "{}", at(210));
 }

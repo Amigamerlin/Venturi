@@ -2368,6 +2368,65 @@ fn filter_keyframes_are_set_replaced_and_removed_with_undo() {
 }
 
 #[test]
+fn drop_shadow_offset_and_grow_take_keyframes_per_axis_with_undo() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut clip = make_clip(&mut project, 0, 20);
+    clip.effects.filters = vec![ClipFilter::new(FilterKind::DropShadow)];
+    let id = clip.id;
+    let mut history = History::default();
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip,
+        }),
+    );
+    let filter = |project: &Project| {
+        project.timelines[timeline].tracks[0].clips[0]
+            .effects
+            .filters[0]
+            .clone()
+    };
+    for value in [
+        command::KeyframeValue::FilterOffset(FilterKind::DropShadow, Axis::Y, 30.0),
+        command::KeyframeValue::FilterGrow(FilterKind::DropShadow, 6.0),
+    ] {
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                id,
+                5,
+                value,
+                Interpolation::Linear,
+            )),
+        );
+    }
+    let at_5 = filter(&project).value_at(5);
+    assert_eq!(at_5.offset, [DEFAULT_SHADOW_OFFSET[0], 30.0]);
+    assert_eq!(at_5.grow, 6.0);
+    assert!(filter(&project).offset[Axis::X.index()].is_constant());
+
+    history.do_command(
+        &mut project,
+        Box::new(command::RemoveKeyframe::new(
+            timeline,
+            0,
+            id,
+            command::KeyframeTarget::FilterOffset(FilterKind::DropShadow, Axis::Y),
+            5,
+        )),
+    );
+    assert!(filter(&project).offset[Axis::Y.index()].is_constant());
+    history.undo(&mut project);
+    assert_eq!(filter(&project).value_at(5).offset[1], 30.0);
+    history.undo(&mut project);
+    assert!(filter(&project).grow.is_constant());
+}
+
+#[test]
 fn a_color_correction_param_takes_keyframes_and_undo_removes_them() {
     let (mut project, timeline) = make_project_with_two_tracks();
     let mut history = History::default();

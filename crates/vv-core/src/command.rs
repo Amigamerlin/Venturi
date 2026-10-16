@@ -4,11 +4,11 @@
 use crate::grade::GradeParam;
 use crate::mask::{ClipMask, MaskParam};
 use crate::model::{
-    AudioEffect, BlurDirection, ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter, ClipId,
-    ClipSource, CrossTransition, EffectStack, FilterKind, FrameIdx, GAIN_DB_MAX, GAIN_DB_MIN,
-    Interpolation, Keyframed, LinkGroupId, Marker, MarkerId, MediaId, MediaItem, MediaMeta,
-    ProcessingPrecision, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track,
-    TrackKind, Transform, TransformParam, Transition,
+    AudioEffect, Axis, BlurDirection, ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter,
+    ClipId, ClipSource, CrossTransition, EffectStack, FilterKind, FrameIdx, GAIN_DB_MAX,
+    GAIN_DB_MIN, Interpolation, Keyframed, LinkGroupId, Marker, MarkerId, MediaId, MediaItem,
+    MediaMeta, ProcessingPrecision, Project, Rational, Rgba, Timeline, TimelineId, TitleParams,
+    Track, TrackKind, Transform, TransformParam, Transition,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -2252,6 +2252,8 @@ pub enum KeyframeValue {
     FilterRadius(FilterKind, f32),
     FilterDirection(FilterKind, BlurDirection),
     FilterAmount(FilterKind, f32),
+    FilterOffset(FilterKind, Axis, f32),
+    FilterGrow(FilterKind, f32),
     /// Of the clip's color correction.
     Grade(GradeParam, f32),
     /// Of the clip's mask at that index.
@@ -2335,6 +2337,8 @@ pub enum KeyframeTarget {
     FilterRadius(FilterKind),
     FilterDirection(FilterKind),
     FilterAmount(FilterKind),
+    FilterOffset(FilterKind, Axis),
+    FilterGrow(FilterKind),
     Grade(GradeParam),
     Mask(usize, MaskParam),
 }
@@ -2348,6 +2352,8 @@ impl KeyframeValue {
             Self::FilterRadius(kind, _) => KeyframeTarget::FilterRadius(kind),
             Self::FilterDirection(kind, _) => KeyframeTarget::FilterDirection(kind),
             Self::FilterAmount(kind, _) => KeyframeTarget::FilterAmount(kind),
+            Self::FilterOffset(kind, axis, _) => KeyframeTarget::FilterOffset(kind, axis),
+            Self::FilterGrow(kind, _) => KeyframeTarget::FilterGrow(kind),
             Self::Grade(param, _) => KeyframeTarget::Grade(param),
             Self::Mask(index, param, _) => KeyframeTarget::Mask(index, param),
         }
@@ -2404,6 +2410,12 @@ fn take_keyframe(
         KeyframeTarget::FilterAmount(kind) => filter_mut(effects, kind)
             .and_then(|f| f.amount.remove_at(frame))
             .map(|(v, i)| (KeyframeValue::FilterAmount(kind, v), i)),
+        KeyframeTarget::FilterOffset(kind, axis) => filter_mut(effects, kind)
+            .and_then(|f| f.offset[axis.index()].remove_at(frame))
+            .map(|(v, i)| (KeyframeValue::FilterOffset(kind, axis, v), i)),
+        KeyframeTarget::FilterGrow(kind) => filter_mut(effects, kind)
+            .and_then(|f| f.grow.remove_at(frame))
+            .map(|(v, i)| (KeyframeValue::FilterGrow(kind, v), i)),
         KeyframeTarget::Grade(param) => grade_track_mut(effects, param)
             .and_then(|k| k.remove_at(frame))
             .map(|(v, i)| (KeyframeValue::Grade(param, v), i)),
@@ -2447,6 +2459,16 @@ fn put_keyframe(
                 filter.amount.upsert(frame, v, interpolation);
             }
         }
+        KeyframeValue::FilterOffset(kind, axis, v) => {
+            if let Some(filter) = filter_mut(effects, kind) {
+                filter.offset[axis.index()].upsert(frame, v, interpolation);
+            }
+        }
+        KeyframeValue::FilterGrow(kind, v) => {
+            if let Some(filter) = filter_mut(effects, kind) {
+                filter.grow.upsert(frame, v, interpolation);
+            }
+        }
         KeyframeValue::Grade(param, v) => {
             if let Some(track) = grade_track_mut(effects, param) {
                 track.upsert(frame, v, interpolation);
@@ -2483,6 +2505,11 @@ fn set_keyframe_interpolation(
             .and_then(|f| f.direction.set_interpolation(frame, interpolation)),
         KeyframeTarget::FilterAmount(kind) => {
             filter_mut(effects, kind).and_then(|f| f.amount.set_interpolation(frame, interpolation))
+        }
+        KeyframeTarget::FilterOffset(kind, axis) => filter_mut(effects, kind)
+            .and_then(|f| f.offset[axis.index()].set_interpolation(frame, interpolation)),
+        KeyframeTarget::FilterGrow(kind) => {
+            filter_mut(effects, kind).and_then(|f| f.grow.set_interpolation(frame, interpolation))
         }
         KeyframeTarget::Grade(param) => {
             grade_track_mut(effects, param).and_then(|k| k.set_interpolation(frame, interpolation))

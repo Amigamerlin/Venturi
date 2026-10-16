@@ -98,6 +98,9 @@ filter.gaussian_blur:
 filter.exposure:
   en: "Exposure"
   it: "Esposizione"
+filter.drop_shadow:
+  en: "Drop Shadow"
+  it: "Drop Shadow"
 
 pool.drag_to_clip:
   en: "Drag onto a video clip"

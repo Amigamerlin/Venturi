@@ -212,6 +212,12 @@ struct FilterPanelInfo {
     amount: f32,
     amount_key: RowKeyframe,
     grade: grade_panel::GradeInfo,
+    offset: [f32; 2],
+    /// Of both axes, edited in one row.
+    offset_key: RowKeyframe,
+    grow: f32,
+    grow_key: RowKeyframe,
+    color: vv_core::Rgba,
 }
 
 /// A clip's track composed by itself, for the auto balance: a

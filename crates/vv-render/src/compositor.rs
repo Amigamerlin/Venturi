@@ -64,6 +64,7 @@ fn shader_matrix_id(matrix: ColorMatrix) -> f32 {
 }
 
 /// 8-bit YUV420 frame with the color metadata. Dense planes, no padding.
+#[derive(Clone, Copy)]
 pub struct YuvFrame<'a> {
     pub y: &'a [u8],
     pub width: u32,
@@ -128,6 +129,7 @@ impl<'a> Layer<'a> {
 
 /// `Solid` and `Text` are treated as sources as large as the timeline: same
 /// transform/crop.
+#[derive(Clone, Copy)]
 pub enum LayerContent<'a> {
     Video {
         frame: YuvFrame<'a>,
@@ -167,13 +169,89 @@ fn filter_shader_id(kind: vv_core::FilterKind) -> f32 {
     match kind {
         vv_core::FilterKind::ColorCorrection => 1.0,
         vv_core::FilterKind::Exposure => 2.0,
-        vv_core::FilterKind::BoxBlur | vv_core::FilterKind::GaussianBlur => 0.0,
+        vv_core::FilterKind::BoxBlur
+        | vv_core::FilterKind::GaussianBlur
+        | vv_core::FilterKind::DropShadow => 0.0,
     }
 }
 
 /// Past that many taps per side a blur samples every few texels instead of
 /// every one: the cost stays bounded at large radii.
 const MAX_BLUR_TAPS: f32 = 96.0;
+
+/// Past that reach a neighbourhood effect halves its texture first (see
+/// `Compositor::reduced`): one that wide loses nothing at the lower
+/// resolution, and costs a fraction.
+const MAX_REACH_TEXELS: f32 = 32.0;
+
+/// Squared distances of `Compositor::grown`, past what 8 bits can hold.
+const DISTANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GrowUniform {
+    params: [f32; 4],
+}
+
+/// The texture where a layer's neighbourhood effects (blurs, drop shadow)
+/// run. Their sizes are in timeline pixels and become texels only through
+/// `texels`: how many texels to spend is decided by `of_source`,
+/// `of_output` and `Compositor::reduced`, never by the effect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WorkSpace {
+    size: [u32; 2],
+    texels_per_pixel: [f32; 2],
+}
+
+impl WorkSpace {
+    fn of_output(output: OutputFrame) -> Self {
+        Self {
+            size: [output.width, output.height],
+            texels_per_pixel: [
+                output.width as f32 / output.timeline_size.0.max(1) as f32,
+                output.height as f32 / output.timeline_size.1.max(1) as f32,
+            ],
+        }
+    }
+
+    /// A source of `texture_size` texels drawn with the identity transform.
+    fn of_source(texture_size: (u32, u32), transform: &Transform, output: OutputFrame) -> Self {
+        let (sw, sh) = (texture_size.0.max(1) as f32, texture_size.1.max(1) as f32);
+        // Output pixels per source texel at zoom 1.
+        let fit_scale = (output.width as f32 / sw).min(output.height as f32 / sh);
+        let zoom = transform.zoom[0]
+            .abs()
+            .max(transform.zoom[1].abs())
+            .max(1.0);
+        // No more texels than the output shows.
+        let scale = (fit_scale * zoom).min(1.0);
+        let texels_per_pixel =
+            output.width as f32 / output.timeline_size.0.max(1) as f32 / fit_scale * scale;
+        Self {
+            size: [
+                ((sw * scale).round() as u32).max(1),
+                ((sh * scale).round() as u32).max(1),
+            ],
+            texels_per_pixel: [texels_per_pixel; 2],
+        }
+    }
+
+    fn texels(&self, timeline_pixels: f32, axis: usize) -> f32 {
+        timeline_pixels * self.texels_per_pixel[axis]
+    }
+}
+
+/// One encoder being recorded, with the textures its passes read: they go
+/// back to the pools only once it is submitted.
+struct Recording {
+    encoder: wgpu::CommandEncoder,
+    planes: Vec<wgpu::Texture>,
+    scratch: Vec<Option<wgpu::Texture>>,
+    /// Placeholder for the backdrop slot of the Normal layers, which do not
+    /// sample it (see `backdrop_tex` in the shader).
+    no_backdrop: wgpu::Texture,
+    no_backdrop_view: wgpu::TextureView,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Blur {
@@ -191,6 +269,8 @@ struct FilterChain {
     leading: Vec<vv_core::FilterValue>,
     /// Each blur with the per-pixel filters following it.
     blurs: Vec<(Blur, Vec<vv_core::FilterValue>)>,
+    /// Cast by the layer as it ends up, wherever it is in the list.
+    shadow: Option<vv_core::FilterValue>,
 }
 
 impl FilterChain {
@@ -198,7 +278,9 @@ impl FilterChain {
     fn new(filters: &[vv_core::FilterValue], uniform: bool) -> Self {
         let mut chain = Self::default();
         for filter in filters {
-            if filter.kind.is_blur() {
+            if filter.kind == vv_core::FilterKind::DropShadow {
+                chain.shadow = Some(*filter);
+            } else if filter.kind.is_blur() {
                 if filter.radius > 0.0 && !uniform {
                     let blur = Blur {
                         gaussian: filter.kind == vv_core::FilterKind::GaussianBlur,
@@ -220,12 +302,26 @@ impl FilterChain {
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ShadowUniform {
+    color: [f32; 4],
+    offset: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct BlurUniform {
     step_taps: [f32; 4],
     shape: [f32; 4],
 }
 
 impl BlurUniform {
+    /// No taps: a single bilinear sample, which halving a texture turns into
+    /// the average of the texels it covers.
+    const RESAMPLE: Self = Self {
+        step_taps: [0.0; 4],
+        shape: [0.0; 4],
+    };
+
     /// `radius` in texels of a `size` texture, along `axis` (0 = x, 1 = y).
     fn new(blur: Blur, radius: f32, size: (u32, u32), axis: usize) -> Self {
         let stride = (radius / MAX_BLUR_TAPS).max(1.0);
@@ -542,6 +638,10 @@ struct WorkPipelines {
     /// other than Normal (see `blend_shader_id`).
     blend: wgpu::RenderPipeline,
     blur: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
+    /// The two passes of `Compositor::grown`.
+    grow_rows: wgpu::RenderPipeline,
+    grow: wgpu::RenderPipeline,
 }
 
 impl WorkPipelines {
@@ -609,41 +709,80 @@ impl WorkPipelines {
             format,
         );
 
-        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vv-render blur shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
-        });
-        let blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vv-render blur pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &blur_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blur_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let module = |label, source: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let fullscreen_pipeline = |label, shader: &wgpu::ShaderModule, entry, format, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blur = fullscreen_pipeline(
+            "vv-render blur pipeline",
+            &module("vv-render blur shader", include_str!("shaders/blur.wgsl")),
+            "fs_main",
+            format,
+            wgpu::BlendState::REPLACE,
+        );
+        let shadow = fullscreen_pipeline(
+            "vv-render shadow pipeline",
+            &module(
+                "vv-render shadow shader",
+                include_str!("shaders/shadow.wgsl"),
+            ),
+            "fs_main",
+            format,
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
+        let grow_shader = module("vv-render grow shader", include_str!("shaders/grow.wgsl"));
+        let grow_rows = fullscreen_pipeline(
+            "vv-render grow rows pipeline",
+            &grow_shader,
+            "fs_rows",
+            DISTANCE_FORMAT,
+            wgpu::BlendState::REPLACE,
+        );
+        let grow = fullscreen_pipeline(
+            "vv-render grow pipeline",
+            &grow_shader,
+            "fs_grow",
+            format,
+            wgpu::BlendState::REPLACE,
+        );
 
         Self {
             format,
             normal,
             blend,
             blur,
+            shadow,
+            grow_rows,
+            grow,
         }
     }
 }
@@ -1308,245 +1447,328 @@ impl Compositor {
         clear: wgpu::Color,
     ) -> wgpu::Texture {
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut planes = Vec::new();
-        // Placeholder for the backdrop slot of the Normal layers, which do not
-        // sample it (see `backdrop_tex` in the shader).
-        let no_backdrop = self.plane_texture(OPAQUE, 1, 1);
-        let no_backdrop_view = no_backdrop.create_view(&wgpu::TextureViewDescriptor::default());
-        // Copy of the already composed stack, one per pass that needs it.
-        let mut backdrops: Vec<Option<wgpu::Texture>> = Vec::new();
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("vv-render transform encoder"),
-            });
-
+        let mut rec = self.recording();
         // No layers: only the clear remains.
         if layers.is_empty() {
-            self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
+            self.pass(
+                &mut rec.encoder,
+                &output_view,
+                wgpu::LoadOp::Clear(clear),
+                None,
+            );
         }
         let mut first = true;
         for layer in layers {
-            let Layer {
-                content,
+            self.compose_layer(
+                &mut rec,
+                &output_texture,
+                &output_view,
+                layer,
+                output,
+                clear,
+                &mut first,
+            );
+        }
+        self.submit(rec);
+        output_texture
+    }
+
+    fn recording(&self) -> Recording {
+        let no_backdrop = self.plane_texture(OPAQUE, 1, 1);
+        Recording {
+            encoder: self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vv-render transform encoder"),
+                }),
+            planes: Vec::new(),
+            scratch: Vec::new(),
+            no_backdrop_view: no_backdrop.create_view(&wgpu::TextureViewDescriptor::default()),
+            no_backdrop,
+        }
+    }
+
+    fn submit(&self, rec: Recording) {
+        self.queue.submit(Some(rec.encoder.finish()));
+        give_back(
+            &mut self.scratch.lock().unwrap(),
+            rec.scratch.into_iter().flatten(),
+        );
+        let mut planes = rec.planes;
+        planes.push(rec.no_backdrop);
+        give_back(&mut self.pool.lock().unwrap().planes, planes);
+    }
+
+    /// Composes `layer` onto `target`, cleared to `clear` by the first pass
+    /// that reaches it (`first`, shared by the layers of the stack).
+    fn compose_layer(
+        &self,
+        rec: &mut Recording,
+        target: &wgpu::Texture,
+        target_view: &wgpu::TextureView,
+        layer: &Layer,
+        output: OutputFrame,
+        clear: wgpu::Color,
+        first: &mut bool,
+    ) {
+        let Layer {
+            content,
+            transform,
+            opacity,
+            filters,
+            blend,
+            masks,
+        } = layer;
+        let blend = *blend;
+        let is_adjustment = matches!(content, LayerContent::Adjustment);
+        let no_backdrop_view = rec.no_backdrop_view.clone();
+        let backdrop_view = |backdrops: &mut Vec<Option<wgpu::Texture>>| {
+            let texture = (blend != BlendMode::Normal || is_adjustment)
+                .then(|| self.scratch_texture(output.width, output.height));
+            let view = texture.as_ref().map_or_else(
+                || no_backdrop_view.clone(),
+                |t| t.create_view(&wgpu::TextureViewDescriptor::default()),
+            );
+            backdrops.push(texture);
+            view
+        };
+        let pipeline = if blend == BlendMode::Normal && !is_adjustment {
+            &self.work.normal
+        } else {
+            &self.work.blend
+        };
+        let chain = FilterChain::new(filters, matches!(content, LayerContent::Solid(_)));
+        // An adjustment has no shape of its own to cast.
+        if let Some(shadow) = chain.shadow.filter(|_| !is_adjustment) {
+            // Composed once by itself: the shadow is cast from it, then it
+            // goes onto the stack as it is.
+            let unshadowed: Vec<_> = filters
+                .iter()
+                .filter(|f| f.kind != vv_core::FilterKind::DropShadow)
+                .copied()
+                .collect();
+            let alone = self.scratch_texture(output.width, output.height);
+            let alone_view = alone.create_view(&wgpu::TextureViewDescriptor::default());
+            self.compose_layer(
+                rec,
+                &alone,
+                &alone_view,
+                &Layer {
+                    filters: &unshadowed,
+                    blend: BlendMode::Normal,
+                    ..*layer
+                },
+                output,
+                TRANSPARENT,
+                &mut true,
+            );
+            if *first {
+                self.pass(
+                    &mut rec.encoder,
+                    target_view,
+                    wgpu::LoadOp::Clear(clear),
+                    None,
+                );
+                *first = false;
+            }
+            self.shadow_pass(rec, target_view, &alone, &shadow, output);
+            let composed = Layer {
+                blend,
+                ..Layer::new(
+                    LayerContent::Texture {
+                        texture: &alone,
+                        source_size: output.timeline_size,
+                    },
+                    Transform::default(),
+                )
+            };
+            self.compose_layer(rec, target, target_view, &composed, output, clear, first);
+            rec.scratch.push(Some(alone));
+            return;
+        }
+        if let Some((_, trailing)) = chain.blurs.last() {
+            if *first {
+                self.pass(
+                    &mut rec.encoder,
+                    target_view,
+                    wgpu::LoadOp::Clear(clear),
+                    None,
+                );
+                *first = false;
+            }
+            let backdrop = (blend != BlendMode::Normal || is_adjustment).then(|| {
+                let texture = self.scratch_texture(output.width, output.height);
+                rec.encoder.copy_texture_to_texture(
+                    target.as_image_copy(),
+                    texture.as_image_copy(),
+                    target.size(),
+                );
+                texture
+            });
+            let backdrop_view = backdrop.as_ref().map_or_else(
+                || no_backdrop_view.clone(),
+                |t| t.create_view(&wgpu::TextureViewDescriptor::default()),
+            );
+            let (blurred, fit_size, source_size) =
+                self.blurred_source(rec, content, transform, output, &chain, &backdrop_view);
+            let bind_group = self.texture_bind_group(
+                &mut rec.planes,
+                &blurred.create_view(&wgpu::TextureViewDescriptor::default()),
+                fit_size,
                 transform,
-                opacity,
+                output,
+                source_size,
+                *opacity,
+                trailing,
+                blend,
+                &backdrop_view,
+                is_adjustment.then_some(clear),
+                masks,
+            );
+            self.pass(
+                &mut rec.encoder,
+                target_view,
+                wgpu::LoadOp::Load,
+                Some((&bind_group, pipeline)),
+            );
+            rec.scratch.extend([backdrop, Some(blurred)]);
+            return;
+        }
+        let filters = &chain.leading;
+        let backdrop_start = rec.scratch.len();
+        let bind_groups = match content {
+            LayerContent::Video { frame, source_size } => vec![self.layer_bind_group(
+                &mut rec.planes,
+                frame,
+                transform,
+                output,
+                *source_size,
+                (frame.width, frame.height),
+                Fill::Video,
+                *opacity,
                 filters,
                 blend,
+                &backdrop_view(&mut rec.scratch),
                 masks,
-            } = layer;
-            let blend = *blend;
-            let is_adjustment = matches!(content, LayerContent::Adjustment);
-            let backdrop_view = |backdrops: &mut Vec<Option<wgpu::Texture>>| {
-                let texture = (blend != BlendMode::Normal || is_adjustment)
-                    .then(|| self.scratch_texture(output.width, output.height));
-                let view = texture.as_ref().map_or_else(
-                    || no_backdrop_view.clone(),
-                    |t| t.create_view(&wgpu::TextureViewDescriptor::default()),
-                );
-                backdrops.push(texture);
-                view
-            };
-            let pipeline = if blend == BlendMode::Normal && !is_adjustment {
-                &self.work.normal
-            } else {
-                &self.work.blend
-            };
-            let chain = FilterChain::new(filters, matches!(content, LayerContent::Solid(_)));
-            if let Some((_, trailing)) = chain.blurs.last() {
-                if first {
-                    self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
-                    first = false;
-                }
-                let backdrop = (blend != BlendMode::Normal || is_adjustment).then(|| {
-                    let texture = self.scratch_texture(output.width, output.height);
-                    encoder.copy_texture_to_texture(
-                        output_texture.as_image_copy(),
-                        texture.as_image_copy(),
-                        output_texture.size(),
-                    );
-                    texture
-                });
-                let backdrop_view = backdrop.as_ref().map_or_else(
-                    || no_backdrop_view.clone(),
-                    |t| t.create_view(&wgpu::TextureViewDescriptor::default()),
-                );
-                let (blurred, fit_size, source_size) = self.blurred_source(
-                    &mut encoder,
-                    &mut planes,
-                    &mut backdrops,
-                    content,
+            )],
+            LayerContent::Texture {
+                texture,
+                source_size,
+            } => vec![self.texture_bind_group(
+                &mut rec.planes,
+                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                (texture.width(), texture.height()),
+                transform,
+                output,
+                *source_size,
+                *opacity,
+                filters,
+                blend,
+                &backdrop_view(&mut rec.scratch),
+                None,
+                masks,
+            )],
+            // The copy of the stack is both the source and the backdrop.
+            LayerContent::Adjustment => {
+                let stack = backdrop_view(&mut rec.scratch);
+                vec![self.texture_bind_group(
+                    &mut rec.planes,
+                    &stack,
+                    (output.width, output.height),
                     transform,
                     output,
-                    &chain,
-                    &backdrop_view,
-                    &no_backdrop_view,
-                );
-                let bind_group = self.texture_bind_group(
-                    &mut planes,
-                    &blurred.create_view(&wgpu::TextureViewDescriptor::default()),
-                    fit_size,
-                    transform,
-                    output,
-                    source_size,
+                    output.timeline_size,
                     *opacity,
-                    trailing,
+                    filters,
                     blend,
-                    &backdrop_view,
-                    is_adjustment.then_some(clear),
+                    &stack,
+                    Some(clear),
                     masks,
-                );
-                self.pass(
-                    &mut encoder,
-                    &output_view,
-                    wgpu::LoadOp::Load,
-                    Some((&bind_group, pipeline)),
-                );
-                backdrops.extend([backdrop, Some(blurred)]);
-                continue;
+                )]
             }
-            let filters = &chain.leading;
-            let backdrop_start = backdrops.len();
-            let bind_groups = match content {
-                LayerContent::Video { frame, source_size } => vec![self.layer_bind_group(
-                    &mut planes,
-                    frame,
-                    transform,
-                    output,
-                    *source_size,
-                    (frame.width, frame.height),
-                    Fill::Video,
-                    *opacity,
-                    filters,
-                    blend,
-                    &backdrop_view(&mut backdrops),
-                    masks,
-                )],
-                LayerContent::Texture {
-                    texture,
-                    source_size,
-                } => vec![self.texture_bind_group(
-                    &mut planes,
-                    &texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                    (texture.width(), texture.height()),
-                    transform,
-                    output,
-                    *source_size,
-                    *opacity,
-                    filters,
-                    blend,
-                    &backdrop_view(&mut backdrops),
-                    None,
-                    masks,
-                )],
-                // The copy of the stack is both the source and the backdrop.
-                LayerContent::Adjustment => {
-                    let stack = backdrop_view(&mut backdrops);
-                    vec![self.texture_bind_group(
-                        &mut planes,
-                        &stack,
-                        (output.width, output.height),
+            // The color comes from the uniform: the planes are only placeholders.
+            LayerContent::Solid(color) => vec![self.layer_bind_group(
+                &mut rec.planes,
+                &SOLID_PLACEHOLDER,
+                transform,
+                output,
+                output.timeline_size,
+                output.timeline_size,
+                Fill::Solid(*color),
+                *opacity,
+                filters,
+                blend,
+                &backdrop_view(&mut rec.scratch),
+                masks,
+            )],
+            LayerContent::Text(title) => {
+                let render = crate::text::render_title(
+                    title,
+                    output.timeline_size,
+                    (output.width, output.height),
+                );
+                let mut groups = Vec::with_capacity(render.layers.len());
+                for (mask, color) in &render.layers {
+                    let frame = YuvFrame {
+                        y: &mask.data,
+                        width: mask.width,
+                        height: mask.height,
+                        ..SOLID_PLACEHOLDER
+                    };
+                    // Shadow, background and text are distinct passes: each one
+                    // composes onto the earlier ones, backdrop included.
+                    let view = backdrop_view(&mut rec.scratch);
+                    groups.push(self.layer_bind_group(
+                        &mut rec.planes,
+                        &frame,
                         transform,
                         output,
                         output.timeline_size,
+                        output.timeline_size,
+                        Fill::Mask(*color),
                         *opacity,
                         filters,
                         blend,
-                        &stack,
-                        Some(clear),
+                        &view,
                         masks,
-                    )]
+                    ));
                 }
-                // The color comes from the uniform: the planes are only placeholders.
-                LayerContent::Solid(color) => vec![self.layer_bind_group(
-                    &mut planes,
-                    &SOLID_PLACEHOLDER,
-                    transform,
-                    output,
-                    output.timeline_size,
-                    output.timeline_size,
-                    Fill::Solid(*color),
-                    *opacity,
-                    filters,
-                    blend,
-                    &backdrop_view(&mut backdrops),
-                    masks,
-                )],
-                LayerContent::Text(title) => {
-                    let render = crate::text::render_title(
-                        title,
-                        output.timeline_size,
-                        (output.width, output.height),
+                groups
+            }
+        };
+        for (bind_group, backdrop) in bind_groups.iter().zip(&rec.scratch[backdrop_start..]) {
+            if let Some(backdrop) = backdrop {
+                // The backdrop must be read from a copy: the target texture
+                // is already attached to the pass composing it. If this is the
+                // first layer, the clear must happen before copying it.
+                if *first {
+                    self.pass(
+                        &mut rec.encoder,
+                        target_view,
+                        wgpu::LoadOp::Clear(clear),
+                        None,
                     );
-                    let mut groups = Vec::with_capacity(render.layers.len());
-                    for (mask, color) in &render.layers {
-                        let frame = YuvFrame {
-                            y: &mask.data,
-                            width: mask.width,
-                            height: mask.height,
-                            ..SOLID_PLACEHOLDER
-                        };
-                        // Shadow, background and text are distinct passes: each one
-                        // composes onto the earlier ones, backdrop included.
-                        let view = backdrop_view(&mut backdrops);
-                        groups.push(self.layer_bind_group(
-                            &mut planes,
-                            &frame,
-                            transform,
-                            output,
-                            output.timeline_size,
-                            output.timeline_size,
-                            Fill::Mask(*color),
-                            *opacity,
-                            filters,
-                            blend,
-                            &view,
-                            masks,
-                        ));
-                    }
-                    groups
+                    *first = false;
                 }
-            };
-            for (bind_group, backdrop) in bind_groups.iter().zip(&backdrops[backdrop_start..]) {
-                if let Some(backdrop) = backdrop {
-                    // The backdrop must be read from a copy: the output texture
-                    // is already attached to the pass composing it. If this is the
-                    // first layer, the clear must happen before copying it.
-                    if first {
-                        self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
-                        first = false;
-                    }
-                    encoder.copy_texture_to_texture(
-                        output_texture.as_image_copy(),
-                        backdrop.as_image_copy(),
-                        output_texture.size(),
-                    );
-                }
-                let load = if first {
-                    wgpu::LoadOp::Clear(clear)
-                } else {
-                    wgpu::LoadOp::Load
-                };
-                first = false;
-                self.pass(
-                    &mut encoder,
-                    &output_view,
-                    load,
-                    Some((bind_group, pipeline)),
+                rec.encoder.copy_texture_to_texture(
+                    target.as_image_copy(),
+                    backdrop.as_image_copy(),
+                    target.size(),
                 );
             }
+            let load = if *first {
+                wgpu::LoadOp::Clear(clear)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            *first = false;
+            self.pass(
+                &mut rec.encoder,
+                target_view,
+                load,
+                Some((bind_group, pipeline)),
+            );
         }
-
-        self.queue.submit(Some(encoder.finish()));
-        give_back(
-            &mut self.scratch.lock().unwrap(),
-            backdrops.into_iter().flatten(),
-        );
-        let mut pool = self.pool.lock().unwrap();
-        planes.push(no_backdrop);
-        give_back(&mut pool.planes, planes);
-        output_texture
     }
 
     /// Draws the source of a layer into a texture of its own, with the
@@ -1556,15 +1778,12 @@ impl Compositor {
     /// the fit size and the crop units of that pass.
     fn blurred_source(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
-        planes: &mut Vec<wgpu::Texture>,
-        intermediates: &mut Vec<Option<wgpu::Texture>>,
+        rec: &mut Recording,
         content: &LayerContent,
         transform: &Transform,
         output: OutputFrame,
         chain: &FilterChain,
         stack: &wgpu::TextureView,
-        no_backdrop: &wgpu::TextureView,
     ) -> (wgpu::Texture, (u32, u32), (u32, u32)) {
         let (texture_size, source_size) = match content {
             LayerContent::Video { frame, source_size } => {
@@ -1576,25 +1795,13 @@ impl Compositor {
             } => ((texture.width(), texture.height()), *source_size),
             _ => ((output.width, output.height), output.timeline_size),
         };
-        let (sw, sh) = (texture_size.0.max(1) as f32, texture_size.1.max(1) as f32);
-        // Output pixels per source texel at zoom 1.
-        let fit_scale = (output.width as f32 / sw).min(output.height as f32 / sh);
-        let zoom = transform.zoom[0]
-            .abs()
-            .max(transform.zoom[1].abs())
-            .max(1.0);
-        // A blur costs by the pixel: no more of them than the output shows.
-        let scale = (fit_scale * zoom).min(1.0);
-        let size = (
-            ((sw * scale).round() as u32).max(1),
-            ((sh * scale).round() as u32).max(1),
-        );
-        let texels_per_pixel =
-            output.width as f32 / output.timeline_size.0.max(1) as f32 / fit_scale * scale;
-
+        let mut space = WorkSpace::of_source(texture_size, transform, output);
+        let size = (space.size[0], space.size[1]);
+        let no_backdrop = rec.no_backdrop_view.clone();
         let frame = OutputFrame::exact(size.0, size.1);
         let identity = Transform::default();
         let leading = &chain.leading;
+        let planes = &mut rec.planes;
         let groups = match content {
             LayerContent::Video { frame: yuv, .. } => vec![self.layer_bind_group(
                 planes,
@@ -1607,7 +1814,7 @@ impl Compositor {
                 1.0,
                 leading,
                 BlendMode::Normal,
-                no_backdrop,
+                &no_backdrop,
                 &[],
             )],
             LayerContent::Texture { texture, .. } => vec![self.texture_bind_group(
@@ -1620,7 +1827,7 @@ impl Compositor {
                 1.0,
                 leading,
                 BlendMode::Normal,
-                no_backdrop,
+                &no_backdrop,
                 None,
                 &[],
             )],
@@ -1634,7 +1841,7 @@ impl Compositor {
                 1.0,
                 leading,
                 BlendMode::Normal,
-                no_backdrop,
+                &no_backdrop,
                 None,
                 &[],
             )],
@@ -1649,7 +1856,7 @@ impl Compositor {
                 1.0,
                 leading,
                 BlendMode::Normal,
-                no_backdrop,
+                &no_backdrop,
                 &[],
             )],
             LayerContent::Text(title) => {
@@ -1679,7 +1886,7 @@ impl Compositor {
                             1.0,
                             leading,
                             BlendMode::Normal,
-                            no_backdrop,
+                            &no_backdrop,
                             &[],
                         )
                     })
@@ -1692,7 +1899,7 @@ impl Compositor {
         let mut load = wgpu::LoadOp::Clear(TRANSPARENT);
         for group in &groups {
             self.pass(
-                encoder,
+                &mut rec.encoder,
                 &current_view,
                 load,
                 Some((group, &self.work.normal)),
@@ -1701,44 +1908,269 @@ impl Compositor {
         }
 
         for (i, (blur, run)) in chain.blurs.iter().enumerate() {
-            let radius = blur.radius * texels_per_pixel;
-            let axes = [blur.direction.horizontal(), blur.direction.vertical()];
-            for axis in (0..2).filter(|&axis| axes[axis]) {
-                let target = self.scratch_texture(size.0, size.1);
-                self.blur_pass(
-                    encoder,
-                    &current,
-                    &target,
-                    BlurUniform::new(*blur, radius, size, axis),
-                );
-                intermediates.push(Some(std::mem::replace(&mut current, target)));
-            }
+            let blurred;
+            (blurred, space) = self.blurred(rec, &current, space, *blur);
+            rec.scratch
+                .push(Some(std::mem::replace(&mut current, blurred)));
             if i + 1 < chain.blurs.len() && !run.is_empty() {
+                let size = (space.size[0], space.size[1]);
                 let target = self.scratch_texture(size.0, size.1);
                 let group = self.texture_bind_group(
-                    planes,
+                    &mut rec.planes,
                     &current.create_view(&wgpu::TextureViewDescriptor::default()),
                     size,
                     &identity,
-                    frame,
+                    OutputFrame::exact(size.0, size.1),
                     size,
                     1.0,
                     run,
                     BlendMode::Normal,
-                    no_backdrop,
+                    &no_backdrop,
                     None,
                     &[],
                 );
                 self.pass(
-                    encoder,
+                    &mut rec.encoder,
                     &target.create_view(&wgpu::TextureViewDescriptor::default()),
                     wgpu::LoadOp::Clear(TRANSPARENT),
                     Some((&group, &self.work.normal)),
                 );
-                intermediates.push(Some(std::mem::replace(&mut current, target)));
+                rec.scratch
+                    .push(Some(std::mem::replace(&mut current, target)));
             }
         }
         (current, texture_size, source_size)
+    }
+
+    /// `source`, a texture of `space`, halved along each axis until
+    /// `radius` (timeline pixels per axis, 0 to leave one alone) spans at most
+    /// `MAX_REACH_TEXELS`; `None` if it already does.
+    fn reduced(
+        &self,
+        rec: &mut Recording,
+        source: &wgpu::Texture,
+        mut space: WorkSpace,
+        radius: [f32; 2],
+    ) -> (Option<wgpu::Texture>, WorkSpace) {
+        let mut current: Option<wgpu::Texture> = None;
+        loop {
+            let halve = [0, 1].map(|axis| {
+                space.size[axis] > 1 && space.texels(radius[axis], axis) > MAX_REACH_TEXELS
+            });
+            if halve == [false, false] {
+                return (current, space);
+            }
+            let size = [0, 1].map(|axis| {
+                if halve[axis] {
+                    space.size[axis].div_ceil(2)
+                } else {
+                    space.size[axis]
+                }
+            });
+            let target = self.scratch_texture(size[0], size[1]);
+            self.blur_pass(
+                &mut rec.encoder,
+                current.as_ref().unwrap_or(source),
+                &target,
+                BlurUniform::RESAMPLE,
+            );
+            rec.scratch.push(current.replace(target));
+            space = WorkSpace {
+                size,
+                texels_per_pixel: [0, 1].map(|axis| {
+                    space.texels_per_pixel[axis] * size[axis] as f32 / space.size[axis] as f32
+                }),
+            };
+        }
+    }
+
+    /// `source`, a texture of `space`, blurred into a new one, possibly
+    /// smaller (see `reduced`): its space comes with it.
+    fn blurred(
+        &self,
+        rec: &mut Recording,
+        source: &wgpu::Texture,
+        space: WorkSpace,
+        blur: Blur,
+    ) -> (wgpu::Texture, WorkSpace) {
+        let axes = [blur.direction.horizontal(), blur.direction.vertical()];
+        let (mut current, space) = self.reduced(
+            rec,
+            source,
+            space,
+            axes.map(|on| if on { blur.radius } else { 0.0 }),
+        );
+        for axis in (0..2).filter(|&axis| axes[axis]) {
+            let target = self.scratch_texture(space.size[0], space.size[1]);
+            self.blur_pass(
+                &mut rec.encoder,
+                current.as_ref().unwrap_or(source),
+                &target,
+                BlurUniform::new(
+                    blur,
+                    space.texels(blur.radius, axis),
+                    (space.size[0], space.size[1]),
+                    axis,
+                ),
+            );
+            rec.scratch.push(current.replace(target));
+        }
+        (current.expect("a blur has at least one direction"), space)
+    }
+
+    /// The coverage of `source`, a texture of `space`, thickened by `radius`
+    /// timeline pixels with round corners, into a new texture (alpha only),
+    /// possibly smaller (see `reduced`).
+    fn grown(
+        &self,
+        rec: &mut Recording,
+        source: &wgpu::Texture,
+        space: WorkSpace,
+        radius: f32,
+    ) -> (wgpu::Texture, WorkSpace) {
+        let (reduced, space) = self.reduced(rec, source, space, [radius; 2]);
+        let source = reduced.as_ref().unwrap_or(source);
+        let texels = [0, 1].map(|axis| space.texels(radius, axis));
+        let uniform = GrowUniform {
+            params: [
+                texels[0],
+                texels[0].ceil() + 1.0,
+                texels[1].ceil() + 1.0,
+                texels[0] / texels[1],
+            ],
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vv-render grow uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let rows = self.scratch_texture_in(space.size[0], space.size[1], DISTANCE_FORMAT);
+        let rows_view = rows.create_view(&wgpu::TextureViewDescriptor::default());
+        let grown = self.scratch_texture(space.size[0], space.size[1]);
+        for (pipeline, target, with_rows) in [
+            (&self.work.grow_rows, &rows_view, false),
+            (
+                &self.work.grow,
+                &grown.create_view(&Default::default()),
+                true,
+            ),
+        ] {
+            let mut entries = vec![
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ];
+            if with_rows {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&rows_view),
+                });
+            }
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vv-render grow bind group"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            });
+            self.pass(
+                &mut rec.encoder,
+                target,
+                wgpu::LoadOp::Clear(TRANSPARENT),
+                Some((&bind_group, pipeline)),
+            );
+        }
+        rec.scratch.extend([reduced, Some(rows)]);
+        (grown, space)
+    }
+
+    /// Draws onto `target` the shadow of `layer`, the layer composed by
+    /// itself onto a transparent texture as large as the output.
+    fn shadow_pass(
+        &self,
+        rec: &mut Recording,
+        target: &wgpu::TextureView,
+        layer: &wgpu::Texture,
+        shadow: &vv_core::FilterValue,
+        output: OutputFrame,
+    ) {
+        let blur = Blur {
+            gaussian: true,
+            radius: shadow.radius,
+            direction: vv_core::BlurDirection::Both,
+        };
+        let mut space = WorkSpace::of_output(output);
+        let mut cast = None;
+        if shadow.grow > 0.0 {
+            let grown;
+            (grown, space) = self.grown(rec, layer, space, shadow.grow);
+            cast = Some(grown);
+        }
+        if blur.radius > 0.0 {
+            let (blurred, _) = self.blurred(rec, cast.as_ref().unwrap_or(layer), space, blur);
+            rec.scratch.push(cast.replace(blurred));
+        }
+        let (timeline_w, timeline_h) = (
+            output.timeline_size.0.max(1) as f32,
+            output.timeline_size.1.max(1) as f32,
+        );
+        let uniform = ShadowUniform {
+            color: [
+                shadow.color.r,
+                shadow.color.g,
+                shadow.color.b,
+                shadow.color.a * (shadow.amount / 100.0).clamp(0.0, 1.0),
+            ],
+            // Y upwards in the timeline, downwards in uv.
+            offset: [
+                shadow.offset[0] / timeline_w,
+                -shadow.offset[1] / timeline_h,
+                0.0,
+                0.0,
+            ],
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vv-render shadow uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let cast_view = cast
+            .as_ref()
+            .unwrap_or(layer)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vv-render shadow bind group"),
+            layout: &self.work.shadow.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&cast_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.pass(
+            &mut rec.encoder,
+            target,
+            wgpu::LoadOp::Load,
+            Some((&bind_group, &self.work.shadow)),
+        );
+        rec.scratch.push(cast);
     }
 
     fn blur_pass(
@@ -2056,13 +2488,22 @@ impl Compositor {
     /// from `output_texture`'s because there a texture stays taken until
     /// whoever uses it gives it back.
     fn scratch_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
+        self.scratch_texture_in(output_w, output_h, self.work.format)
+    }
+
+    fn scratch_texture_in(
+        &self,
+        output_w: u32,
+        output_h: u32,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
         take_sized(
             &mut self.scratch.lock().unwrap(),
             output_w,
             output_h,
-            self.work.format,
+            format,
         )
-        .unwrap_or_else(|| self.new_output_texture(output_w, output_h, self.work.format))
+        .unwrap_or_else(|| self.new_output_texture(output_w, output_h, format))
     }
 
     fn output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {

@@ -864,6 +864,8 @@ pub enum FontCase {
 
 /// Parameters of a `ClipSource::Text` clip. The measures are in timeline
 /// pixels, like those of the `Transform`.
+/// Loaded through `StoredTitle`: a new field goes there too, with the same
+/// serde attributes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleParams {
     pub content: String,
@@ -887,38 +889,92 @@ pub struct TitleParams {
     /// From the center of the frame, Y upwards.
     pub position: [f32; 2],
     #[serde(default)]
-    pub shadow: TitleShadow,
-    #[serde(default)]
     pub background: TitleBackground,
 }
 
-/// Shadow of the text alone.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TitleShadow {
-    pub enabled: bool,
-    pub color: Rgba,
-    /// In timeline pixels, Y upwards.
-    pub offset: [f32; 2],
-    /// How much the shadow is thickened around the text before the blur, in
-    /// timeline pixels.
+/// The shadow titles had before the Drop Shadow filter, which replaces it
+/// on load (see `StoredEffectStack`).
+#[derive(Deserialize)]
+struct StoredTitleShadow {
+    enabled: bool,
+    color: Rgba,
+    offset: [f32; 2],
     #[serde(default)]
-    pub grow: f32,
-    /// Blur radius, in timeline pixels.
-    pub blur: f32,
-    /// 0-100.
-    pub opacity: f32,
+    grow: f32,
+    blur: f32,
+    opacity: f32,
 }
 
-impl Default for TitleShadow {
+impl Default for StoredTitleShadow {
     fn default() -> Self {
         Self {
             enabled: false,
             color: Rgba::BLACK,
-            offset: [8.0, -8.0],
+            offset: [0.0; 2],
             grow: 0.0,
-            blur: 6.0,
-            opacity: 75.0,
+            blur: 0.0,
+            opacity: 0.0,
         }
+    }
+}
+
+impl StoredTitleShadow {
+    fn into_filter(self) -> ClipFilter {
+        ClipFilter {
+            radius: Keyframed::constant(self.blur),
+            amount: Keyframed::constant(self.opacity),
+            offset: self.offset.map(Keyframed::constant),
+            grow: Keyframed::constant(self.grow),
+            color: self.color,
+            ..ClipFilter::new(FilterKind::DropShadow)
+        }
+    }
+}
+
+/// `TitleParams` as saved, with the old shadow (`serde(flatten)` would
+/// want RON's map syntax).
+#[derive(Deserialize)]
+struct StoredTitle {
+    content: String,
+    font_family: String,
+    font_weight: u16,
+    italic: bool,
+    color: Rgba,
+    size: f32,
+    tracking: f32,
+    line_spacing: f32,
+    underline: bool,
+    strikethrough: bool,
+    case: FontCase,
+    align: TextAlign,
+    anchor: (HAnchor, VAnchor),
+    position: [f32; 2],
+    #[serde(default)]
+    shadow: StoredTitleShadow,
+    #[serde(default)]
+    background: TitleBackground,
+}
+
+impl StoredTitle {
+    fn split(self) -> (TitleParams, StoredTitleShadow) {
+        let title = TitleParams {
+            content: self.content,
+            font_family: self.font_family,
+            font_weight: self.font_weight,
+            italic: self.italic,
+            color: self.color,
+            size: self.size,
+            tracking: self.tracking,
+            line_spacing: self.line_spacing,
+            underline: self.underline,
+            strikethrough: self.strikethrough,
+            case: self.case,
+            align: self.align,
+            anchor: self.anchor,
+            position: self.position,
+            background: self.background,
+        };
+        (title, self.shadow)
     }
 }
 
@@ -974,7 +1030,6 @@ impl Default for TitleParams {
             align: TextAlign::Center,
             anchor: (HAnchor::Center, VAnchor::Middle),
             position: [0.0, 0.0],
-            shadow: TitleShadow::default(),
             background: TitleBackground::default(),
         }
     }
@@ -1028,6 +1083,7 @@ pub enum FilterKind {
     BoxBlur,
     GaussianBlur,
     Exposure,
+    DropShadow,
 }
 
 impl FilterKind {
@@ -1036,7 +1092,7 @@ impl FilterKind {
         matches!(self, Self::BoxBlur | Self::GaussianBlur)
     }
 
-    /// Whether `ClipFilter::amount` applies to it.
+    /// Whether `ClipFilter::amount` is the exposure in stops.
     pub fn has_amount(self) -> bool {
         self == Self::Exposure
     }
@@ -1052,6 +1108,34 @@ impl FilterKind {
 /// (about +18).
 pub const EXPOSURE_MIN: f32 = -20.0;
 pub const EXPOSURE_MAX: f32 = 20.0;
+
+/// Index of `ClipFilter::offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Axis {
+    X,
+    Y,
+}
+
+impl Axis {
+    pub const ALL: [Self; 2] = [Self::X, Self::Y];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+        }
+    }
+}
+
+/// Defaults of a `DropShadow` filter.
+pub const DEFAULT_SHADOW_OFFSET: [f32; 2] = [10.0, -10.0];
+pub const DEFAULT_SHADOW_OPACITY: f32 = 75.0;
+/// Bound of `ClipFilter::grow`, in timeline pixels.
+pub const SHADOW_GROW_MAX: f32 = 100.0;
 
 /// Bounds of `ClipFilter::radius`, in timeline pixels.
 pub const BLUR_RADIUS_MAX: f32 = 250.0;
@@ -1102,13 +1186,21 @@ impl Lerp for BlurDirection {
 pub struct ClipFilter {
     pub kind: FilterKind,
     pub enabled: bool,
-    /// Blurs only: in timeline pixels, as seen with the clip at zoom 1.
+    /// Blurs and drop shadow (its softness): in timeline pixels, for blurs as
+    /// seen with the clip at zoom 1.
     pub radius: Keyframed<f32>,
     pub direction: Keyframed<BlurDirection>,
-    /// Exposure only: in stops.
+    /// Exposure: in stops. Drop shadow: opacity, 0-100.
     pub amount: Keyframed<f32>,
     /// Color correction only.
     pub grade: GradeTracks,
+    /// Drop shadow only: in timeline pixels, Y upwards.
+    pub offset: [Keyframed<f32>; 2],
+    /// Drop shadow only: how much it is thickened before the softness, in
+    /// timeline pixels.
+    pub grow: Keyframed<f32>,
+    /// Drop shadow only.
+    pub color: Rgba,
 }
 
 /// `ClipFilter` as saved, older files included.
@@ -1124,6 +1216,24 @@ struct StoredClipFilter {
     amount: Keyframed<f32>,
     #[serde(default)]
     grade: GradeTracks,
+    #[serde(default = "default_shadow_offset")]
+    offset: [Keyframed<f32>; 2],
+    #[serde(default = "default_shadow_grow")]
+    grow: Keyframed<f32>,
+    #[serde(default = "default_shadow_color")]
+    color: Rgba,
+}
+
+fn default_shadow_offset() -> [Keyframed<f32>; 2] {
+    DEFAULT_SHADOW_OFFSET.map(Keyframed::constant)
+}
+
+fn default_shadow_grow() -> Keyframed<f32> {
+    Keyframed::constant(0.0)
+}
+
+fn default_shadow_color() -> Rgba {
+    Rgba::BLACK
 }
 
 /// `FilterKind` plus the kinds that no longer exist.
@@ -1135,6 +1245,7 @@ enum StoredFilterKind {
     BoxBlur,
     GaussianBlur,
     Exposure,
+    DropShadow,
 }
 
 impl From<StoredClipFilter> for ClipFilter {
@@ -1148,6 +1259,7 @@ impl From<StoredClipFilter> for ClipFilter {
             StoredFilterKind::BoxBlur => (FilterKind::BoxBlur, stored.grade),
             StoredFilterKind::GaussianBlur => (FilterKind::GaussianBlur, stored.grade),
             StoredFilterKind::Exposure => (FilterKind::Exposure, stored.grade),
+            StoredFilterKind::DropShadow => (FilterKind::DropShadow, stored.grade),
         };
         Self {
             kind,
@@ -1156,6 +1268,9 @@ impl From<StoredClipFilter> for ClipFilter {
             direction: stored.direction,
             amount: stored.amount,
             grade,
+            offset: stored.offset,
+            grow: stored.grow,
+            color: stored.color,
         }
     }
 }
@@ -1172,6 +1287,9 @@ pub struct FilterValue {
     pub direction: BlurDirection,
     pub amount: f32,
     pub grade: GradeValue,
+    pub offset: [f32; 2],
+    pub grow: f32,
+    pub color: Rgba,
 }
 
 impl FilterValue {
@@ -1180,9 +1298,19 @@ impl FilterValue {
             kind,
             radius: DEFAULT_BLUR_RADIUS,
             direction: BlurDirection::Both,
-            amount: 0.0,
+            amount: default_amount(kind),
             grade: GradeValue::NEUTRAL,
+            offset: DEFAULT_SHADOW_OFFSET,
+            grow: 0.0,
+            color: Rgba::BLACK,
         }
+    }
+}
+
+const fn default_amount(kind: FilterKind) -> f32 {
+    match kind {
+        FilterKind::DropShadow => DEFAULT_SHADOW_OPACITY,
+        _ => 0.0,
     }
 }
 
@@ -1193,8 +1321,11 @@ impl ClipFilter {
             enabled: true,
             radius: Keyframed::constant(DEFAULT_BLUR_RADIUS),
             direction: Keyframed::constant(BlurDirection::Both),
-            amount: Keyframed::constant(0.0),
+            amount: Keyframed::constant(default_amount(kind)),
             grade: GradeTracks::default(),
+            offset: default_shadow_offset(),
+            grow: default_shadow_grow(),
+            color: Rgba::BLACK,
         }
     }
 
@@ -1205,6 +1336,12 @@ impl ClipFilter {
             direction: self.direction.value_at(frame),
             amount: self.amount.value_at(frame),
             grade: self.grade.value_at(frame),
+            offset: [
+                self.offset[0].value_at(frame),
+                self.offset[1].value_at(frame),
+            ],
+            grow: self.grow.value_at(frame),
+            color: self.color,
         }
     }
 }
@@ -1351,6 +1488,7 @@ impl BlendMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "StoredEffectStack")]
 pub struct EffectStack {
     pub transform: TransformTracks,
     pub gain_db: Keyframed<f32>,
@@ -1370,6 +1508,49 @@ pub struct EffectStack {
     pub blend_mode: BlendMode,
     #[serde(default)]
     pub masks: Vec<crate::mask::ClipMask>,
+}
+
+/// `EffectStack` as saved, older files included.
+#[derive(Deserialize)]
+struct StoredEffectStack {
+    transform: TransformTracks,
+    gain_db: Keyframed<f32>,
+    color: Option<Keyframed<Rgba>>,
+    #[serde(default)]
+    title: Option<StoredTitle>,
+    #[serde(default)]
+    filters: Vec<ClipFilter>,
+    #[serde(default)]
+    transition_in: Option<Transition>,
+    #[serde(default)]
+    transition_out: Option<Transition>,
+    #[serde(default)]
+    blend_mode: BlendMode,
+    #[serde(default)]
+    masks: Vec<crate::mask::ClipMask>,
+}
+
+impl From<StoredEffectStack> for EffectStack {
+    fn from(stored: StoredEffectStack) -> Self {
+        let mut filters = stored.filters;
+        let (title, shadow) = stored.title.map(StoredTitle::split).unzip();
+        if let Some(shadow) = shadow.filter(|s| s.enabled)
+            && !filters.iter().any(|f| f.kind == FilterKind::DropShadow)
+        {
+            filters.push(shadow.into_filter());
+        }
+        Self {
+            transform: stored.transform,
+            gain_db: stored.gain_db,
+            color: stored.color,
+            title,
+            filters,
+            transition_in: stored.transition_in,
+            transition_out: stored.transition_out,
+            blend_mode: stored.blend_mode,
+            masks: stored.masks,
+        }
+    }
 }
 
 impl Default for EffectStack {
@@ -1468,6 +1649,8 @@ impl EffectStack {
         for filter in &mut self.filters {
             f(&mut filter.radius);
             f(&mut filter.amount);
+            filter.offset.iter_mut().for_each(&mut f);
+            f(&mut filter.grow);
             filter.grade.tracks_mut().for_each(&mut f);
         }
         for mask in &mut self.masks {

@@ -529,7 +529,9 @@ impl Importer<'_> {
             (None, "GeneratorReference") if reference["generator_kind"] == "Rich" => {
                 if effects.title.is_none() {
                     let frame = self.timeline_resolution(venturi, &ClipSource::Text);
-                    effects.title = Some(generator::read_text(reference, frame, self.measure));
+                    let (title, shadow) = generator::read_text(reference, frame, self.measure);
+                    effects.title = Some(title);
+                    effects.filters.extend(shadow);
                 }
                 (ClipSource::Text, Rational::one(), 0, None)
             }
