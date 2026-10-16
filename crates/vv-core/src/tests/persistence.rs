@@ -268,7 +268,7 @@ fn the_old_title_shadow_loads_as_a_drop_shadow_filter() {
         color,
         ..ClipFilter::new(FilterKind::DropShadow)
     };
-    assert_eq!(loaded.filters, [expected.clone()]);
+    assert_eq!(loaded.filters, std::slice::from_ref(&expected));
 
     let disabled: EffectStack =
         ron::from_str(&saved.replacen("background:", &old_shadow(false), 1)).unwrap();

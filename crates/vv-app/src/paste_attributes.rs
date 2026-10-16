@@ -655,8 +655,8 @@ impl Conversion {
         let axis = |to: u32, from: u32| to as f32 / from.max(1) as f32;
         Self {
             remap: KeyframeRemap::Anchored {
-                source: source.clone(),
-                target: target.clone(),
+                source: Box::new(source.clone()),
+                target: Box::new(target.clone()),
                 time_scale,
                 anchor,
             },
@@ -686,8 +686,8 @@ enum KeyframeRemap {
         scale: Option<f64>,
     },
     Anchored {
-        source: Clip,
-        target: Clip,
+        source: Box<Clip>,
+        target: Box<Clip>,
         time_scale: f64,
         anchor: KeyframeAnchor,
     },
