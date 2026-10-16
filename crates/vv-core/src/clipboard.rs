@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::pool::{AddEntities, absorb};
 use crate::{
-    Clip, ClipSource, FrameIdx, MediaId, Project, Rational, Timeline, TimelineId, TrackKind,
+    Clip, ClipSource, FrameIdx, MediaId, MediaItem, Project, Rational, Timeline, TimelineId,
+    TrackKind,
 };
 
 const HEADER: &str = "venturi-clipboard/";
@@ -101,6 +102,28 @@ impl ClipboardPayload {
 
     pub fn has_media(&self) -> bool {
         !self.media.is_empty()
+    }
+
+    /// The pool items copied from the media pool, in copy order.
+    pub fn media_items(&self) -> impl Iterator<Item = &MediaItem> {
+        self.media
+            .iter()
+            .filter_map(|&id| self.project.media_pool.get(id))
+    }
+
+    /// Every file the payload refers to, nested timelines included.
+    pub fn files(&self) -> impl Iterator<Item = &MediaItem> {
+        self.project
+            .media_pool
+            .values()
+            .filter(|item| item.compound.is_none())
+    }
+
+    pub fn files_mut(&mut self) -> impl Iterator<Item = &mut MediaItem> {
+        self.project
+            .media_pool
+            .values_mut()
+            .filter(|item| item.compound.is_none())
     }
 
     pub fn to_text(&self) -> String {

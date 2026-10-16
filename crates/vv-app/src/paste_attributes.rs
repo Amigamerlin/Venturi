@@ -3,9 +3,11 @@
 
 use super::*;
 use std::collections::HashSet;
-use vv_core::{Clip, ClipAttributes, FrameIdx, Keyframed, TransformParam};
+use vv_core::{Clip, ClipAttributes, FrameIdx, Keyframed, Lerp, Rational, TransformParam};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// Serialized in the library presets: the names must never change.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Attribute {
     Fades,
     Speed,
@@ -39,7 +41,7 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    pub(crate) const ALL: [Section; 8] = [
         Section::Transform,
         Section::Crop,
         Section::Blending,
@@ -64,7 +66,7 @@ impl Section {
     }
 
     /// The kind of clip the section applies to; `None` = any.
-    fn kind(self) -> Option<TrackKind> {
+    pub(crate) fn kind(self) -> Option<TrackKind> {
         match self {
             Section::Clip => None,
             Section::Audio => Some(TrackKind::Audio),
@@ -74,7 +76,7 @@ impl Section {
 }
 
 impl Attribute {
-    const ALL: [Attribute; 15] = [
+    pub(crate) const ALL: [Attribute; 15] = [
         Attribute::Zoom,
         Attribute::Position,
         Attribute::Rotation,
@@ -92,7 +94,7 @@ impl Attribute {
         Attribute::Speed,
     ];
 
-    fn section(self) -> Section {
+    pub(crate) fn section(self) -> Section {
         match self {
             Attribute::Zoom
             | Attribute::Position
@@ -254,7 +256,7 @@ impl VenturiApp {
         });
     }
 
-    fn clip_display_name(&self, clip: &Clip) -> String {
+    pub(crate) fn clip_display_name(&self, clip: &Clip) -> String {
         match &clip.source {
             vv_core::ClipSource::Media(media_id) => self
                 .session
@@ -294,46 +296,11 @@ impl VenturiApp {
                     count = dialog.targets.len()
                 ));
 
-                for section in Section::ALL {
-                    if !dialog.section_applies(section) {
-                        continue;
-                    }
-                    let members: Vec<Attribute> = Attribute::ALL
-                        .into_iter()
-                        .filter(|a| a.section() == section)
-                        .collect();
-                    ui.separator();
-                    let mut all = members.iter().all(|a| dialog.selected.contains(a));
-                    if ui
-                        .checkbox(&mut all, egui::RichText::new(section.title()).strong())
-                        .changed()
-                    {
-                        for attribute in &members {
-                            if all {
-                                dialog.selected.insert(*attribute);
-                            } else {
-                                dialog.selected.remove(attribute);
-                            }
-                        }
-                    }
-                    if members.len() < 2 {
-                        continue;
-                    }
-                    ui.indent(("paste_attributes_section", section as usize), |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            for attribute in &members {
-                                let mut on = dialog.selected.contains(attribute);
-                                if ui.checkbox(&mut on, attribute.label()).changed() {
-                                    if on {
-                                        dialog.selected.insert(*attribute);
-                                    } else {
-                                        dialog.selected.remove(attribute);
-                                    }
-                                }
-                            }
-                        });
-                    });
-                }
+                let applies: Vec<Section> = Section::ALL
+                    .into_iter()
+                    .filter(|&s| dialog.section_applies(s))
+                    .collect();
+                attribute_checkboxes(ui, &mut dialog.selected, &applies);
 
                 ui.separator();
                 ui.label(egui::RichText::new(t!("paste_attr.keyframes")).strong());
@@ -380,6 +347,36 @@ impl VenturiApp {
     }
 
     fn apply_paste_attributes(&mut self, dialog: &PasteAttributesDialog) {
+        let source_ids =
+            [&dialog.source_video, &dialog.source_audio].map(|c| c.as_ref().map(|c| c.id));
+        let targets: Vec<(usize, ClipId)> = dialog
+            .targets
+            .iter()
+            .copied()
+            .filter(|(_, id)| !source_ids.contains(&Some(*id)))
+            .collect();
+        let mode = dialog.keyframe_mode;
+        self.apply_attributes(
+            &targets,
+            dialog.source_video.as_ref(),
+            dialog.source_audio.as_ref(),
+            &dialog.selected,
+            |source, target, _| Conversion::paste(source, target, mode),
+            vv_core::CommandLabel::PasteAttributes,
+        );
+    }
+
+    /// Sets the `selected` attributes of the source of each target's kind
+    /// onto the targets, as one undo step.
+    pub(crate) fn apply_attributes(
+        &mut self,
+        targets: &[(usize, ClipId)],
+        source_video: Option<&Clip>,
+        source_audio: Option<&Clip>,
+        selected: &HashSet<Attribute>,
+        conversion: impl Fn(&Clip, &Clip, &vv_core::Timeline) -> Conversion,
+        label: vv_core::CommandLabel,
+    ) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
@@ -387,7 +384,7 @@ impl VenturiApp {
         let mut speeds: SpeedTargets = Vec::new();
         {
             let tl = &self.session.project.timelines[timeline_id];
-            for &(track_index, clip_id) in &dialog.targets {
+            for &(track_index, clip_id) in targets {
                 let (Some(track), Some(target)) =
                     (tl.tracks.get(track_index), tl.clip(track_index, clip_id))
                 else {
@@ -397,21 +394,18 @@ impl VenturiApp {
                     continue;
                 }
                 let source = match track.kind {
-                    TrackKind::Video => dialog.source_video.as_ref(),
-                    TrackKind::Audio => dialog.source_audio.as_ref(),
+                    TrackKind::Video => source_video,
+                    TrackKind::Audio => source_audio,
                 };
                 let Some(source) = source else {
                     continue;
                 };
-                if source.id == target.id {
-                    continue;
-                }
                 commands.push((
                     track_index,
                     clip_id,
-                    merged_attributes(source, target, &dialog.selected, dialog.keyframe_mode),
+                    merge(source, target, selected, &conversion(source, target, tl)),
                 ));
-                if dialog.selected.contains(&Attribute::Speed)
+                if selected.contains(&Attribute::Speed)
                     && matches!(target.source, vv_core::ClipSource::Media(_))
                     && (target.speed(), target.pitch_correction)
                         != (source.speed(), source.pitch_correction)
@@ -453,60 +447,134 @@ impl VenturiApp {
                 )),
             );
         }
-        self.session
-            .history
-            .end_group_as(mark, vv_core::CommandLabel::PasteAttributes);
+        self.session.history.end_group_as(mark, label);
+    }
+}
+
+/// One checkbox per section of `sections`, plus one per attribute when the
+/// section has more than one.
+pub(crate) fn attribute_checkboxes(
+    ui: &mut egui::Ui,
+    selected: &mut HashSet<Attribute>,
+    sections: &[Section],
+) {
+    for &section in sections {
+        let members: Vec<Attribute> = Attribute::ALL
+            .into_iter()
+            .filter(|a| a.section() == section)
+            .collect();
+        ui.separator();
+        let mut all = members.iter().all(|a| selected.contains(a));
+        if ui
+            .checkbox(&mut all, egui::RichText::new(section.title()).strong())
+            .changed()
+        {
+            for attribute in &members {
+                if all {
+                    selected.insert(*attribute);
+                } else {
+                    selected.remove(attribute);
+                }
+            }
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        ui.indent(("attribute_section", section as usize), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for attribute in &members {
+                    let mut on = selected.contains(attribute);
+                    if ui.checkbox(&mut on, attribute.label()).changed() {
+                        if on {
+                            selected.insert(*attribute);
+                        } else {
+                            selected.remove(attribute);
+                        }
+                    }
+                }
+            });
+        });
     }
 }
 
 /// Targets grouped by the speed (and pitch correction) they get.
 type SpeedTargets = Vec<((vv_core::Rational, bool), Vec<(usize, ClipId)>)>;
 
-/// The attributes of `target` with the ones selected replaced by those of
-/// `source`. Durations (fades, transitions) are clamped to the target clip,
-/// which can be shorter than the source one.
+#[cfg(test)]
 fn merged_attributes(
     source: &Clip,
     target: &Clip,
     selected: &HashSet<Attribute>,
     mode: KeyframeMode,
 ) -> ClipAttributes {
+    merge(
+        source,
+        target,
+        selected,
+        &Conversion::paste(source, target, mode),
+    )
+}
+
+/// The attributes of `target` with the ones selected replaced by those of
+/// `source`. Durations (fades, transitions) are clamped to the target clip,
+/// which can be shorter than the source one.
+fn merge(
+    source: &Clip,
+    target: &Clip,
+    selected: &HashSet<Attribute>,
+    conversion: &Conversion,
+) -> ClipAttributes {
     let mut attributes = ClipAttributes::of(target);
-    let remap = KeyframeRemap::new(source, target, mode);
+    let remap = &conversion.remap;
     let len = target.timeline_len.max(1);
+    let duration = |frames: FrameIdx| conversion.duration(frames);
+    let [sx, sy] = conversion.space_scale;
+    let scaled = |track: &Keyframed<f32>, k: f32| {
+        let mut track = remap.apply(track);
+        if k != 1.0 {
+            track.map_values(|v| v * k);
+        }
+        track
+    };
 
     for attribute in selected {
         for param in attribute.transform_params() {
+            let k = match param {
+                TransformParam::PositionX | TransformParam::AnchorX => sx,
+                TransformParam::PositionY | TransformParam::AnchorY => sy,
+                _ => 1.0,
+            };
             *attributes.effects.transform.track_mut(*param) =
-                remap.apply(source.effects.transform.track(*param));
+                scaled(source.effects.transform.track(*param), k);
         }
         match attribute {
             Attribute::Fades => {
-                attributes.fade_in = source.fade_in.clamp(0, len);
-                attributes.fade_out = source.fade_out.clamp(0, len);
+                attributes.fade_in = duration(source.fade_in).clamp(0, len);
+                attributes.fade_out = duration(source.fade_out).clamp(0, len);
             }
             Attribute::BlendMode => attributes.effects.blend_mode = source.effects.blend_mode,
             Attribute::Flip => attributes.effects.transform.flip = source.effects.transform.flip,
             Attribute::Filters => {
-                attributes.effects.filters = source
-                    .effects
-                    .filters
-                    .iter()
-                    .map(|f| {
-                        let mut filter = vv_core::ClipFilter {
-                            radius: remap.apply(&f.radius),
-                            direction: remap.apply(&f.direction),
-                            amount: remap.apply(&f.amount),
-                            offset: f.offset.each_ref().map(|t| remap.apply(t)),
-                            grow: remap.apply(&f.grow),
-                            ..f.clone()
-                        };
-                        for track in filter.grade.tracks_mut() {
-                            *track = remap.apply(track);
-                        }
-                        filter
-                    })
-                    .collect();
+                let size = (sx * sy).sqrt();
+                let filters = source.effects.filters.iter().map(|f| {
+                    let mut filter = vv_core::ClipFilter {
+                        radius: scaled(&f.radius, size),
+                        direction: remap.apply(&f.direction),
+                        amount: remap.apply(&f.amount),
+                        offset: [scaled(&f.offset[0], sx), scaled(&f.offset[1], sy)],
+                        grow: scaled(&f.grow, size),
+                        ..f.clone()
+                    };
+                    for track in filter.grade.tracks_mut() {
+                        *track = remap.apply(track);
+                    }
+                    filter
+                });
+                if conversion.append_filters {
+                    attributes.effects.filters.extend(filters);
+                } else {
+                    attributes.effects.filters = filters.collect();
+                }
             }
             Attribute::Masks => {
                 attributes.effects.masks = source.effects.masks.clone();
@@ -520,7 +588,7 @@ fn merged_attributes(
             Attribute::Transitions => {
                 let clamped = |t: &Option<vv_core::Transition>| {
                     t.clone().map(|mut t| {
-                        t.duration = t.duration.clamp(1, len);
+                        t.duration = duration(t.duration).clamp(1, len);
                         t
                     })
                 };
@@ -536,26 +604,104 @@ fn merged_attributes(
     attributes
 }
 
+/// Where a preset's keyframes are pinned on a clip of another length.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum KeyframeAnchor {
+    Start,
+    End,
+    Stretch,
+}
+
+/// How the values of a source clip are brought onto a target clip.
+pub(crate) struct Conversion {
+    remap: KeyframeRemap,
+    /// Target fps over source fps, for the durations in timeline frames.
+    time_scale: f64,
+    /// Target resolution over source resolution, per axis, for the values
+    /// in timeline pixels.
+    space_scale: [f32; 2],
+    append_filters: bool,
+}
+
+/// The timeline a preset's source clip lived in.
+#[derive(Clone, Copy)]
+pub(crate) struct TimelineFormat {
+    pub fps: Rational,
+    pub resolution: (u32, u32),
+}
+
+impl Conversion {
+    fn paste(source: &Clip, target: &Clip, mode: KeyframeMode) -> Self {
+        Self {
+            remap: KeyframeRemap::source_frames(source, target, mode),
+            time_scale: 1.0,
+            space_scale: [1.0, 1.0],
+            append_filters: false,
+        }
+    }
+
+    /// Keyframes keep their *time* from the anchor, so they survive a
+    /// different fps, speed or media fps.
+    pub(crate) fn preset(
+        source: &Clip,
+        from: TimelineFormat,
+        target: &Clip,
+        to: TimelineFormat,
+        anchor: KeyframeAnchor,
+        append_filters: bool,
+    ) -> Self {
+        let time_scale = to.fps.as_f64() / from.fps.as_f64().max(1e-9);
+        let axis = |to: u32, from: u32| to as f32 / from.max(1) as f32;
+        Self {
+            remap: KeyframeRemap::Anchored {
+                source: source.clone(),
+                target: target.clone(),
+                time_scale,
+                anchor,
+            },
+            time_scale,
+            space_scale: [
+                axis(to.resolution.0, from.resolution.0),
+                axis(to.resolution.1, from.resolution.1),
+            ],
+            append_filters,
+        }
+    }
+
+    fn duration(&self, frames: FrameIdx) -> FrameIdx {
+        (frames as f64 * self.time_scale).round() as FrameIdx
+    }
+}
+
 /// Source frames of the keyframes of `source` brought into the space of
 /// `target`: the clips can start at a different point of their media and
 /// last a different time.
-struct KeyframeRemap {
-    source_in: FrameIdx,
-    target_in: FrameIdx,
-    target_out: FrameIdx,
-    /// `None` keeps the distances from the start of the clip (Maintain Timing).
-    scale: Option<f64>,
+enum KeyframeRemap {
+    SourceFrames {
+        source_in: FrameIdx,
+        target_in: FrameIdx,
+        target_out: FrameIdx,
+        /// `None` keeps the distances from the start of the clip (Maintain Timing).
+        scale: Option<f64>,
+    },
+    Anchored {
+        source: Clip,
+        target: Clip,
+        time_scale: f64,
+        anchor: KeyframeAnchor,
+    },
 }
 
 impl KeyframeRemap {
-    fn new(source: &Clip, target: &Clip, mode: KeyframeMode) -> Self {
+    fn source_frames(source: &Clip, target: &Clip, mode: KeyframeMode) -> Self {
         let scale = match mode {
             KeyframeMode::MaintainTiming => None,
             KeyframeMode::StretchToFit => {
                 Some(target.source_len().max(1) as f64 / source.source_len().max(1) as f64)
             }
         };
-        Self {
+        Self::SourceFrames {
             source_in: source.source_in(),
             target_in: target.source_in(),
             target_out: target.source_out(),
@@ -563,25 +709,64 @@ impl KeyframeRemap {
         }
     }
 
-    fn frame(&self, frame: FrameIdx) -> FrameIdx {
-        let offset = frame - self.source_in;
-        let offset = match self.scale {
-            Some(scale) => (offset as f64 * scale).round() as FrameIdx,
-            None => offset,
-        };
-        self.target_in + offset
+    fn target_range(&self) -> std::ops::Range<FrameIdx> {
+        match self {
+            Self::SourceFrames {
+                target_in,
+                target_out,
+                ..
+            } => *target_in..*target_out,
+            Self::Anchored { target, .. } => target.source_in()..target.source_out(),
+        }
     }
 
-    /// Keyframes outside the target clip are dropped: they would not be
-    /// reachable and the trim would delete them anyway.
-    fn apply<T: Clone>(&self, track: &Keyframed<T>) -> Keyframed<T> {
-        let mut out = Keyframed::constant(track.default.clone());
-        for (frame, value, interpolation) in track.keyframes() {
-            let frame = self.frame(*frame);
-            if (self.target_in..self.target_out).contains(&frame) {
-                out.upsert(frame, value.clone(), *interpolation);
+    fn frame(&self, frame: FrameIdx) -> FrameIdx {
+        match self {
+            Self::SourceFrames {
+                source_in,
+                target_in,
+                scale,
+                ..
+            } => {
+                let offset = frame - source_in;
+                let offset = match scale {
+                    Some(scale) => (offset as f64 * scale).round() as FrameIdx,
+                    None => offset,
+                };
+                target_in + offset
+            }
+            Self::Anchored {
+                source,
+                target,
+                time_scale,
+                anchor,
+            } => {
+                let offset = source.timeline_frame_at(frame) - source.timeline_start;
+                let rescale = |frames: FrameIdx| (frames as f64 * time_scale).round() as FrameIdx;
+                let offset = match anchor {
+                    KeyframeAnchor::Start => rescale(offset),
+                    KeyframeAnchor::End => {
+                        target.timeline_len + rescale(offset - source.timeline_len)
+                    }
+                    KeyframeAnchor::Stretch => (offset as f64 * target.timeline_len as f64
+                        / source.timeline_len.max(1) as f64)
+                        .round() as FrameIdx,
+                };
+                target.source_frame_at(target.timeline_start + offset)
             }
         }
+    }
+
+    /// Keyframes outside the target clip are cut as a trim would: the
+    /// animation keeps the value it has at the edges of the clip.
+    fn apply<T: Lerp + Clone + PartialEq>(&self, track: &Keyframed<T>) -> Keyframed<T> {
+        let range = self.target_range();
+        let mut out = Keyframed::constant(track.default.clone());
+        for (frame, value, interpolation) in track.keyframes() {
+            out.upsert(self.frame(*frame), value.clone(), *interpolation);
+        }
+        out.drop_before(range.start);
+        out.drop_from(range.end);
         out
     }
 }

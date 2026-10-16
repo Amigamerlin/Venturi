@@ -1,4 +1,5 @@
 use super::*;
+use crate::pool_view::kinetic_pool_scroll;
 
 fn timeline_item(app: &VenturiApp, timeline_id: vv_core::TimelineId) -> MediaId {
     app.session
@@ -159,8 +160,11 @@ fn f2_renames_a_single_selected_timeline_or_folder() {
     app.media_pool_state.select_only([item]);
     app.rename_selected_pool_item();
     assert_eq!(
-        app.media_pool_state.renaming.as_ref().map(|r| r.target),
-        Some(media_pool::RenameTarget::Media(item))
+        app.media_pool_state
+            .renaming
+            .as_ref()
+            .map(|r| r.target.clone()),
+        Some(media_pool::RenameTarget::Item(item))
     );
 
     app.media_pool_state.renaming = None;
@@ -178,7 +182,10 @@ fn f2_renames_a_single_selected_timeline_or_folder() {
     assert!(app.media_pool_state.selected.is_empty());
     app.rename_selected_pool_item();
     assert_eq!(
-        app.media_pool_state.renaming.as_ref().map(|r| r.target),
+        app.media_pool_state
+            .renaming
+            .as_ref()
+            .map(|r| r.target.clone()),
         Some(media_pool::RenameTarget::Folder(folder))
     );
 }

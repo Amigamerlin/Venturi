@@ -1,0 +1,157 @@
+_version: 2
+
+pool.tab_project:
+  en: "Project"
+  it: "Progetto"
+
+pool.tab_library:
+  en: "Library"
+  it: "Libreria"
+
+pool.add_to_library:
+  en: "Add to library"
+  it: "Aggiungi alla libreria"
+
+pool.add_to_library_hint:
+  en: "Copies the selected items into the library shared by all projects"
+  it: "Copia gli elementi selezionati nella libreria condivisa tra tutti i progetti"
+
+library.tab_hint:
+  en: "Media and compound clips shared by all projects"
+  it: "Media e compound clip condivisi tra tutti i progetti"
+
+library.empty_hint:
+  en: "Empty. Right click an item of the project pool and choose \"Add to library\"."
+  it: "Vuota. Tasto destro su un elemento del pool del progetto e scegli \"Aggiungi alla libreria\"."
+
+library.item_hint:
+  en: "Drag onto the timeline or double click to add it to the project"
+  it: "Trascina sulla timeline o doppio clic per aggiungerlo al progetto"
+
+library.copying:
+  en: "Copying %{name}…"
+  it: "Copia di %{name}…"
+
+library.add_to_project:
+  en: "Add to project"
+  it: "Aggiungi al progetto"
+
+library.delete:
+  en: "Delete from library"
+  it: "Elimina dalla libreria"
+
+library.delete_question_one:
+  en: "Delete it from the library? Its copied files are removed too."
+  it: "Eliminarlo dalla libreria? Vengono rimossi anche i file copiati."
+
+library.delete_question_many:
+  en: "Delete %{count} items from the library? Their copied files are removed too."
+  it: "Eliminare %{count} elementi dalla libreria? Vengono rimossi anche i file copiati."
+
+library.delete_confirm:
+  en: "Delete for good"
+  it: "Elimina definitivamente"
+
+library.save_failed:
+  en: "Library: %{error}"
+  it: "Libreria: %{error}"
+
+preset.save_title:
+  en: "Save Preset"
+  it: "Salva preset"
+
+preset.name:
+  en: "Name"
+  it: "Nome"
+
+preset.save:
+  en: "Save"
+  it: "Salva"
+
+preset.anchor_start:
+  en: "Keep timing from the start of the clip"
+  it: "Mantieni i tempi dall'inizio della clip"
+
+preset.anchor_end:
+  en: "Keep timing from the end of the clip"
+  it: "Mantieni i tempi dalla fine della clip"
+
+preset.filters_replace:
+  en: "Replace the clip's filters"
+  it: "Sostituisci i filtri della clip"
+
+preset.filters_append:
+  en: "Add after the clip's filters"
+  it: "Aggiungi dopo i filtri della clip"
+
+preset.shortcut:
+  en: "Shortcut"
+  it: "Scorciatoia"
+
+preset.shortcut_none:
+  en: "None"
+  it: "Nessuna"
+
+preset.shortcut_hint:
+  en: "Click and press the keys that apply the preset to the selected clips (Esc cancels)"
+  it: "Clicca e premi i tasti che applicano il preset alle clip selezionate (Esc annulla)"
+
+preset.shortcut_used:
+  en: "%{shortcut} is already used by: %{actions}"
+  it: "%{shortcut} è già usata da: %{actions}"
+
+preset.shortcut_moved:
+  en: "Saving removes it from the preset \"%{name}\""
+  it: "Salvando verrà tolta dal preset \"%{name}\""
+
+preset.empty_hint:
+  en: "Right click a clip › \"Save properties as preset...\""
+  it: "Tasto destro su una clip › \"Salva proprietà come preset...\""
+
+preset.item_hint:
+  en: "Drag onto a clip, or double click to apply to the selected clips"
+  it: "Trascina su una clip, o doppio clic per applicarlo alle clip selezionate"
+
+preset.apply_to_selection:
+  en: "Apply to selected clips"
+  it: "Applica alle clip selezionate"
+
+preset.edit:
+  en: "Edit preset..."
+  it: "Modifica preset..."
+
+preset.edit_title:
+  en: "Edit preset"
+  it: "Modifica preset"
+
+library.file_missing:
+  en: "%{path} is missing: relink it in the project first"
+  it: "%{path} non esiste: ricollegalo prima nel progetto"
+
+library.project_copy_failed:
+  en: "Copying a library file into the project folder: %{error}"
+  it: "Copia di un file della libreria nella cartella del progetto: %{error}"
+
+library.relink:
+  en: "Relink..."
+  it: "Ricollega..."
+
+library.relink_hint:
+  en: "Choose a folder to look for the missing files in, by name"
+  it: "Scegli una cartella in cui cercare per nome i file mancanti"
+
+library.relink_done:
+  en: "All the files of the asset were found and copied into the library"
+  it: "Tutti i file dell'asset sono stati trovati e copiati nella libreria"
+
+library.relink_partial:
+  en: "%{missing} files of the asset are still missing"
+  it: "Mancano ancora %{missing} file dell'asset"
+
+library.copying_to_project:
+  en: "%{percent}% · %{name}"
+  it: "%{percent}% · %{name}"
+
+library.copying_to_project_hint:
+  en: "Library files being copied into the project's folder, under library/: %{count}. Until a copy is ready the project uses the library's file"
+  it: "File della libreria in copia nella cartella del progetto, in library/: %{count}. Finché la copia non è pronta il progetto usa il file della libreria"

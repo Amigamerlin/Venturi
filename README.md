@@ -51,6 +51,10 @@ the part that has to be perfect.
   delete, compound clips, copy/paste properties, copy/paste of clips and
   media between projects and Venturi windows, magnet snapping, clip speed
   from 1% to 10,000%, unlimited undo with a jumpable history.
+- **A library shared by all projects.** Media and compound clips you reuse
+  everywhere, and property presets (a 2x punch-in with its easing, a drop
+  shadow, a voice level) applied with a drag or a shortcut, timed from the
+  start or the end of any clip.
 - **Audio, finished in place.** A mixer with per-track and master gain,
   balance, meters and an effect chain: 6-band equalizer and 3-band
   multiband compressor over the live spectrum, normalization (sample

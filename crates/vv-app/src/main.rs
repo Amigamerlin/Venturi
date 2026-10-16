@@ -16,6 +16,9 @@ mod grade_panel;
 mod hw_decode;
 mod i18n;
 mod keyframe_editor;
+mod library;
+mod library_copy;
+mod library_ui;
 mod mask_overlay;
 mod mask_panel;
 mod mcp_host;
@@ -26,6 +29,8 @@ mod mixer_panel;
 mod new_timeline_dialog;
 mod paste_attributes;
 mod paste_image;
+mod pool_view;
+mod presets;
 mod project_io;
 mod properties_panel;
 mod proxy_worker;
@@ -396,6 +401,11 @@ struct VenturiApp {
     export_dialog: Option<export_dialog::ExportDialog>,
     new_timeline_dialog: Option<NewTimelineDialog>,
     paste_attributes: Option<PasteAttributesDialog>,
+    library: library::Library,
+    project_copier: Option<library_copy::ProjectCopier>,
+    effects_panel: media_pool_ui::EffectsPanelState,
+    library_ui: library_ui::LibraryUiState,
+    preset_dialog: Option<presets::PresetDialog>,
     /// A clipboard read for a paste in flight, see `request_clipboard_image`.
     clipboard_image_rx: Option<mpsc::Receiver<Option<paste_image::ClipboardImage>>>,
     paste_image_dialog: Option<paste_image::PasteImageDialog>,
@@ -540,6 +550,11 @@ impl Default for VenturiApp {
             export_dialog: None,
             new_timeline_dialog: None,
             paste_attributes: None,
+            library: Default::default(),
+            project_copier: None,
+            effects_panel: Default::default(),
+            library_ui: Default::default(),
+            preset_dialog: None,
             clipboard_image_rx: None,
             paste_image_dialog: None,
             paste_image_needs_save: false,
@@ -2782,7 +2797,7 @@ impl VenturiApp {
             .is_some_and(|c| match &c.source {
                 vv_core::ClipSource::Media(id) => {
                     !self.session.project.media_pool.contains_key(*id)
-                        || self.media_pool_state.is_offline(*id)
+                        || self.media_pool_state.is_offline(id)
                 }
                 vv_core::ClipSource::SolidColor
                 | vv_core::ClipSource::Text
@@ -2915,8 +2930,12 @@ impl VenturiApp {
             .end_group_as(mark, vv_core::CommandLabel::PasteClips);
     }
 
-    /// Pasted media need their thumbnail, proxy and waveform like imported ones.
+    /// Pasted media need their thumbnail, proxy and waveform like imported
+    /// ones. Nothing new (every file already in the pool) leaves no step.
     fn add_pasted_entities(&mut self, add: vv_core::AddEntities) {
+        if add.is_empty() {
+            return;
+        }
         let added: Vec<MediaId> = add.media_ids().collect();
         self.session.apply(Box::new(add));
         for media_id in added {
@@ -3980,6 +3999,15 @@ impl VenturiApp {
             self.open_paste_attributes_dialog();
         }
         self.show_paste_attributes_dialog(ui.ctx());
+        if let Some(clips) = self.timeline_state.save_preset_requested.take() {
+            self.open_save_preset_dialog(&clips);
+        }
+        self.show_preset_dialog(ui.ctx());
+        if let Some((preset, targets)) = self.timeline_state.preset_drop.take() {
+            self.apply_preset_by_id(&preset, &targets);
+        }
+        self.poll_library();
+        self.poll_library_copies();
         if let Some(targets) = self.timeline_state.speed_dialog_requested.take() {
             self.open_speed_dialog(targets);
         }
@@ -4074,10 +4102,10 @@ impl VenturiApp {
                     }
                     if let Some(rect) = effects_rect {
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                            Self::show_effects_list(ui)
+                            self.show_effects_list(ui)
                         });
                     } else if self.settings.panels.effects_open {
-                        Self::show_effects_list(ui);
+                        self.show_effects_list(ui);
                     }
                 });
             if let Some(state) = egui::PanelState::load(ui.ctx(), egui::Id::new("left_column")) {
@@ -4659,6 +4687,9 @@ fn main() -> eframe::Result<()> {
             app.session
                 .set_waker(vv_session::Waker::new(move || egui_ctx.request_repaint()));
             app.settings_path = settings_path;
+            if let Some(root) = library::Library::default_root() {
+                app.library = library::Library::open(root);
+            }
             app.settings = settings;
             app.settings.language.apply();
             vv_media::hw::set_budget_bytes(app.settings.hw_decode_budget_bytes());

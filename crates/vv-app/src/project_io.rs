@@ -46,6 +46,7 @@ pub(crate) enum DialogKind {
     ImportOtio,
     OpenProject,
     RelinkMedia(Vec<MediaId>),
+    RelinkLibraryAsset(String),
     RecordingFolder,
 }
 
@@ -344,6 +345,9 @@ impl VenturiApp {
             (DialogKind::RelinkMedia(targets), DialogOutcome::File(Some(base_dir))) => {
                 self.relink_media(&base_dir, &targets);
             }
+            (DialogKind::RelinkLibraryAsset(id), DialogOutcome::File(Some(base_dir))) => {
+                self.relink_library_asset(&id, &base_dir);
+            }
             _ => {} // dialog cancelled by the user
         }
     }
@@ -423,6 +427,7 @@ impl VenturiApp {
 
     pub(crate) fn save_project_to(&mut self, path: &Path) {
         self.store_view();
+        self.copy_library_media_into_project(path);
         match self.session.save_to(path) {
             Ok(()) => {
                 self.project_error = None;

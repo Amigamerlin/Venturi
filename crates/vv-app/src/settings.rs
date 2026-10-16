@@ -403,6 +403,20 @@ impl Shortcut {
     }
 }
 
+impl Serialize for Shortcut {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_config())
+    }
+}
+
+impl<'de> Deserialize<'de> for Shortcut {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::from_config(&text)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown shortcut {text:?}")))
+    }
+}
+
 impl std::fmt::Display for Shortcut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let key: Cow<str> = match self.key {

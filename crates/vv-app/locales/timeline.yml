@@ -80,6 +80,10 @@ timeline.paste_attributes:
   en: "Paste properties..."
   it: "Incolla proprietà..."
 
+timeline.save_preset:
+  en: "Save properties as preset..."
+  it: "Salva proprietà come preset..."
+
 timeline.media_offline:
   en: "⚠ Media offline"
   it: "⚠ Media offline"
