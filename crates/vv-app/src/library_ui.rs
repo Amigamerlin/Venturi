@@ -20,6 +20,8 @@ pub(crate) struct LibraryUiState {
     /// What each asset became in a project, per `(epoch, asset id)`: a
     /// second drag reuses it instead of duplicating a compound clip.
     imports: HashMap<(u64, String), Vec<MediaId>>,
+    /// The whole media pool panel, tabs included, as last drawn.
+    pub area: Option<egui::Rect>,
     /// Assets whose deletion waits for a confirmation.
     pub confirm_delete: Option<Vec<String>>,
     /// Whether each asset misses a file: checked once, until `offline` is
@@ -86,8 +88,13 @@ impl VenturiApp {
 
     /// One asset per selected pool item, files copied into the library.
     pub(crate) fn add_selected_media_to_library(&mut self) {
+        let selected: Vec<MediaId> = self.media_pool_state.selected.iter().copied().collect();
+        self.add_media_to_library(&selected);
+    }
+
+    fn add_media_to_library(&mut self, media: &[MediaId]) {
         let origin = self.clipboard_origin();
-        for &id in &self.media_pool_state.selected {
+        for &id in media {
             let Some(item) = self.session.project.media_pool.get(id) else {
                 continue;
             };
@@ -251,56 +258,33 @@ impl VenturiApp {
     }
 
     /// Vertical strip of the Project and Library tabs on the left of
-    /// `area`; returns the rest of it.
+    /// `area`; returns the rest of it. Pool items dropped on the Library tab
+    /// are added to the library.
     pub(crate) fn show_pool_tabs(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> egui::Rect {
-        const STRIP_WIDTH: f32 = 30.0;
-        let strip = area.with_max_x(area.left() + STRIP_WIDTH);
-        ui.painter()
-            .rect_filled(strip, 0.0, ui.visuals().extreme_bg_color);
-        ui.painter().vline(
-            strip.right(),
-            strip.y_range(),
-            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-        );
         let before = self.library_ui.tab;
-        for (i, (tab, label)) in [
-            (PoolTab::Project, t!("pool.tab_project")),
-            (PoolTab::Library, t!("pool.tab_library")),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let rect = egui::Rect::from_min_size(
-                strip.left_top() + egui::vec2(0.0, 2.0 + i as f32 * STRIP_WIDTH),
-                egui::vec2(STRIP_WIDTH, STRIP_WIDTH),
-            );
-            let resp = ui.interact(rect, ui.id().with(("pool_tab", i)), egui::Sense::click());
-            let hint = match tab {
-                PoolTab::Project => label.into_owned(),
-                PoolTab::Library => format!("{label}\n{}", t!("library.tab_hint")),
-            };
-            let resp = resp.on_hover_text(hint);
-            if resp.clicked() {
-                self.library_ui.tab = tab;
-            }
-            let active = self.library_ui.tab == tab;
-            let color = if active {
-                ui.visuals().strong_text_color()
-            } else if resp.hovered() {
-                ui.visuals().text_color()
-            } else {
-                ui.visuals().weak_text_color()
-            };
-            if active {
-                ui.painter().rect_filled(
-                    rect.with_max_x(rect.left() + 2.0),
-                    0.0,
-                    crate::theme::ACCENT,
-                );
-            }
-            match tab {
-                PoolTab::Project => paint_project_icon(ui.painter(), rect.center(), color),
-                PoolTab::Library => paint_library_icon(ui.painter(), rect.center(), color),
+        let tabs = [
+            pool_view::SideTab {
+                tab: PoolTab::Project,
+                hint: t!("pool.tab_project"),
+                icon: paint_project_icon,
+            },
+            pool_view::SideTab {
+                tab: PoolTab::Library,
+                hint: format!("{}\n{}", t!("pool.tab_library"), t!("library.tab_hint")).into(),
+                icon: paint_library_icon,
+            },
+        ];
+        let (content, responses) = pool_view::side_tabs(ui, area, &mut self.library_ui.tab, &tabs);
+        let library_tab = &responses[1];
+        let dragging_media = !self.media_pool_state.dragging.is_empty()
+            && egui::DragAndDrop::has_payload_of_type::<timeline_ui::MediaDragSet>(ui.ctx());
+        if dragging_media && library_tab.contains_pointer() {
+            ui.painter()
+                .rect_filled(library_tab.rect, 3.0, crate::theme::ACCENT_TRANSLUCENT);
+            if ui.input(|i| i.pointer.any_released()) {
+                egui::DragAndDrop::clear_payload(ui.ctx());
+                let media = std::mem::take(&mut self.media_pool_state.dragging);
+                self.add_media_to_library(&media);
             }
         }
         // A hidden selection would still take Ctrl+C.
@@ -308,7 +292,7 @@ impl VenturiApp {
             self.media_pool_state.clear();
             self.library_ui.pool.clear();
         }
-        area.with_min_x(strip.right() + 4.0)
+        content
     }
 
     fn library_selection(&self) -> Vec<String> {
@@ -508,9 +492,8 @@ impl VenturiApp {
         };
         let inside = self
             .library_ui
-            .pool
-            .scroll_area
-            .is_some_and(|area| timeline_ui::pointer_over(ctx, area.viewport));
+            .area
+            .is_some_and(|area| timeline_ui::pointer_over(ctx, area));
         if inside {
             return;
         }

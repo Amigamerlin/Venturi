@@ -115,7 +115,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
     if !egui::DragAndDrop::has_any_payload(ui.ctx()) {
         state.dragging.clear();
     }
-    let search_changed = search_field(ui, &mut state.search);
+    let search_changed = search_field(ui, &mut state.search, std::any::type_name::<I>());
     pool_header(ui, state);
     kinetic_pool_scroll(ui.ctx(), state, view.kinetic_scroll);
     let PoolView {
@@ -506,19 +506,24 @@ fn item_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                     }
                     ui.small(meta_line(entry));
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // An image has no real duration.
-                    let duration_label = if meta.is_image() {
-                        "—".to_string()
-                    } else {
-                        format_duration(meta.duration_frames, meta.fps.as_f64())
-                    };
-                    ui.add_sized(
-                        egui::vec2(DURATION_COL_W, ui.available_height()),
-                        egui::Label::new(egui::RichText::new(duration_label).monospace()),
-                    );
-                    proxy_badge(ui, entry.proxy);
-                });
+                let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        // An image has no real duration.
+                        let duration_label = if meta.is_image() {
+                            "—".to_string()
+                        } else {
+                            format_duration(meta.duration_frames, meta.fps.as_f64())
+                        };
+                        ui.add_sized(
+                            egui::vec2(DURATION_COL_W, ui.available_height()),
+                            egui::Label::new(egui::RichText::new(duration_label).monospace()),
+                        );
+                        proxy_badge(ui, entry.proxy);
+                    },
+                );
             });
         })
         .response
@@ -773,28 +778,112 @@ fn pool_header<I: PoolId, F: PoolId>(ui: &mut egui::Ui, state: &mut PoolState<I,
     }
 }
 
-/// Returns whether the query changed.
-fn search_field(ui: &mut egui::Ui, search: &mut String) -> bool {
-    let before = search.clone();
-    ui.horizontal(|ui| {
-        let clear_w = if search.is_empty() { 0.0 } else { 24.0 };
-        let resp = ui.add(
-            egui::TextEdit::singleline(search)
-                .hint_text(t!("pool.search"))
-                .desired_width(ui.available_width() - clear_w),
+pub(crate) struct SideTab<'a, T> {
+    pub tab: T,
+    pub hint: std::borrow::Cow<'a, str>,
+    pub icon: fn(&egui::Painter, egui::Pos2, egui::Color32),
+}
+
+/// Vertical strip of icon tabs on the left of `area`. Returns the rest of
+/// `area` and the response of each tab, for the callers that take drops on
+/// them.
+pub(crate) fn side_tabs<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    area: egui::Rect,
+    current: &mut T,
+    tabs: &[SideTab<'_, T>],
+) -> (egui::Rect, Vec<egui::Response>) {
+    const STRIP_WIDTH: f32 = 30.0;
+    let strip = area.with_max_x(area.left() + STRIP_WIDTH);
+    ui.painter()
+        .rect_filled(strip, 0.0, ui.visuals().extreme_bg_color);
+    ui.painter().vline(
+        strip.right(),
+        strip.y_range(),
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+    let mut responses = Vec::new();
+    for (i, tab) in tabs.iter().enumerate() {
+        let rect = egui::Rect::from_min_size(
+            strip.left_top() + egui::vec2(0.0, 2.0 + i as f32 * STRIP_WIDTH),
+            egui::vec2(STRIP_WIDTH, STRIP_WIDTH),
         );
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            search.clear();
+        let resp = ui
+            .interact(
+                rect,
+                ui.id().with(("side_tab", std::any::type_name::<T>(), i)),
+                egui::Sense::click(),
+            )
+            .on_hover_text(tab.hint.as_ref());
+        if resp.clicked() {
+            *current = tab.tab;
         }
-        if !search.is_empty()
-            && ui
-                .small_button("×")
-                .on_hover_text(t!("pool.search_clear"))
-                .clicked()
-        {
-            search.clear();
+        let active = *current == tab.tab;
+        let color = if active {
+            ui.visuals().strong_text_color()
+        } else if resp.hovered() {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        if active {
+            ui.painter().rect_filled(
+                rect.with_max_x(rect.left() + 2.0),
+                0.0,
+                crate::theme::ACCENT,
+            );
         }
-    });
+        (tab.icon)(ui.painter(), rect.center(), color);
+        responses.push(resp);
+    }
+    (area.with_min_x(strip.right() + 4.0), responses)
+}
+
+/// The content next to `side_tabs`, clipped to `rect`: a background that
+/// senses clicks over its clip rect must not cover the tabs.
+pub(crate) fn beside_tabs<R>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        add(ui)
+    })
+    .inner
+}
+
+/// Returns whether the query changed.
+/// `salt` tells apart the search fields sharing a parent.
+pub(crate) fn search_field(ui: &mut egui::Ui, search: &mut String, salt: &str) -> bool {
+    let before = search.clone();
+    // Right to left: the text field takes what the button leaves, margins
+    // included, so it never pushes the panel wider.
+    let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(
+        row,
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            if !search.is_empty()
+                && ui
+                    .small_button("×")
+                    .on_hover_text(t!("pool.search_clear"))
+                    .clicked()
+            {
+                search.clear();
+            }
+            // Fixed id: the button showing up must not move its focus away.
+            let resp = ui.add(
+                egui::TextEdit::singleline(search)
+                    .id_salt(("search_field", salt))
+                    .hint_text(t!("pool.search"))
+                    .desired_width(f32::INFINITY),
+            );
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                search.clear();
+            }
+        },
+    );
     *search != before
 }
 

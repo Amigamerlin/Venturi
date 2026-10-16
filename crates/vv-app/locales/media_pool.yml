@@ -110,6 +110,10 @@ effects.transitions:
   en: "Transitions"
   it: "Transizioni"
 
+effects.tab_effects:
+  en: "Generators, filters and transitions"
+  it: "Generatori, filtri e transizioni"
+
 effects.presets:
   en: "Presets"
   it: "Preset"

@@ -403,6 +403,7 @@ struct VenturiApp {
     paste_attributes: Option<PasteAttributesDialog>,
     library: library::Library,
     project_copier: Option<library_copy::ProjectCopier>,
+    effects_panel: media_pool_ui::EffectsPanelState,
     library_ui: library_ui::LibraryUiState,
     preset_dialog: Option<presets::PresetDialog>,
     /// A clipboard read for a paste in flight, see `request_clipboard_image`.
@@ -551,6 +552,7 @@ impl Default for VenturiApp {
             paste_attributes: None,
             library: Default::default(),
             project_copier: None,
+            effects_panel: Default::default(),
             library_ui: Default::default(),
             preset_dialog: None,
             clipboard_image_rx: None,

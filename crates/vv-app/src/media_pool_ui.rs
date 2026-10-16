@@ -240,6 +240,34 @@ pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) 
 
 /// Width of the "Duration" column: the same in the header and in the rows,
 /// so they stay aligned.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EffectsTab {
+    #[default]
+    Effects,
+    Presets,
+}
+
+#[derive(Default)]
+pub(crate) struct EffectsPanelState {
+    pub tab: EffectsTab,
+    pub search: String,
+}
+
+/// Five-pointed star, outlined.
+fn paint_star_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    let points = (0..10)
+        .map(|i| {
+            let radius = if i % 2 == 0 { 8.0 } else { 3.6 };
+            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            center + radius * egui::vec2(angle.cos(), angle.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::closed_line(
+        points,
+        egui::Stroke::new(1.3, color),
+    ));
+}
+
 pub(crate) fn file_label(path: &std::path::Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -472,8 +500,9 @@ impl VenturiApp {
         preview_action: &mut Option<MediaId>,
     ) {
         let area = ui.available_rect_before_wrap();
+        self.library_ui.area = Some(area);
         let content = self.show_pool_tabs(ui, area);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+        pool_view::beside_tabs(ui, content, |ui| {
             self.show_library_copy_progress(ui);
             match self.library_ui.tab {
                 library_ui::PoolTab::Project => self.show_project_pool(ui, preview_action),
@@ -621,29 +650,72 @@ impl VenturiApp {
         }
     }
 
-    /// Effects section: generators and effects to drag onto the timeline.
+    /// Effects panel: generators, filters and transitions to drag onto the
+    /// timeline in one tab, the presets in the other.
     pub(crate) fn show_effects_list(&mut self, ui: &mut egui::Ui) {
-        effects_section_header(ui, &t!("effects.generators"));
-        egui::ScrollArea::vertical()
-            .id_salt("effects_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for generator in timeline_ui::Generator::ALL {
-                    effect_item(ui, generator);
-                }
-                ui.add_space(8.0);
-                effects_section_header(ui, &t!("effects.filters"));
-                for filter in timeline_ui::FILTER_ENTRIES {
-                    filter_item(ui, filter);
-                }
-                ui.add_space(8.0);
-                effects_section_header(ui, &t!("effects.transitions"));
-                for transition in timeline_ui::ALL_TRANSITION_KINDS {
-                    transition_item(ui, transition);
-                }
-                ui.add_space(8.0);
-                self.show_preset_list(ui);
-            });
+        let area = ui.available_rect_before_wrap();
+        let tabs = [
+            pool_view::SideTab {
+                tab: EffectsTab::Effects,
+                hint: t!("effects.tab_effects"),
+                icon: |p, c, color| timeline_ui::paint_gear_icon(p, c, 8.0, color),
+            },
+            pool_view::SideTab {
+                tab: EffectsTab::Presets,
+                hint: t!("effects.presets"),
+                icon: paint_star_icon,
+            },
+        ];
+        let (content, _) = pool_view::side_tabs(ui, area, &mut self.effects_panel.tab, &tabs);
+        pool_view::beside_tabs(ui, content, |ui| {
+            pool_view::search_field(ui, &mut self.effects_panel.search, "effects");
+            let query = self.effects_panel.search.trim().to_owned();
+            let matches = |label: &str| media_pool::matches_search(label, &query);
+            egui::ScrollArea::vertical()
+                .id_salt("effects_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.effects_panel.tab {
+                    EffectsTab::Effects => {
+                        let generators: Vec<_> = timeline_ui::Generator::ALL
+                            .into_iter()
+                            .filter(|&g| matches(&timeline_ui::generator_label(g)))
+                            .collect();
+                        let filters: Vec<_> = timeline_ui::FILTER_ENTRIES
+                            .into_iter()
+                            .filter(|f| matches(&f.label()))
+                            .collect();
+                        let transitions: Vec<_> = timeline_ui::ALL_TRANSITION_KINDS
+                            .into_iter()
+                            .filter(|&k| matches(&timeline_ui::transition_kind_label(k)))
+                            .collect();
+                        if generators.is_empty() && filters.is_empty() && transitions.is_empty() {
+                            ui.weak(t!("pool.search_no_results"));
+                        }
+                        if !generators.is_empty() {
+                            effects_section_header(ui, &t!("effects.generators"));
+                            for generator in generators {
+                                effect_item(ui, generator);
+                            }
+                            ui.add_space(8.0);
+                        }
+                        if !filters.is_empty() {
+                            effects_section_header(ui, &t!("effects.filters"));
+                            for filter in filters {
+                                filter_item(ui, filter);
+                            }
+                            ui.add_space(8.0);
+                        }
+                        if !transitions.is_empty() {
+                            effects_section_header(ui, &t!("effects.transitions"));
+                            for transition in transitions {
+                                transition_item(ui, transition);
+                            }
+                        }
+                    }
+                    EffectsTab::Presets => self.show_preset_list(ui, &query),
+                });
+        });
+        ui.allocate_rect(area, egui::Sense::hover());
     }
 }
 

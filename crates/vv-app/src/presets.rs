@@ -279,8 +279,7 @@ impl VenturiApp {
     }
 
     /// The "Presets" section of the Effects panel.
-    pub(crate) fn show_preset_list(&mut self, ui: &mut egui::Ui) {
-        effects_section_header(ui, &t!("effects.presets"));
+    pub(crate) fn show_preset_list(&mut self, ui: &mut egui::Ui, query: &str) {
         if self.library.presets.is_empty() {
             ui.weak(t!("preset.empty_hint"));
             return;
@@ -288,7 +287,12 @@ impl VenturiApp {
         let mut apply = None;
         let mut edit = None;
         let mut delete = None;
+        let mut shown = 0;
         for (id, preset) in &self.library.presets {
+            if !media_pool::matches_search(&preset.name, query) {
+                continue;
+            }
+            shown += 1;
             let resp = preset_item(ui, id, preset);
             if resp.double_clicked() {
                 apply = Some(id.clone());
@@ -316,6 +320,9 @@ impl VenturiApp {
                     }
                 });
             });
+        }
+        if shown == 0 {
+            ui.weak(t!("pool.search_no_results"));
         }
         if let Some(id) = apply {
             self.apply_preset_to_selection(&id);
