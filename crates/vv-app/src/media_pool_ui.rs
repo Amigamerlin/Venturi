@@ -471,11 +471,19 @@ impl VenturiApp {
         ui: &mut egui::Ui,
         preview_action: &mut Option<MediaId>,
     ) {
-        self.show_pool_tabs(ui);
-        if self.library_ui.tab == library_ui::PoolTab::Library {
-            self.show_library(ui);
-            return;
-        }
+        let area = ui.available_rect_before_wrap();
+        let content = self.show_pool_tabs(ui, area);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+            self.show_library_copy_progress(ui);
+            match self.library_ui.tab {
+                library_ui::PoolTab::Project => self.show_project_pool(ui, preview_action),
+                library_ui::PoolTab::Library => self.show_library(ui),
+            }
+        });
+        ui.allocate_rect(area, egui::Sense::hover());
+    }
+
+    fn show_project_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
         if let Some(worker) = &self.proxy_worker {
             let progress = worker.progress();
             let paused = worker.is_paused();

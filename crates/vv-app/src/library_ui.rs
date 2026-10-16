@@ -210,7 +210,7 @@ impl VenturiApp {
         }
     }
 
-    fn show_library_copy_progress(&self, ui: &mut egui::Ui) {
+    pub(crate) fn show_library_copy_progress(&self, ui: &mut egui::Ui) {
         let Some(progress) = self.project_copier.as_ref().and_then(|c| c.progress()) else {
             return;
         };
@@ -250,27 +250,65 @@ impl VenturiApp {
         }
     }
 
-    pub(crate) fn show_pool_tabs(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let tab = self.library_ui.tab;
-            ui.selectable_value(
-                &mut self.library_ui.tab,
-                PoolTab::Project,
-                t!("pool.tab_project"),
+    /// Vertical strip of the Project and Library tabs on the left of
+    /// `area`; returns the rest of it.
+    pub(crate) fn show_pool_tabs(&mut self, ui: &mut egui::Ui, area: egui::Rect) -> egui::Rect {
+        const STRIP_WIDTH: f32 = 30.0;
+        let strip = area.with_max_x(area.left() + STRIP_WIDTH);
+        ui.painter()
+            .rect_filled(strip, 0.0, ui.visuals().extreme_bg_color);
+        ui.painter().vline(
+            strip.right(),
+            strip.y_range(),
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+        let before = self.library_ui.tab;
+        for (i, (tab, label)) in [
+            (PoolTab::Project, t!("pool.tab_project")),
+            (PoolTab::Library, t!("pool.tab_library")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rect = egui::Rect::from_min_size(
+                strip.left_top() + egui::vec2(0.0, 2.0 + i as f32 * STRIP_WIDTH),
+                egui::vec2(STRIP_WIDTH, STRIP_WIDTH),
             );
-            ui.selectable_value(
-                &mut self.library_ui.tab,
-                PoolTab::Library,
-                t!("pool.tab_library"),
-            )
-            .on_hover_text(t!("library.tab_hint"));
-            // A hidden selection would still take Ctrl+C.
-            if self.library_ui.tab != tab {
-                self.media_pool_state.clear();
-                self.library_ui.pool.clear();
+            let resp = ui.interact(rect, ui.id().with(("pool_tab", i)), egui::Sense::click());
+            let hint = match tab {
+                PoolTab::Project => label.into_owned(),
+                PoolTab::Library => format!("{label}\n{}", t!("library.tab_hint")),
+            };
+            let resp = resp.on_hover_text(hint);
+            if resp.clicked() {
+                self.library_ui.tab = tab;
             }
-        });
-        self.show_library_copy_progress(ui);
+            let active = self.library_ui.tab == tab;
+            let color = if active {
+                ui.visuals().strong_text_color()
+            } else if resp.hovered() {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            if active {
+                ui.painter().rect_filled(
+                    rect.with_max_x(rect.left() + 2.0),
+                    0.0,
+                    crate::theme::ACCENT,
+                );
+            }
+            match tab {
+                PoolTab::Project => paint_project_icon(ui.painter(), rect.center(), color),
+                PoolTab::Library => paint_library_icon(ui.painter(), rect.center(), color),
+            }
+        }
+        // A hidden selection would still take Ctrl+C.
+        if self.library_ui.tab != before {
+            self.media_pool_state.clear();
+            self.library_ui.pool.clear();
+        }
+        area.with_min_x(strip.right() + 4.0)
     }
 
     fn library_selection(&self) -> Vec<String> {
@@ -524,6 +562,52 @@ impl VenturiApp {
             }
         }
     }
+}
+
+/// A folder with a film strip in it: the project's own media.
+fn paint_project_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3, color);
+    let body = egui::Rect::from_center_size(center + egui::vec2(0.0, 1.0), egui::vec2(16.0, 11.0));
+    painter.add(egui::Shape::line(
+        vec![
+            body.left_bottom(),
+            body.left_top() + egui::vec2(0.0, -2.0),
+            body.left_top() + egui::vec2(5.0, -2.0),
+            body.left_top() + egui::vec2(7.0, 0.0),
+            body.right_top(),
+            body.right_bottom(),
+            body.left_bottom(),
+        ],
+        stroke,
+    ));
+    let film =
+        egui::Rect::from_center_size(body.center() + egui::vec2(0.0, 1.0), egui::vec2(8.0, 5.0));
+    painter.rect_filled(film, 0.5, color);
+}
+
+/// Three books on a shelf, the last one leaning.
+fn paint_library_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.3, color);
+    let base = center.y + 7.0;
+    for (x, height) in [(-6.0, 13.0), (-2.0, 11.0)] {
+        painter.rect_stroke(
+            egui::Rect::from_min_max(
+                egui::pos2(center.x + x - 1.5, base - height),
+                egui::pos2(center.x + x + 1.5, base),
+            ),
+            0.5,
+            stroke,
+            egui::StrokeKind::Middle,
+        );
+    }
+    let leaning = [
+        egui::pos2(center.x + 1.5, base),
+        egui::pos2(center.x + 4.5, base),
+        egui::pos2(center.x + 8.5, base - 11.0),
+        egui::pos2(center.x + 5.5, base - 12.0),
+    ];
+    painter.add(egui::Shape::closed_line(leaning.to_vec(), stroke));
+    painter.hline(center.x - 9.0..=center.x + 9.0, base + 1.0, stroke);
 }
 
 #[cfg(test)]
