@@ -1,6 +1,19 @@
 //! Media pool and effects panels.
 
 use super::*;
+use media_pool::RenameTarget;
+use pool_view::{
+    HEADER_HEIGHT, MenuChoice, PoolEntry, PoolEvent, PoolFolder, PoolMenus, PoolView, Thumb,
+};
+
+/// "New folder", or "New folder 2", ... if `taken` has it.
+pub(crate) fn new_folder_name(taken: &[&str]) -> String {
+    let base = t!("pool.new_folder_name").into_owned();
+    std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base} {n}")))
+        .find(|name| !taken.contains(&name.as_str()))
+        .expect("infinite candidates")
+}
 
 /// Progress ring; `None` = queued (background ring only).
 pub(crate) fn proxy_progress_ring(ui: &mut egui::Ui, fraction: Option<f32>) -> egui::Response {
@@ -227,115 +240,6 @@ pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) 
 
 /// Width of the "Duration" column: the same in the header and in the rows,
 /// so they stay aligned.
-pub(crate) const DURATION_COL_W: f32 = 64.0;
-
-/// Free background on the sides and below the items: always somewhere to
-/// right click, even with the pool full.
-pub(crate) const SIDE_PAD: i8 = 6;
-pub(crate) const BOTTOM_PAD: f32 = 28.0;
-
-/// Height of the media pool header bar.
-pub(crate) const HEADER_HEIGHT: f32 = 22.0;
-
-/// Column header of the media pool: every cell is clickable in full
-/// (not just the text), as in a file manager list.
-pub(crate) fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::MediaPoolState) {
-    use media_pool::SortKey;
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
-    let duration_w = DURATION_COL_W.min(width);
-    let (name_rect, duration_rect) = (
-        egui::Rect::from_min_max(
-            rect.left_top(),
-            egui::pos2(rect.right() - duration_w, rect.bottom()),
-        ),
-        egui::Rect::from_min_max(
-            egui::pos2(rect.right() - duration_w, rect.top()),
-            rect.right_bottom(),
-        ),
-    );
-    let sort = state.sort;
-    for (key, label, cell) in [
-        (SortKey::Name, t!("pool.name"), name_rect),
-        (SortKey::Duration, t!("pool.duration"), duration_rect),
-    ] {
-        let resp = ui.interact(
-            cell,
-            ui.id().with(("media_pool_header", key as u8)),
-            egui::Sense::click(),
-        );
-        let active = sort.key == key;
-        let bg = if resp.hovered() {
-            ui.visuals().widgets.hovered.weak_bg_fill
-        } else if active {
-            ui.visuals().widgets.active.weak_bg_fill
-        } else {
-            ui.visuals().widgets.inactive.weak_bg_fill
-        };
-        ui.painter().rect_filled(cell, 0.0, bg);
-        let text_color = ui.visuals().strong_text_color();
-        ui.painter().text(
-            cell.left_center() + egui::vec2(6.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::FontId::proportional(13.0),
-            text_color,
-        );
-        if active {
-            // Small triangle drawn by hand instead of a character: the ones
-            // in system fonts are tall and pointy, this one is squashed.
-            let c = egui::pos2(cell.right() - 10.0, cell.center().y);
-            let (w, h) = (4.5, 2.5);
-            let points = if sort.ascending {
-                vec![
-                    egui::pos2(c.x - w, c.y + h),
-                    egui::pos2(c.x + w, c.y + h),
-                    egui::pos2(c.x, c.y - h),
-                ]
-            } else {
-                vec![
-                    egui::pos2(c.x - w, c.y - h),
-                    egui::pos2(c.x + w, c.y - h),
-                    egui::pos2(c.x, c.y + h),
-                ]
-            };
-            ui.painter().add(egui::Shape::convex_polygon(
-                points,
-                text_color,
-                egui::Stroke::NONE,
-            ));
-        }
-        if resp.clicked() {
-            state.toggle_sort(key);
-        }
-    }
-}
-
-/// Returns whether the query changed.
-fn media_pool_search_field(ui: &mut egui::Ui, search: &mut String) -> bool {
-    let before = search.clone();
-    ui.horizontal(|ui| {
-        let clear_w = if search.is_empty() { 0.0 } else { 24.0 };
-        let resp = ui.add(
-            egui::TextEdit::singleline(search)
-                .hint_text(t!("pool.search"))
-                .desired_width(ui.available_width() - clear_w),
-        );
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            search.clear();
-        }
-        if !search.is_empty()
-            && ui
-                .small_button("×")
-                .on_hover_text(t!("pool.search_clear"))
-                .clicked()
-        {
-            search.clear();
-        }
-    });
-    *search != before
-}
-
 pub(crate) fn file_label(path: &std::path::Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -343,152 +247,107 @@ pub(crate) fn file_label(path: &std::path::Path) -> String {
         .to_string()
 }
 
-/// Name text field of the item being renamed: `Some(Some(name))` to
-/// confirm, `Some(None)` to cancel, `None` while still editing.
-fn rename_field(ui: &mut egui::Ui, rename: &mut media_pool::Rename) -> Option<Option<String>> {
-    let edit_id = ui.id().with("media_pool_rename");
-    let mut output = egui::TextEdit::singleline(&mut rename.text)
-        .id(edit_id)
-        .desired_width(ui.available_width() - DURATION_COL_W)
-        .show(ui);
-    if rename.just_started {
-        rename.just_started = false;
-        output.response.request_focus();
-        let end = egui::text::CCursor::new(rename.text.chars().count());
-        output
-            .state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::two(
-                egui::text::CCursor::new(0),
-                end,
-            )));
-        output.state.store(ui.ctx(), edit_id);
-    }
-    if !output.response.lost_focus() {
-        return None;
-    }
-    let name = rename.text.trim();
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) || name.is_empty() {
-        Some(None)
-    } else {
-        Some(Some(name.to_string()))
-    }
+/// Context menu entries of the project's pool.
+struct ProjectMenus;
+
+enum ProjectAction {
+    DuplicateTimeline(MediaId),
+    Relink,
+    AddToLibrary,
+    RelinkFolder(FolderId),
+    ImportOtio,
+    NewTimeline,
 }
 
-/// Horizontal step per folder level.
-const FOLDER_INDENT: f32 = 14.0;
+impl PoolMenus<MediaId, FolderId> for ProjectMenus {
+    type Action = ProjectAction;
 
-fn indented<R>(ui: &mut egui::Ui, depth: usize, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    if depth == 0 {
-        return add(ui);
-    }
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * FOLDER_INDENT);
-        ui.vertical(add).inner
-    })
-    .inner
-}
-
-/// Thumbnail of a timeline in the pool: a film strip.
-fn paint_film_icon(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    color: egui::Color32,
-    hole_color: egui::Color32,
-) {
-    let film = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 28.0));
-    painter.rect_filled(film, 2.0, color);
-    const HOLES: usize = 6;
-    let step = film.width() / HOLES as f32;
-    for i in 0..HOLES {
-        let x = film.left() + step * (i as f32 + 0.5);
-        for y in [film.top() + 3.5, film.bottom() - 3.5] {
-            painter.rect_filled(
-                egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(4.0, 3.0)),
-                0.5,
-                hole_color,
+    fn item_menu(
+        &self,
+        ui: &mut egui::Ui,
+        entry: &PoolEntry<MediaId, FolderId>,
+        selected: usize,
+        out: &mut Vec<MenuChoice<MediaId, ProjectAction>>,
+    ) {
+        let mut action = |ui: &mut egui::Ui, label, action| {
+            if ui.button(label).clicked() {
+                out.push(MenuChoice::Action(action));
+                ui.close();
+            }
+        };
+        // Only timelines can be renamed: a media keeps its file name.
+        if entry.renamable {
+            action(
+                ui,
+                t!("pool.duplicate_timeline"),
+                ProjectAction::DuplicateTimeline(entry.id),
             );
+            pool_view::rename_button(ui, entry, out);
+            ui.separator();
+        }
+        let relink = if selected > 1 {
+            t!("pool.relink_many", count = selected)
+        } else {
+            t!("pool.relink_one")
+        };
+        if ui.button(relink).clicked() {
+            out.push(MenuChoice::Action(ProjectAction::Relink));
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button(t!("pool.add_to_library"))
+            .on_hover_text(t!("pool.add_to_library_hint"))
+            .clicked()
+        {
+            out.push(MenuChoice::Action(ProjectAction::AddToLibrary));
+            ui.close();
         }
     }
-    let frames = film.shrink2(egui::vec2(3.0, 8.0));
-    let gap = 3.0;
-    let frame_w = (frames.width() - gap) / 2.0;
-    for i in 0..2 {
-        let left = frames.left() + i as f32 * (frame_w + gap);
-        painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(left, frames.top()),
-                egui::vec2(frame_w, frames.height()),
-            ),
-            1.0,
-            hole_color,
-        );
-    }
-}
 
-/// Thumbnail of a media whose file is missing.
-fn paint_offline_thumbnail(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, 2.0, egui::Color32::BLACK);
-    let c = rect.center();
-    let (half_w, h) = (12.0, 21.0);
-    let (top, bottom) = (c.y - h / 2.0, c.y + h / 2.0);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x, top),
-            egui::pos2(c.x + half_w, bottom),
-            egui::pos2(c.x - half_w, bottom),
-        ],
-        crate::theme::ERROR,
-        egui::Stroke::NONE,
-    ));
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(c.x - 1.25, top + 7.0),
-            egui::pos2(c.x + 1.25, bottom - 6.0),
-        ),
-        1.0,
-        egui::Color32::BLACK,
-    );
-    painter.circle_filled(egui::pos2(c.x, bottom - 3.0), 1.4, egui::Color32::BLACK);
+    fn folder_menu(&self, ui: &mut egui::Ui, folder: &FolderId, out: &mut Vec<ProjectAction>) {
+        if ui.button(t!("pool.relink_folder")).clicked() {
+            out.push(ProjectAction::RelinkFolder(*folder));
+            ui.close();
+        }
+    }
+
+    fn background_menu(&self, ui: &mut egui::Ui, out: &mut Vec<ProjectAction>) {
+        ui.menu_button(t!("pool.timelines"), |ui| {
+            if ui.button(t!("menu.import_otio")).clicked() {
+                out.push(ProjectAction::ImportOtio);
+                ui.close();
+            }
+            if ui.button(t!("pool.new_timeline")).clicked() {
+                out.push(ProjectAction::NewTimeline);
+                ui.close();
+            }
+        });
+    }
 }
 
 impl VenturiApp {
-    fn start_rename(&mut self, media_id: MediaId) {
-        let Some(item) = self.session.project.media_pool.get(media_id) else {
-            return;
-        };
-        self.media_pool_state.renaming = Some(media_pool::Rename {
-            target: media_pool::RenameTarget::Media(media_id),
-            text: file_label(&item.path),
-            just_started: true,
-        });
-    }
-
     /// Only folders and timelines can be renamed: a media keeps its file
     /// name.
     pub(crate) fn rename_selected_pool_item(&mut self) {
-        if let Some(folder) = self.media_pool_state.selected_folder {
-            self.start_folder_rename(folder);
+        let state = &mut self.media_pool_state;
+        if let Some(folder) = state.selected_folder {
+            if let Some(f) = self.session.project.folders.get(folder) {
+                state.start_rename(RenameTarget::Folder(folder), f.name.clone());
+            }
             return;
         }
-        let mut selected = self.media_pool_state.selected.iter();
-        if let (Some(&id), None) = (selected.next(), selected.next())
-            && self
-                .session
-                .project
-                .media_pool
-                .get(id)
-                .is_some_and(|item| item.compound.is_some())
+        if let Some(&id) = state.single_selected()
+            && let Some(item) = self.session.project.media_pool.get(id)
+            && item.compound.is_some()
         {
-            self.media_pool_state.rename_pending = None;
-            self.start_rename(id);
+            state.start_rename(RenameTarget::Item(id), file_label(&item.path));
         }
     }
 
     /// Enter in the pool: the same as double clicking the only selected item.
     pub(crate) fn open_selected_pool_compound(&mut self) {
-        let mut selected = self.media_pool_state.selected.iter();
-        if let (Some(&id), None) = (selected.next(), selected.next()) {
+        if let Some(&id) = self.media_pool_state.single_selected() {
             self.media_pool_state.rename_pending = None;
             self.open_pool_compound(id);
         }
@@ -515,40 +374,17 @@ impl VenturiApp {
             return;
         };
         self.settings.panels.media_pool_open = true;
-        let state = &mut self.media_pool_state;
-        if !media_pool::matches_search(&file_label(&item.path), &state.search) {
-            state.search.clear();
-        }
-        let mut visited = std::collections::HashSet::new();
-        let mut folder = item.folder;
-        while let Some(f) = folder
-            && let Some(parent) = self.session.project.folders.get(f).map(|f| f.parent)
-            && visited.insert(f)
-        {
-            state.expanded.insert(f);
-            folder = parent;
-        }
-        state.select_only([media]);
-        state.rename_pending = None;
-        state.scroll_vel = 0.0;
-        state.reveal = Some(media);
-    }
-
-    fn start_folder_rename(&mut self, folder: FolderId) {
-        let Some(f) = self.session.project.folders.get(folder) else {
-            return;
-        };
-        self.media_pool_state.renaming = Some(media_pool::Rename {
-            target: media_pool::RenameTarget::Folder(folder),
-            text: f.name.clone(),
-            just_started: true,
-        });
+        self.library_ui.tab = library_ui::PoolTab::Project;
+        let folders = &self.session.project.folders;
+        self.media_pool_state
+            .reveal(media, &file_label(&item.path), item.folder, |f| {
+                folders.get(*f).map(|f| f.parent)
+            });
     }
 
     /// Created expanded (with its parent), with its name ready to edit.
     fn new_folder(&mut self, parent: Option<FolderId>) {
-        let base = t!("pool.new_folder_name").into_owned();
-        let taken: std::collections::HashSet<&str> = self
+        let taken: Vec<&str> = self
             .session
             .project
             .folders
@@ -556,18 +392,19 @@ impl VenturiApp {
             .filter(|f| f.parent == parent)
             .map(|f| f.name.as_str())
             .collect();
-        let name = std::iter::once(base.clone())
-            .chain((2..).map(|n| format!("{base} {n}")))
-            .find(|name| !taken.contains(name.as_str()))
-            .expect("infinite candidates");
+        let name = new_folder_name(&taken);
         let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::NewFolder);
         let folder = add.folder(
             &mut self.session.project,
-            vv_core::MediaFolder { name, parent },
+            vv_core::MediaFolder {
+                name: name.clone(),
+                parent,
+            },
         );
         self.session.apply(Box::new(add));
         self.media_pool_state.expanded.extend(parent);
-        self.start_folder_rename(folder);
+        self.media_pool_state
+            .start_rename(RenameTarget::Folder(folder), name);
     }
 
     fn move_media_to_folder(&mut self, media: &[MediaId], folder: Option<FolderId>) {
@@ -586,174 +423,6 @@ impl VenturiApp {
             self.session
                 .apply(Box::new(vv_core::SetMediaFolder::new(media, folder)));
         }
-    }
-
-    /// Drops onto the pool: media or a folder dragged into `folder`.
-    fn accept_pool_drop(&mut self, resp: &egui::Response, folder: Option<FolderId>) {
-        if let Some(set) = resp.dnd_release_payload::<timeline_ui::MediaDragSet>() {
-            let media: Vec<MediaId> = set.items.iter().map(|d| d.media_id).collect();
-            self.move_media_to_folder(&media, folder);
-        } else if let Some(dragged) = resp.dnd_release_payload::<media_pool::FolderDrag>()
-            && self.session.project.can_move_folder(dragged.0, folder)
-            && self.session.project.folders[dragged.0].parent != folder
-        {
-            self.session
-                .apply(Box::new(vv_core::MoveFolder::new(dragged.0, folder)));
-            self.media_pool_state.expanded.extend(folder);
-        }
-    }
-
-    fn folder_row(&mut self, ui: &mut egui::Ui, folder: FolderId) {
-        let Some(name) = self
-            .session
-            .project
-            .folders
-            .get(folder)
-            .map(|f| f.name.clone())
-        else {
-            return;
-        };
-        let expanded = self.media_pool_state.expanded.contains(&folder);
-        let height = 24.0;
-        let rect = ui
-            .allocate_exact_size(
-                egui::vec2(ui.available_width(), height),
-                egui::Sense::hover(),
-            )
-            .0;
-        let renaming = self
-            .media_pool_state
-            .renaming
-            .as_mut()
-            .filter(|r| r.target == media_pool::RenameTarget::Folder(folder));
-        let is_renaming = renaming.is_some();
-        let sense = if is_renaming {
-            egui::Sense::hover()
-        } else {
-            egui::Sense::click_and_drag()
-        };
-        let resp = ui.interact(rect, ui.id().with(("media_pool_folder", folder)), sense);
-        let drop_hover = resp
-            .dnd_hover_payload::<timeline_ui::MediaDragSet>()
-            .is_some()
-            || resp
-                .dnd_hover_payload::<media_pool::FolderDrag>()
-                .is_some_and(|d| d.0 != folder);
-        let visuals = ui.visuals();
-        if drop_hover {
-            ui.painter()
-                .rect_filled(rect, 3.0, crate::theme::ACCENT_TRANSLUCENT);
-        } else if resp.hovered() {
-            ui.painter()
-                .rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
-        }
-        let color = visuals.text_color();
-        let arrow = egui::Rect::from_center_size(
-            egui::pos2(rect.left() + 8.0, rect.center().y),
-            egui::vec2(8.0, 8.0),
-        );
-        let points = if expanded {
-            vec![arrow.left_top(), arrow.right_top(), arrow.center_bottom()]
-        } else {
-            vec![arrow.left_top(), arrow.right_center(), arrow.left_bottom()]
-        };
-        ui.painter().add(egui::Shape::convex_polygon(
-            points,
-            color,
-            egui::Stroke::NONE,
-        ));
-        let icon = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + 18.0, rect.center().y - 5.0),
-            egui::vec2(15.0, 11.0),
-        );
-        let icon_color = visuals.weak_text_color();
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(icon.left_top() - egui::vec2(0.0, 2.0), egui::vec2(6.0, 3.0)),
-            1.0,
-            icon_color,
-        );
-        ui.painter().rect_filled(icon, 1.5, icon_color);
-        let text_rect = rect.with_min_x(rect.left() + 38.0);
-        match renaming {
-            Some(rename) => {
-                let done = ui
-                    .scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
-                        rename_field(ui, rename)
-                    })
-                    .inner;
-                if let Some(new_name) = done {
-                    self.media_pool_state.renaming = None;
-                    if let Some(name) = new_name
-                        && self
-                            .session
-                            .project
-                            .folders
-                            .get(folder)
-                            .is_some_and(|f| f.name != name)
-                    {
-                        self.session
-                            .apply(Box::new(vv_core::RenameFolder::new(folder, name)));
-                    }
-                }
-            }
-            None => {
-                ui.painter().text(
-                    text_rect.left_center(),
-                    egui::Align2::LEFT_CENTER,
-                    &name,
-                    egui::FontId::proportional(14.0),
-                    color,
-                );
-            }
-        }
-        if self.media_pool_state.selected_folder == Some(folder) {
-            ui.painter().rect_stroke(
-                rect,
-                3.0,
-                egui::Stroke::new(2.0, egui::Color32::WHITE),
-                egui::StrokeKind::Inside,
-            );
-            ui.painter()
-                .rect_filled(rect, 3.0, egui::Color32::from_white_alpha(18));
-        }
-        if resp.clicked() {
-            self.media_pool_state.select_folder(folder);
-            self.media_pool_state.rename_pending = None;
-            if expanded {
-                self.media_pool_state.expanded.remove(&folder);
-            } else {
-                self.media_pool_state.expanded.insert(folder);
-            }
-        }
-        resp.dnd_set_drag_payload(media_pool::FolderDrag(folder));
-        if resp.dragged() {
-            show_drag_ghost(ui, resp.id, &name);
-        }
-        self.accept_pool_drop(&resp, Some(folder));
-        resp.context_menu(|ui| {
-            if ui.button(t!("pool.new_folder")).clicked() {
-                self.new_folder(Some(folder));
-                ui.close();
-            }
-            if ui.button(t!("pool.rename")).clicked() {
-                self.start_folder_rename(folder);
-                ui.close();
-            }
-            if ui.button(t!("pool.relink_folder")).clicked() {
-                self.relink_folder_dialog(folder);
-                ui.close();
-            }
-            ui.separator();
-            if ui
-                .button(t!("pool.delete_folder"))
-                .on_hover_text(t!("pool.delete_folder_hint"))
-                .clicked()
-            {
-                self.session
-                    .apply(Box::new(vv_core::DeleteFolder::new(folder)));
-                ui.close();
-            }
-        });
     }
 
     fn rename_timeline(&mut self, media_id: MediaId, name: String) {
@@ -835,501 +504,113 @@ impl VenturiApp {
                 }
             }
         }
-        let search_changed = media_pool_search_field(ui, &mut self.media_pool_state.search);
-        media_pool_header(ui, &mut self.media_pool_state);
-        kinetic_pool_scroll(
-            ui.ctx(),
-            &mut self.media_pool_state,
-            self.settings.kinetic_scroll_media_pool,
-        );
-        // `auto_shrink` off: the panel must fill the assigned width,
-        // otherwise its resize springs back.
-        let output = egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut items: Vec<(MediaId, String, vv_core::MediaMeta, u64, bool)> = self
-                    .session
-                    .project
-                    .media_pool
-                    .iter()
-                    .map(|(id, item)| {
-                        (
-                            id,
-                            file_label(&item.path),
-                            item.meta.clone(),
-                            item.content_hash,
-                            item.compound.is_some(),
-                        )
-                    })
-                    .collect();
-                let query = self.media_pool_state.search.trim().to_string();
-                if !query.is_empty() {
-                    items.retain(|(_, label, ..)| media_pool::matches_search(label, &query));
-                }
-                // Hidden items must not stay selected: Del would delete them.
-                if search_changed {
-                    self.media_pool_state
-                        .selected
-                        .retain(|id| items.iter().any(|item| item.0 == *id));
-                }
-                media_pool::sort_items(
-                    &mut items,
-                    self.media_pool_state.sort,
-                    |(_, label, ..)| label.as_str(),
-                    |(_, _, meta, ..)| meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9),
-                );
-                let folders: Vec<(FolderId, &str, Option<FolderId>)> = self
-                    .session
-                    .project
-                    .folders
-                    .iter()
-                    .map(|(id, f)| (id, f.name.as_str(), f.parent))
-                    .collect();
-                let items = items
-                    .into_iter()
-                    .map(|item| {
-                        let folder = self.session.project.media_pool[item.0].folder;
-                        (item, folder)
-                    })
-                    .collect();
-                let rows = if query.is_empty() {
-                    media_pool::tree_rows(&folders, items, &self.media_pool_state.expanded)
+        let entries = self
+            .session
+            .project
+            .media_pool
+            .iter()
+            .map(|(id, item)| {
+                let thumb = if item.compound.is_some() {
+                    Thumb::Timeline
+                } else if self.media_pool_state.is_offline(&id) {
+                    Thumb::Offline
                 } else {
-                    media_pool::search_rows(&folders, items)
+                    match self.thumbnails.get(&item.content_hash).cloned().flatten() {
+                        Some(texture) => Thumb::Texture(texture),
+                        None => Thumb::None,
+                    }
                 };
-                if rows.is_empty() && !query.is_empty() {
-                    ui.weak(t!("pool.search_no_results"));
+                PoolEntry {
+                    id,
+                    name: file_label(&item.path),
+                    folder: item.folder,
+                    meta: item.meta.clone(),
+                    thumb,
+                    proxy: self
+                        .proxy_worker
+                        .as_ref()
+                        .and_then(|w| w.state(item.content_hash)),
+                    renamable: item.compound.is_some(),
                 }
-                let order: Vec<MediaId> = rows
-                    .iter()
-                    .filter_map(|row| match row {
-                        media_pool::PoolRow::Item { item, .. } => Some(item.0),
-                        media_pool::PoolRow::Folder { .. } => None,
-                    })
-                    .collect();
-                let drags: Vec<timeline_ui::MediaDrag> = order
-                    .iter()
-                    .map(|id| {
-                        timeline_ui::MediaDrag::whole(
-                            *id,
-                            &self.session.project.media_pool[*id].meta,
-                        )
-                    })
-                    .collect();
-                // Interacted with before the items: in egui the last one wins, so a click
-                // on an item does not start the selection rectangle. The clip rect
-                // is the viewport: `available_rect_before_wrap` is viewport-sized
-                // but scrolls away with the content.
-                let bg = ui.interact(
-                    ui.clip_rect(),
-                    ui.id().with("media_pool_bg"),
-                    egui::Sense::click_and_drag(),
-                );
-                bg.context_menu(|ui| {
-                    if ui.button(t!("pool.new_folder")).clicked() {
-                        self.new_folder(None);
-                        ui.close();
-                    }
-                    ui.menu_button(t!("pool.timelines"), |ui| {
-                        if ui.button(t!("menu.import_otio")).clicked() {
-                            self.import_otio_dialog();
-                            ui.close();
-                        }
-                        if ui.button(t!("pool.new_timeline")).clicked() {
-                            self.open_new_timeline_dialog();
-                            ui.close();
-                        }
-                    });
-                });
-                let mut item_rects: Vec<(MediaId, egui::Rect)> = Vec::new();
-                // The items leave a strip of background on the sides (and
-                // `BOTTOM_PAD` below): with a full pool there would be no
-                // free spot left to right click on.
-                egui::Frame::NONE
-                    .inner_margin(egui::Margin::symmetric(SIDE_PAD, 0))
-                    .show(ui, |ui| {
-                        for row in rows {
-                            let ((id, label, meta, content_hash, is_timeline), depth, folder) =
-                                match row {
-                                    media_pool::PoolRow::Folder { id, depth } => {
-                                        indented(ui, depth, |ui| self.folder_row(ui, id));
-                                        continue;
-                                    }
-                                    media_pool::PoolRow::Item { item, depth } => {
-                                        let folder = self.session.project.media_pool[item.0].folder;
-                                        (item, depth, folder)
-                                    }
-                                };
-                            let proxy_state = self
-                                .proxy_worker
-                                .as_ref()
-                                .and_then(|w| w.state(content_hash));
-                            let offline = self.media_pool_state.is_offline(id);
-                            let thumbnail = if is_timeline || offline {
-                                None
-                            } else {
-                                self.thumbnails.get(&content_hash).cloned().flatten()
-                            };
-                            let renaming = self
-                                .media_pool_state
-                                .renaming
-                                .as_mut()
-                                .filter(|r| r.target == media_pool::RenameTarget::Media(id));
-                            let is_renaming = renaming.is_some();
-                            let mut rename_done = None;
-                            let mut label_rect = egui::Rect::NOTHING;
-                            let group_resp = indented(ui, depth, |ui| {
-                                ui.group(|ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        let thumb_size = egui::vec2(64.0, 36.0);
-                                        match &thumbnail {
-                                            Some(texture) => {
-                                                let tex_size = texture.size_vec2();
-                                                let scale = (thumb_size.x / tex_size.x)
-                                                    .min(thumb_size.y / tex_size.y);
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    thumb_size,
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(
-                                                    rect,
-                                                    2.0,
-                                                    egui::Color32::BLACK,
-                                                );
-                                                egui::Image::new(texture)
-                                                    .fit_to_exact_size(tex_size * scale)
-                                                    .paint_at(
-                                                        ui,
-                                                        egui::Rect::from_center_size(
-                                                            rect.center(),
-                                                            tex_size * scale,
-                                                        ),
-                                                    );
-                                            }
-                                            None => {
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    thumb_size,
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(
-                                                    rect,
-                                                    2.0,
-                                                    ui.visuals().extreme_bg_color,
-                                                );
-                                                if offline {
-                                                    paint_offline_thumbnail(ui.painter(), rect);
-                                                } else if is_timeline {
-                                                    paint_film_icon(
-                                                        ui.painter(),
-                                                        rect,
-                                                        ui.visuals().weak_text_color(),
-                                                        ui.visuals().extreme_bg_color,
-                                                    );
-                                                } else if !meta.has_video {
-                                                    ui.painter().text(
-                                                        rect.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "🔊",
-                                                        egui::FontId::proportional(18.0),
-                                                        ui.visuals().weak_text_color(),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        ui.vertical(|ui| {
-                                            match renaming {
-                                                Some(rename) => {
-                                                    rename_done = rename_field(ui, rename);
-                                                }
-                                                None => label_rect = ui.label(&label).rect,
-                                            }
-                                            ui.small(if meta.is_image() {
-                                                t!(
-                                                    "pool.meta_image",
-                                                    width = meta.width,
-                                                    height = meta.height
-                                                )
-                                            } else if meta.has_video {
-                                                format!(
-                                                    "{}x{} · {:.2}fps · {}",
-                                                    meta.width,
-                                                    meta.height,
-                                                    meta.fps.as_f64(),
-                                                    if meta.has_audio {
-                                                        t!("pool.audio")
-                                                    } else {
-                                                        t!("pool.muted")
-                                                    }
-                                                )
-                                                .into()
-                                            } else {
-                                                t!(
-                                                    "pool.meta_audio",
-                                                    rate = meta.sample_rate,
-                                                    channels = meta.channels
-                                                )
-                                            });
-                                        });
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                // An image has no real duration.
-                                                let duration_label = if meta.is_image() {
-                                                    "—".to_string()
-                                                } else {
-                                                    format_duration(
-                                                        meta.duration_frames,
-                                                        meta.fps.as_f64(),
-                                                    )
-                                                };
-                                                ui.add_sized(
-                                                    egui::vec2(
-                                                        DURATION_COL_W,
-                                                        ui.available_height(),
-                                                    ),
-                                                    egui::Label::new(
-                                                        egui::RichText::new(duration_label)
-                                                            .monospace(),
-                                                    ),
-                                                );
-                                                match proxy_state {
-                                                    Some(proxy_worker::ProxyState::Generating(
-                                                        f,
-                                                    )) => {
-                                                        proxy_progress_ring(ui, Some(f))
-                                                            .on_hover_text(t!(
-                                                                "pool.proxy_progress",
-                                                                percent =
-                                                                    format!("{:.0}", f * 100.0)
-                                                            ));
-                                                    }
-                                                    Some(proxy_worker::ProxyState::Queued) => {
-                                                        proxy_progress_ring(ui, None)
-                                                            .on_hover_text(t!("pool.proxy_queued"));
-                                                    }
-                                                    Some(proxy_worker::ProxyState::Failed) => {
-                                                        ui.colored_label(egui::Color32::RED, "!")
-                                                            .on_hover_text(t!("pool.proxy_failed"));
-                                                    }
-                                                    _ => {}
-                                                }
-                                            },
-                                        );
-                                    });
-                                })
-                                .response
-                            });
-                            if proxy_state == Some(proxy_worker::ProxyState::Ready) {
-                                let rect = group_resp.rect.shrink(1.0);
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(
-                                        rect.left_top(),
-                                        egui::vec2(2.0, rect.height()),
-                                    ),
-                                    1.0,
-                                    timeline_ui::PROXY_COLOR,
-                                );
-                            }
-                            // Double click: preview. Drag: adds the media onto the timeline.
-                            let interact_id = ui.id().with("media_pool_item").with(id);
-                            // While renaming, the item must not steal the clicks of
-                            // the text field.
-                            let sense = if is_renaming {
-                                egui::Sense::hover()
-                            } else {
-                                egui::Sense::click_and_drag()
-                            };
-                            let resp = ui
-                                .interact(group_resp.rect, interact_id, sense)
-                                .on_hover_text(t!("pool.item_hint"));
-                            if let Some(new_name) = rename_done {
-                                self.media_pool_state.renaming = None;
-                                if let Some(name) = new_name {
-                                    self.rename_timeline(id, name);
-                                }
-                            }
-                            item_rects.push((id, group_resp.rect));
-                            if self.media_pool_state.reveal == Some(id) {
-                                self.media_pool_state.reveal = None;
-                                ui.scroll_to_rect(group_resp.rect, Some(egui::Align::Center));
-                            }
-                            if self.media_pool_state.selected.contains(&id) {
-                                ui.painter().rect_stroke(
-                                    group_resp.rect,
-                                    4.0,
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                                    egui::StrokeKind::Inside,
-                                );
-                                ui.painter().rect_filled(
-                                    group_resp.rect,
-                                    4.0,
-                                    egui::Color32::from_white_alpha(18),
-                                );
-                            }
-                            if resp.clicked() {
-                                let modifiers = ui.input(|i| i.modifiers);
-                                let on_name = is_timeline
-                                    && modifiers.is_none()
-                                    && self.media_pool_state.selected.len() == 1
-                                    && self.media_pool_state.selected.contains(&id)
-                                    && resp
-                                        .interact_pointer_pos()
-                                        .is_some_and(|pos| label_rect.contains(pos));
-                                self.media_pool_state.click(id, modifiers, &order);
-                                self.media_pool_state.rename_pending =
-                                    on_name.then(|| (id, ui.input(|i| i.time)));
-                            }
-                            // Right click outside the selection replaces it, like a drag.
-                            if resp.secondary_clicked()
-                                && !self.media_pool_state.selected.contains(&id)
-                            {
-                                self.media_pool_state
-                                    .click(id, egui::Modifiers::NONE, &order);
-                            }
-                            resp.context_menu(|ui| {
-                                if is_timeline {
-                                    if ui.button(t!("pool.duplicate_timeline")).clicked() {
-                                        self.duplicate_timeline(id);
-                                        ui.close();
-                                    }
-                                    if ui.button(t!("pool.rename")).clicked() {
-                                        self.start_rename(id);
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                }
-                                let count = self.media_pool_state.selected.len().max(1);
-                                let label = if count > 1 {
-                                    t!("pool.relink_many", count = count)
-                                } else {
-                                    t!("pool.relink_one")
-                                };
-                                if ui.button(label).clicked() {
-                                    self.relink_media_dialog();
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui
-                                    .button(t!("pool.add_to_library"))
-                                    .on_hover_text(t!("pool.add_to_library_hint"))
-                                    .clicked()
-                                {
-                                    self.add_selected_media_to_library();
-                                    ui.close();
-                                }
-                            });
-                            // Dragging an item outside the selection replaces it
-                            // with that item (as on the timeline, see
-                            // `timeline_ui::drag_group_for`).
-                            if resp.drag_started() {
-                                self.media_pool_state.rename_pending = None;
-                            }
-                            if resp.drag_started() && !self.media_pool_state.selected.contains(&id)
-                            {
-                                self.media_pool_state
-                                    .click(id, egui::Modifiers::NONE, &order);
-                            }
-                            // Dragging an item of the selection drags the whole
-                            // selection, in panel order: the timeline appends them
-                            // one after the other.
-                            let payload = if self.media_pool_state.selected.len() > 1
-                                && self.media_pool_state.selected.contains(&id)
-                            {
-                                timeline_ui::MediaDragSet {
-                                    items: drags
-                                        .iter()
-                                        .filter(|d| {
-                                            self.media_pool_state.selected.contains(&d.media_id)
-                                        })
-                                        .copied()
-                                        .collect(),
-                                }
-                            } else {
-                                timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
-                                    id, &meta,
-                                ))
-                            };
-                            let dragged_count = payload.items.len();
-                            resp.dnd_set_drag_payload(payload);
-                            self.accept_pool_drop(&resp, folder);
-                            if resp.double_clicked() {
-                                self.media_pool_state.rename_pending = None;
-                                // A compound clip (or a project timeline, see
-                                // `MediaItem::compound`) opens as a top level timeline:
-                                // from the pool there is no parent to stack in the
-                                // breadcrumb. "Preview" makes no sense for it.
-                                if !self.open_pool_compound(id) {
-                                    *preview_action = Some(id);
-                                }
-                            }
-                            if resp.dragged() {
-                                let ghost = if dragged_count > 1 {
-                                    t!("pool.items", count = dragged_count).into_owned()
-                                } else {
-                                    label.clone()
-                                };
-                                show_drag_ghost(ui, interact_id, &ghost);
-                            }
-                        }
-                    });
-                ui.add_space(BOTTOM_PAD);
-                self.accept_pool_drop(&bg, None);
-                if let Some((id, clicked_at)) = self.media_pool_state.rename_pending {
-                    let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
-                    let elapsed = ui.input(|i| i.time) - clicked_at;
-                    if elapsed > wait {
-                        self.media_pool_state.rename_pending = None;
-                        self.start_rename(id);
-                    } else {
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_secs_f64(
-                                wait - elapsed,
-                            ));
+            })
+            .collect();
+        let folders = self
+            .session
+            .project
+            .folders
+            .iter()
+            .map(|(id, f)| PoolFolder {
+                id,
+                name: f.name.clone(),
+                parent: f.parent,
+            })
+            .collect();
+        let events = pool_view::show_pool(
+            ui,
+            &mut self.media_pool_state,
+            PoolView {
+                folders,
+                entries,
+                menus: &ProjectMenus,
+                kinetic_scroll: self.settings.kinetic_scroll_media_pool,
+                item_hint: t!("pool.item_hint"),
+                empty_hint: None,
+            },
+        );
+        for event in events {
+            match event {
+                PoolEvent::Rename(id, name) => self.rename_timeline(id, name),
+                PoolEvent::RenameFolder(folder, name) => self
+                    .session
+                    .apply(Box::new(vv_core::RenameFolder::new(folder, name))),
+                PoolEvent::NewFolder(parent) => self.new_folder(parent),
+                PoolEvent::DeleteFolder(folder) => self
+                    .session
+                    .apply(Box::new(vv_core::DeleteFolder::new(folder))),
+                PoolEvent::MoveItems(media, folder) => self.move_media_to_folder(&media, folder),
+                PoolEvent::MoveFolder(folder, parent) => {
+                    if self.session.project.can_move_folder(folder, parent) {
+                        self.session
+                            .apply(Box::new(vv_core::MoveFolder::new(folder, parent)));
                     }
                 }
-
-                if bg.drag_started() {
-                    if let Some(pos) = bg.interact_pointer_pos() {
-                        self.media_pool_state.marquee = Some((pos, pos));
+                // A compound clip (or a project timeline, see
+                // `MediaItem::compound`) opens as a top level timeline: from
+                // the pool there is no parent to stack in the breadcrumb.
+                // "Preview" makes no sense for it.
+                PoolEvent::Open(id) => {
+                    if !self.open_pool_compound(id) {
+                        *preview_action = Some(id);
                     }
-                } else if bg.dragged() {
-                    if let (Some((_, end)), Some(pos)) = (
-                        &mut self.media_pool_state.marquee,
-                        bg.interact_pointer_pos(),
-                    ) {
-                        *end = pos;
-                    }
-                } else if bg.drag_stopped() {
-                    if let Some((start, end)) = self.media_pool_state.marquee.take() {
-                        let rect = egui::Rect::from_two_pos(start, end);
-                        let hits = item_rects
+                }
+                PoolEvent::DragStarted(media) => {
+                    let set = timeline_ui::MediaDragSet {
+                        items: media
                             .iter()
-                            .filter(|(_, r)| r.intersects(rect))
-                            .map(|(id, _)| *id);
-                        self.media_pool_state.select_only(hits);
-                    }
-                } else if bg.clicked() {
-                    self.media_pool_state.rename_pending = None;
-                    self.media_pool_state.clear();
+                            .map(|&id| {
+                                timeline_ui::MediaDrag::whole(
+                                    id,
+                                    &self.session.project.media_pool[id].meta,
+                                )
+                            })
+                            .collect(),
+                    };
+                    egui::DragAndDrop::set_payload(ui.ctx(), set);
                 }
-                if let Some((start, end)) = self.media_pool_state.marquee {
-                    let rect = egui::Rect::from_two_pos(start, end);
-                    ui.painter()
-                        .rect_filled(rect, 0.0, crate::theme::ACCENT_TRANSLUCENT);
-                    ui.painter().rect_stroke(
-                        rect,
-                        0.0,
-                        egui::Stroke::new(1.0, crate::theme::ACCENT),
-                        egui::StrokeKind::Inside,
-                    );
+                PoolEvent::Action(ProjectAction::DuplicateTimeline(id)) => {
+                    self.duplicate_timeline(id)
                 }
-            });
-        self.media_pool_state.scroll_area = Some(media_pool::PoolScrollArea {
-            id: output.id,
-            viewport: output.inner_rect,
-            max_offset: (output.content_size.y - output.inner_rect.height()).max(0.0),
-        });
+                PoolEvent::Action(ProjectAction::Relink) => self.relink_media_dialog(),
+                PoolEvent::Action(ProjectAction::AddToLibrary) => {
+                    self.add_selected_media_to_library()
+                }
+                PoolEvent::Action(ProjectAction::RelinkFolder(folder)) => {
+                    self.relink_folder_dialog(folder)
+                }
+                PoolEvent::Action(ProjectAction::ImportOtio) => self.import_otio_dialog(),
+                PoolEvent::Action(ProjectAction::NewTimeline) => self.open_new_timeline_dialog(),
+            }
+        }
     }
 
     /// Effects section: generators and effects to drag onto the timeline.
@@ -1399,46 +680,6 @@ pub(crate) fn split_left_column(ui: &egui::Ui, fraction: &mut f32) -> (egui::Rec
     let pool = egui::Rect::from_min_max(column.min, egui::pos2(column.max.x, splitter.top()));
     let effects = egui::Rect::from_min_max(egui::pos2(column.min.x, splitter.bottom()), column.max);
     (pool, effects)
-}
-
-/// Touchpad swipe on the pool, applied before its ScrollArea's `show` like
-/// the timeline's (`timeline_ui::sync_timeline_scroll`): the swipe's speed
-/// becomes an inertia that keeps scrolling after release.
-fn kinetic_pool_scroll(ctx: &egui::Context, state: &mut media_pool::MediaPoolState, enabled: bool) {
-    if !enabled {
-        state.scroll_vel = 0.0;
-        return;
-    }
-    let Some(area) = state.scroll_area else {
-        return;
-    };
-    let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, area.id) else {
-        return;
-    };
-    let dt = ctx.input(|i| i.stable_dt).min(0.1);
-    let wheel = if timeline_ui::pointer_over(ctx, area.viewport) {
-        ctx.input(|i| i.smooth_scroll_delta.y)
-    } else {
-        0.0
-    };
-    if wheel != 0.0 {
-        scroll_state.offset.y = (scroll_state.offset.y - wheel).clamp(0.0, area.max_offset);
-        state.scroll_vel = if dt > 0.0 {
-            -timeline_ui::KINETIC_VELOCITY_GAIN * wheel / dt
-        } else {
-            0.0
-        };
-        ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
-        scroll_state.store(ctx, area.id);
-    } else if timeline_ui::apply_kinetic_scroll(
-        &mut scroll_state.offset.y,
-        &mut state.scroll_vel,
-        area.max_offset,
-        dt,
-    ) {
-        scroll_state.store(ctx, area.id);
-        ctx.request_repaint();
-    }
 }
 
 #[cfg(test)]

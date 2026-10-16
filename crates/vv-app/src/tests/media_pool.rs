@@ -207,7 +207,7 @@ fn folder_ids(n: usize) -> Vec<FolderId> {
         .collect()
 }
 
-fn describe(rows: &[PoolRow<&str>], names: &[(FolderId, &str)]) -> Vec<String> {
+fn describe(rows: &[PoolRow<&str, FolderId>], names: &[(FolderId, &str)]) -> Vec<String> {
     rows.iter()
         .map(|row| match row {
             PoolRow::Folder { id, depth } => {
@@ -318,10 +318,24 @@ fn offline_media_are_rechecked_when_their_path_changes() {
     let mut state = MediaPoolState::default();
 
     state.refresh_offline(&project);
-    assert!(!state.is_offline(present));
-    assert!(state.is_offline(missing));
+    assert!(!state.is_offline(&present));
+    assert!(state.is_offline(&missing));
 
     project.media_pool[missing].path = env!("CARGO_MANIFEST_PATH").into();
     state.refresh_offline(&project);
-    assert!(!state.is_offline(missing));
+    assert!(!state.is_offline(&missing));
+}
+
+#[test]
+fn a_folder_cannot_move_into_itself_or_its_descendants() {
+    let folders = [
+        ("a".to_string(), "A", None),
+        ("b".to_string(), "B", Some("a".to_string())),
+        ("c".to_string(), "C", None),
+    ];
+    let a = "a".to_string();
+    assert!(!can_move_folder(&folders, &a, Some(&a)));
+    assert!(!can_move_folder(&folders, &a, Some(&"b".to_string())));
+    assert!(can_move_folder(&folders, &a, Some(&"c".to_string())));
+    assert!(can_move_folder(&folders, &"b".to_string(), None));
 }

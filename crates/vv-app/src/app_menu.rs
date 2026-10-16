@@ -25,7 +25,9 @@ impl VenturiApp {
             || self
                 .preset_dialog
                 .as_ref()
-                .is_some_and(|d| d.is_capturing());
+                .is_some_and(|d| d.is_capturing())
+            || self.library_ui.confirm_delete.is_some();
+        let library_tab = self.library_ui.tab == library_ui::PoolTab::Library;
         let keymap = self.settings.keymap.clone();
         let menu_paste = std::mem::take(&mut self.menu_paste_pending);
         let mut open_compound = false;
@@ -51,6 +53,8 @@ impl VenturiApp {
                 // keyframe editor, media pool or timeline.
                 if self.keyframe_editor.owns_delete() {
                     self.delete_selected_keyframes();
+                } else if self.media_pool_state.focused && library_tab {
+                    self.delete_selected_library_assets();
                 } else if self.media_pool_state.focused {
                     self.delete_selected_media();
                 } else {
@@ -99,14 +103,20 @@ impl VenturiApp {
             if pressed(Action::SelectAll) {
                 // Same rule as Del: the panel with the last click
                 // decides what Ctrl+A selects.
-                if self.media_pool_state.focused {
+                if self.media_pool_state.focused && library_tab {
+                    self.select_all_library_assets();
+                } else if self.media_pool_state.focused {
                     self.select_all_media();
                 } else {
                     self.select_all_clips();
                 }
             }
             if pressed(Action::Rename) && self.media_pool_state.focused {
-                self.rename_selected_pool_item();
+                if library_tab {
+                    self.rename_selected_library_item();
+                } else {
+                    self.rename_selected_pool_item();
+                }
             }
             if pressed(Action::SelectFromPlayhead) {
                 self.select_clips_from_playhead();
@@ -196,7 +206,11 @@ impl VenturiApp {
         // assignments, so a request not served this frame does not fire later.
         let pool_focused = self.media_pool_state.focused;
         if open_compound && pool_focused {
-            self.open_selected_pool_compound();
+            if library_tab {
+                self.add_selected_library_assets_to_project();
+            } else {
+                self.open_selected_pool_compound();
+            }
         }
         self.timeline_state.open_selected_compound = open_compound && !pool_focused;
         self.exit_compound_requested = exit_compound;

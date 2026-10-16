@@ -1,11 +1,13 @@
-//! Multiple selection in the media pool, with the same rules as the timeline:
-//! plain click, ctrl+click to add/remove, shift+click for a range, rubber-band
-//! selection by dragging from the background. The selection logic lives here
-//! as a pure function (testable without `egui::Ui`); the panel drawing stays
-//! in `main.rs`.
+//! State of a pool browser (the project's media pool, the user library):
+//! multiple selection with the same rules as the timeline (plain click,
+//! ctrl+click to add/remove, shift+click for a range, rubber-band selection
+//! by dragging from the background), folders, rename, search. The logic
+//! lives here as pure functions (testable without `egui::Ui`); the drawing
+//! is in `pool_view.rs`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use vv_core::{FolderId, MediaId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,29 +31,34 @@ impl Default for Sort {
     }
 }
 
-#[derive(Default)]
-pub struct MediaPoolState {
-    pub selected: BTreeSet<MediaId>,
+/// Ids of the items and of the folders of a pool.
+pub trait PoolId: Clone + Ord + Hash + std::fmt::Debug + Send + Sync + 'static {}
+impl<T: Clone + Ord + Hash + std::fmt::Debug + Send + Sync + 'static> PoolId for T {}
+
+pub type MediaPoolState = PoolState<MediaId, FolderId>;
+
+pub struct PoolState<I, F> {
+    pub selected: BTreeSet<I>,
     /// Exclusive with `selected`.
-    pub selected_folder: Option<FolderId>,
+    pub selected_folder: Option<F>,
     /// Range origin for the next shift+click (which does *not* move it,
     /// as in `timeline_ui::TimelineState::selection_anchor`).
-    anchor: Option<MediaId>,
+    anchor: Option<I>,
     /// Selection rectangle in progress, in screen coordinates.
     pub marquee: Option<(egui::Pos2, egui::Pos2)>,
     /// The media pool got the last click: Del/Backspace deletes the selected
     /// media instead of the clips on the timeline.
     pub focused: bool,
     pub sort: Sort,
-    pub renaming: Option<Rename>,
-    /// A click on the name of the only selected item, with its time: it
-    /// becomes a rename unless a double click follows (the "slow double
-    /// click").
-    pub rename_pending: Option<(MediaId, f64)>,
-    pub expanded: HashSet<FolderId>,
+    pub renaming: Option<Rename<I, F>>,
+    /// A click on the name of the only selected item, with its time and
+    /// name: it becomes a rename unless a double click follows (the "slow
+    /// double click").
+    pub rename_pending: Option<(I, String, f64)>,
+    pub expanded: HashSet<F>,
     pub search: String,
     /// Scrolled into view the next time the pool is drawn.
-    pub reveal: Option<MediaId>,
+    pub reveal: Option<I>,
     /// Residual touchpad inertia (px/s), see `timeline_ui::apply_kinetic_scroll`.
     pub scroll_vel: f32,
     /// The pool's ScrollArea as of the last frame: its offset is driven
@@ -59,7 +66,32 @@ pub struct MediaPoolState {
     pub scroll_area: Option<PoolScrollArea>,
     /// Whether each media's file was missing, and at which path it was
     /// checked: only a new media or a changed path hits the disk again.
-    offline: HashMap<MediaId, (PathBuf, bool)>,
+    offline: HashMap<I, (PathBuf, bool)>,
+    /// Items dragged out of this pool: a drop on one of its folders moves
+    /// them there.
+    pub dragging: Vec<I>,
+}
+
+impl<I, F> Default for PoolState<I, F> {
+    fn default() -> Self {
+        Self {
+            selected: BTreeSet::new(),
+            selected_folder: None,
+            anchor: None,
+            marquee: None,
+            focused: false,
+            sort: Sort::default(),
+            renaming: None,
+            rename_pending: None,
+            expanded: HashSet::new(),
+            search: String::new(),
+            reveal: None,
+            scroll_vel: 0.0,
+            scroll_area: None,
+            offline: HashMap::new(),
+            dragging: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -69,14 +101,14 @@ pub struct PoolScrollArea {
     pub max_offset: f32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RenameTarget {
-    Media(MediaId),
-    Folder(FolderId),
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RenameTarget<I, F> {
+    Item(I),
+    Folder(F),
 }
 
-pub struct Rename {
-    pub target: RenameTarget,
+pub struct Rename<I, F> {
+    pub target: RenameTarget<I, F>,
     pub text: String,
     /// Set until the text field has been shown once: it then takes focus
     /// with the whole name selected.
@@ -86,27 +118,52 @@ pub struct Rename {
 impl MediaPoolState {
     /// Drops what refers to media or folders no longer in `project`.
     pub fn forget_removed(&mut self, project: &vv_core::Project) {
-        let media_exists = |id: MediaId| project.media_pool.contains_key(id);
-        self.selected.retain(|&id| media_exists(id));
-        self.anchor = self.anchor.filter(|&id| media_exists(id));
-        self.rename_pending = self.rename_pending.filter(|&(id, _)| media_exists(id));
-        if self.renaming.as_ref().is_some_and(|r| match r.target {
-            RenameTarget::Media(id) => !media_exists(id),
-            RenameTarget::Folder(id) => !project.folders.contains_key(id),
+        self.forget(
+            |&id| project.media_pool.contains_key(id),
+            |&id| project.folders.contains_key(id),
+        );
+    }
+
+    pub fn refresh_offline(&mut self, project: &vv_core::Project) {
+        let files = project
+            .media_pool
+            .iter()
+            .filter(|(_, item)| item.compound.is_none())
+            .map(|(id, item)| (id, item.path.as_path()));
+        self.refresh_offline_files(files);
+    }
+}
+
+impl<I: PoolId, F: PoolId> PoolState<I, F> {
+    /// Drops what refers to items or folders that no longer exist.
+    pub fn forget(&mut self, item_exists: impl Fn(&I) -> bool, folder_exists: impl Fn(&F) -> bool) {
+        self.selected.retain(&item_exists);
+        self.anchor = self.anchor.take().filter(&item_exists);
+        self.rename_pending = self
+            .rename_pending
+            .take()
+            .filter(|(id, ..)| item_exists(id));
+        self.dragging.retain(&item_exists);
+        if self.renaming.as_ref().is_some_and(|r| match &r.target {
+            RenameTarget::Item(id) => !item_exists(id),
+            RenameTarget::Folder(id) => !folder_exists(id),
         }) {
             self.renaming = None;
         }
-        self.expanded.retain(|&id| project.folders.contains_key(id));
-        self.selected_folder = self
-            .selected_folder
-            .filter(|&id| project.folders.contains_key(id));
+        self.expanded.retain(&folder_exists);
+        self.selected_folder = self.selected_folder.take().filter(&folder_exists);
     }
 
     /// `order` is the order the items are drawn in the panel: that is what
     /// defines the range of a shift+click.
-    pub fn click(&mut self, clicked: MediaId, modifiers: egui::Modifiers, order: &[MediaId]) {
-        let (selected, anchor) =
-            apply_click(&self.selected, self.anchor, clicked, modifiers, order);
+    pub fn click(&mut self, clicked: I, modifiers: egui::Modifiers, order: &[I]) {
+        let (selected, anchor) = apply_click(
+            &self.selected,
+            self.anchor.take(),
+            clicked,
+            modifiers,
+            order,
+        );
         self.selected = selected;
         self.anchor = anchor;
         self.selected_folder = None;
@@ -114,9 +171,9 @@ impl MediaPoolState {
 
     /// Replaces the selection with `hits`, in drawing order: the first
     /// becomes the anchor for a possible later shift+click.
-    pub fn select_only(&mut self, hits: impl IntoIterator<Item = MediaId>) {
-        let hits: Vec<MediaId> = hits.into_iter().collect();
-        self.anchor = hits.first().copied();
+    pub fn select_only(&mut self, hits: impl IntoIterator<Item = I>) {
+        let hits: Vec<I> = hits.into_iter().collect();
+        self.anchor = hits.first().cloned();
         self.selected = hits.into_iter().collect();
         self.selected_folder = None;
     }
@@ -134,29 +191,71 @@ impl MediaPoolState {
         }
     }
 
-    pub fn select_folder(&mut self, folder: FolderId) {
+    pub fn select_folder(&mut self, folder: F) {
         self.clear();
         self.selected_folder = Some(folder);
     }
 
-    pub fn is_offline(&self, id: MediaId) -> bool {
-        self.offline.get(&id).is_some_and(|&(_, missing)| missing)
+    /// The only selected item, if exactly one is.
+    pub fn single_selected(&self) -> Option<&I> {
+        let mut selected = self.selected.iter();
+        match (selected.next(), selected.next()) {
+            (Some(id), None) => Some(id),
+            _ => None,
+        }
     }
 
-    pub fn refresh_offline(&mut self, project: &vv_core::Project) {
+    pub fn start_rename(&mut self, target: RenameTarget<I, F>, name: String) {
+        self.rename_pending = None;
+        self.renaming = Some(Rename {
+            target,
+            text: name,
+            just_started: true,
+        });
+    }
+
+    /// Selects `item` and makes it visible: opens the folders containing it
+    /// (`parent_of` gives the parent of a folder), drops a search hiding
+    /// it, scrolls to it.
+    pub fn reveal(
+        &mut self,
+        item: I,
+        name: &str,
+        folder: Option<F>,
+        parent_of: impl Fn(&F) -> Option<Option<F>>,
+    ) {
+        if !matches_search(name, &self.search) {
+            self.search.clear();
+        }
+        let mut visited = HashSet::new();
+        let mut folder = folder;
+        while let Some(f) = folder
+            && let Some(parent) = parent_of(&f)
+            && visited.insert(f.clone())
+        {
+            self.expanded.insert(f);
+            folder = parent;
+        }
+        self.select_only([item.clone()]);
+        self.rename_pending = None;
+        self.scroll_vel = 0.0;
+        self.reveal = Some(item);
+    }
+
+    pub fn is_offline(&self, id: &I) -> bool {
+        self.offline.get(id).is_some_and(|&(_, missing)| missing)
+    }
+
+    /// Only a new item or a changed path hits the disk again.
+    pub fn refresh_offline_files<'a>(&mut self, files: impl Iterator<Item = (I, &'a Path)>) {
+        let files: Vec<(I, &Path)> = files.collect();
         self.offline
-            .retain(|&id, _| project.media_pool.contains_key(id));
-        for (id, item) in project.media_pool.iter() {
-            if item.compound.is_some()
-                || self
-                    .offline
-                    .get(&id)
-                    .is_some_and(|(path, _)| *path == item.path)
-            {
+            .retain(|id, _| files.iter().any(|(f, _)| f == id));
+        for (id, path) in files {
+            if self.offline.get(&id).is_some_and(|(p, _)| p == path) {
                 continue;
             }
-            self.offline
-                .insert(id, (item.path.clone(), !item.path.exists()));
+            self.offline.insert(id, (path.to_owned(), !path.exists()));
         }
     }
 
@@ -194,41 +293,41 @@ pub fn sort_items<T>(
 }
 
 /// Drag payload of a folder row.
-pub struct FolderDrag(pub FolderId);
+pub struct FolderDrag<F>(pub F);
 
-pub enum PoolRow<T> {
-    Folder { id: FolderId, depth: usize },
+pub enum PoolRow<T, F> {
+    Folder { id: F, depth: usize },
     Item { item: T, depth: usize },
 }
 
 /// The pool as drawn: at each level the folders (by name) and then the
 /// items, in the order given; the content of collapsed folders is left out.
 /// A missing parent folder counts as the root.
-pub fn tree_rows<T>(
-    folders: &[(FolderId, &str, Option<FolderId>)],
-    items: Vec<(T, Option<FolderId>)>,
-    expanded: &HashSet<FolderId>,
-) -> Vec<PoolRow<T>> {
+pub fn tree_rows<T, F: PoolId>(
+    folders: &[(F, &str, Option<F>)],
+    items: Vec<(T, Option<F>)>,
+    expanded: &HashSet<F>,
+) -> Vec<PoolRow<T, F>> {
     build_rows(folders, items, expanded, None)
 }
 
 /// The rows while searching: `items` are the matches, and only the folders
 /// leading to one of them are shown, all expanded.
-pub fn search_rows<T>(
-    folders: &[(FolderId, &str, Option<FolderId>)],
-    items: Vec<(T, Option<FolderId>)>,
-) -> Vec<PoolRow<T>> {
-    let parent_of = |folder: FolderId| {
+pub fn search_rows<T, F: PoolId>(
+    folders: &[(F, &str, Option<F>)],
+    items: Vec<(T, Option<F>)>,
+) -> Vec<PoolRow<T, F>> {
+    let parent_of = |folder: &F| {
         folders
             .iter()
-            .find(|(id, ..)| *id == folder)
-            .map(|&(_, _, parent)| parent)
+            .find(|(id, ..)| id == folder)
+            .map(|(_, _, parent)| parent.clone())
     };
     let mut open = HashSet::new();
-    for &(_, folder) in &items {
-        let mut current = folder;
+    for (_, folder) in &items {
+        let mut current = folder.clone();
         while let Some(folder) = current
-            && let Some(parent) = parent_of(folder)
+            && let Some(parent) = parent_of(&folder)
             && open.insert(folder)
         {
             current = parent;
@@ -237,22 +336,42 @@ pub fn search_rows<T>(
     build_rows(folders, items, &open, Some(&open))
 }
 
+/// Whether `folder` can go into `target`: not into itself nor into one of
+/// its descendants.
+pub fn can_move_folder<F: PoolId>(
+    folders: &[(F, &str, Option<F>)],
+    folder: &F,
+    target: Option<&F>,
+) -> bool {
+    let mut visited = HashSet::new();
+    let mut current = target.cloned();
+    while let Some(f) = current {
+        if f == *folder || !visited.insert(f.clone()) {
+            return false;
+        }
+        current = folders
+            .iter()
+            .find(|(id, ..)| *id == f)
+            .and_then(|(_, _, parent)| parent.clone());
+    }
+    true
+}
+
 /// Case-insensitive substring match; an empty query matches everything.
 pub fn matches_search(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.trim().to_lowercase())
 }
 
-fn build_rows<T>(
-    folders: &[(FolderId, &str, Option<FolderId>)],
-    items: Vec<(T, Option<FolderId>)>,
-    expanded: &HashSet<FolderId>,
-    visible: Option<&HashSet<FolderId>>,
-) -> Vec<PoolRow<T>> {
-    let exists =
-        |folder: Option<FolderId>| folder.filter(|f| folders.iter().any(|(id, ..)| id == f));
+fn build_rows<T, F: PoolId>(
+    folders: &[(F, &str, Option<F>)],
+    items: Vec<(T, Option<F>)>,
+    expanded: &HashSet<F>,
+    visible: Option<&HashSet<F>>,
+) -> Vec<PoolRow<T, F>> {
+    let exists = |folder: Option<F>| folder.filter(|f| folders.iter().any(|(id, ..)| id == f));
     let mut sorted: Vec<_> = folders.to_vec();
     sorted.sort_by(|a, b| natural_cmp(a.1, b.1));
-    let mut items: Vec<(Option<T>, Option<FolderId>)> = items
+    let mut items: Vec<(Option<T>, Option<F>)> = items
         .into_iter()
         .map(|(item, folder)| (Some(item), exists(folder)))
         .collect();
@@ -273,29 +392,32 @@ fn build_rows<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_level<T>(
-    parent: Option<FolderId>,
+fn push_level<T, F: PoolId>(
+    parent: Option<F>,
     depth: usize,
-    folders: &[(FolderId, &str, Option<FolderId>)],
-    items: &mut [(Option<T>, Option<FolderId>)],
-    expanded: &HashSet<FolderId>,
-    visible: Option<&HashSet<FolderId>>,
-    visited: &mut HashSet<FolderId>,
-    rows: &mut Vec<PoolRow<T>>,
-    exists: &dyn Fn(Option<FolderId>) -> Option<FolderId>,
+    folders: &[(F, &str, Option<F>)],
+    items: &mut [(Option<T>, Option<F>)],
+    expanded: &HashSet<F>,
+    visible: Option<&HashSet<F>>,
+    visited: &mut HashSet<F>,
+    rows: &mut Vec<PoolRow<T, F>>,
+    exists: &dyn Fn(Option<F>) -> Option<F>,
 ) {
-    for &(id, _, folder_parent) in folders {
-        if visible.is_some_and(|v| !v.contains(&id)) {
+    for (id, _, folder_parent) in folders {
+        if visible.is_some_and(|v| !v.contains(id)) {
             continue;
         }
         // `visited`: a corrupted file with a parent cycle must not recurse forever.
-        if exists(folder_parent) != parent || !visited.insert(id) {
+        if exists(folder_parent.clone()) != parent || !visited.insert(id.clone()) {
             continue;
         }
-        rows.push(PoolRow::Folder { id, depth });
-        if expanded.contains(&id) {
+        rows.push(PoolRow::Folder {
+            id: id.clone(),
+            depth,
+        });
+        if expanded.contains(id) {
             push_level(
-                Some(id),
+                Some(id.clone()),
                 depth + 1,
                 folders,
                 items,
@@ -322,30 +444,31 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
         .then_with(|| a.cmp(b))
 }
 
-fn apply_click(
-    current: &BTreeSet<MediaId>,
-    anchor: Option<MediaId>,
-    clicked: MediaId,
+fn apply_click<I: PoolId>(
+    current: &BTreeSet<I>,
+    anchor: Option<I>,
+    clicked: I,
     modifiers: egui::Modifiers,
-    order: &[MediaId],
-) -> (BTreeSet<MediaId>, Option<MediaId>) {
+    order: &[I],
+) -> (BTreeSet<I>, Option<I>) {
     if modifiers.shift {
         let range = anchor
+            .as_ref()
             .and_then(|a| {
-                let from = order.iter().position(|id| *id == a)?;
+                let from = order.iter().position(|id| id == a)?;
                 let to = order.iter().position(|id| *id == clicked)?;
-                Some(order[from.min(to)..=from.max(to)].iter().copied().collect())
+                Some(order[from.min(to)..=from.max(to)].iter().cloned().collect())
             })
-            .unwrap_or_else(|| BTreeSet::from([clicked]));
+            .unwrap_or_else(|| BTreeSet::from([clicked.clone()]));
         (range, anchor.or(Some(clicked)))
     } else if modifiers.command {
         let mut set = current.clone();
         if !set.remove(&clicked) {
-            set.insert(clicked);
+            set.insert(clicked.clone());
         }
         (set, Some(clicked))
     } else {
-        (BTreeSet::from([clicked]), Some(clicked))
+        (BTreeSet::from([clicked.clone()]), Some(clicked))
     }
 }
 

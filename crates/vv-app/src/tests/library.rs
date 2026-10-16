@@ -41,16 +41,30 @@ fn payload(project: &Project, id: MediaId) -> ClipboardPayload {
     ClipboardPayload::new(origin, project, &[id], &[])
 }
 
+fn asset(id: &str, name: &str, payload: ClipboardPayload) -> Asset {
+    Asset {
+        id: id.into(),
+        name: name.into(),
+        folder: None,
+        payload,
+    }
+}
+
 #[test]
 fn an_asset_copies_its_file_and_survives_a_reopen() {
     let root = temp_root("asset");
     let original = root.join("clip.mp4");
     let (project, id) = project_with_file(&original, 0xab);
 
-    let asset = store_asset(&root, "a".into(), "Intro".into(), payload(&project, id)).unwrap();
+    let asset = store_asset(&root, asset("a", "Intro", payload(&project, id))).unwrap();
 
     let copied = &asset.item().unwrap().path;
     assert!(copied.starts_with(root.join("media")));
+    assert_eq!(
+        copied.file_name().unwrap(),
+        "clip.mp4",
+        "the name stays readable"
+    );
     assert_eq!(std::fs::read(copied).unwrap(), b"not really a video");
     std::fs::remove_file(&original).unwrap();
     let library = Library::open(root);
@@ -63,8 +77,8 @@ fn an_asset_copies_its_file_and_survives_a_reopen() {
 fn removing_an_asset_keeps_the_files_other_assets_use() {
     let root = temp_root("remove");
     let (project, id) = project_with_file(&root.join("clip.mp4"), 0xcd);
-    store_asset(&root, "a".into(), "A".into(), payload(&project, id)).unwrap();
-    store_asset(&root, "b".into(), "B".into(), payload(&project, id)).unwrap();
+    store_asset(&root, asset("a", "A", payload(&project, id))).unwrap();
+    store_asset(&root, asset("b", "B", payload(&project, id))).unwrap();
     let mut library = Library::open(root.clone());
     let copied = library.assets[0].item().unwrap().path.clone();
 
@@ -120,4 +134,29 @@ fn entries_of_a_newer_version_are_skipped() {
     std::fs::write(&path, text).unwrap();
 
     assert!(Library::open(root).presets.is_empty());
+}
+
+#[test]
+fn removing_a_folder_moves_its_content_up_and_survives_a_reopen() {
+    let root = temp_root("folders");
+    let (project, id) = project_with_file(&root.join("clip.mp4"), 0xef);
+    store_asset(&root, asset("a", "A", payload(&project, id))).unwrap();
+    let mut library = Library::open(root.clone());
+    let outer = library.add_folder("Outer".into(), None).unwrap();
+    let inner = library
+        .add_folder("Inner".into(), Some(outer.clone()))
+        .unwrap();
+    let deepest = library
+        .add_folder("Deepest".into(), Some(inner.clone()))
+        .unwrap();
+    library
+        .move_assets(&["a".into()], Some(inner.clone()))
+        .unwrap();
+
+    library.remove_folder(&inner).unwrap();
+
+    let library = Library::open(root);
+    assert_eq!(library.assets[0].folder, Some(outer.clone()));
+    assert_eq!(library.folder(&deepest).unwrap().parent, Some(outer));
+    assert!(library.folder(&inner).is_none());
 }

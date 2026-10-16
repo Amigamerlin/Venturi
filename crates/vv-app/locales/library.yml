@@ -32,10 +32,6 @@ library.copying:
   en: "Copying %{name}…"
   it: "Copia di %{name}…"
 
-library.compound:
-  en: "compound clip"
-  it: "compound clip"
-
 library.add_to_project:
   en: "Add to project"
   it: "Aggiungi al progetto"
@@ -43,6 +39,14 @@ library.add_to_project:
 library.delete:
   en: "Delete from library"
   it: "Elimina dalla libreria"
+
+library.delete_question_one:
+  en: "Delete it from the library? Its copied files are removed too."
+  it: "Eliminarlo dalla libreria? Vengono rimossi anche i file copiati."
+
+library.delete_question_many:
+  en: "Delete %{count} items from the library? Their copied files are removed too."
+  it: "Eliminare %{count} elementi dalla libreria? Vengono rimossi anche i file copiati."
 
 library.delete_confirm:
   en: "Delete for good"

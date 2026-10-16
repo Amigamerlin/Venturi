@@ -28,6 +28,7 @@ mod mixer_panel;
 mod new_timeline_dialog;
 mod paste_attributes;
 mod paste_image;
+mod pool_view;
 mod presets;
 mod project_io;
 mod properties_panel;
@@ -2791,7 +2792,7 @@ impl VenturiApp {
             .is_some_and(|c| match &c.source {
                 vv_core::ClipSource::Media(id) => {
                     !self.session.project.media_pool.contains_key(*id)
-                        || self.media_pool_state.is_offline(*id)
+                        || self.media_pool_state.is_offline(id)
                 }
                 vv_core::ClipSource::SolidColor
                 | vv_core::ClipSource::Text

@@ -1,6 +1,7 @@
 //! User library shared by all projects, in `$XDG_DATA_HOME/venturi/library`:
 //! assets (pool items, their files copied in) and attribute presets, one
-//! JSON file each so they can be synced or handed around one by one.
+//! JSON file each so they can be synced or handed around one by one, and the
+//! folders the assets are sorted in.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -18,6 +19,8 @@ const VERSION: u32 = 1;
 struct AssetFile {
     version: u32,
     name: String,
+    #[serde(default)]
+    folder: Option<String>,
     /// `ClipboardPayload::to_text`: it already carries compound clips with
     /// their nested timelines.
     payload: String,
@@ -27,7 +30,21 @@ struct AssetFile {
 pub(crate) struct Asset {
     pub id: String,
     pub name: String,
+    pub folder: Option<String>,
     pub payload: ClipboardPayload,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LibraryFolder {
+    pub id: String,
+    pub name: String,
+    pub parent: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FoldersFile {
+    version: u32,
+    folders: Vec<LibraryFolder>,
 }
 
 impl Asset {
@@ -94,6 +111,7 @@ pub(crate) struct Library {
     /// `None`: no home directory, the library is in memory only.
     root: Option<PathBuf>,
     pub assets: Vec<Asset>,
+    pub folders: Vec<LibraryFolder>,
     pub presets: Vec<(String, AttributePreset)>,
     pending: Vec<PendingAsset>,
 }
@@ -124,11 +142,16 @@ impl Library {
                 Some(Asset {
                     id,
                     name: file.name,
+                    folder: file.folder,
                     payload,
                 })
             })
             .collect();
         assets.sort_by_cached_key(|a| a.name.to_lowercase());
+        let folders = std::fs::read_to_string(root.join("folders.json"))
+            .ok()
+            .and_then(|text| parse::<FoldersFile>("folders", &text))
+            .map_or_else(Vec::new, |f| f.folders);
         let mut presets: Vec<(String, AttributePreset)> = json_files(&root.join("presets"))
             .filter_map(|(id, text)| Some((id.clone(), parse(&id, &text)?)))
             .collect();
@@ -136,6 +159,7 @@ impl Library {
         Self {
             root: Some(root),
             assets,
+            folders,
             presets,
             pending: Vec::new(),
         }
@@ -147,19 +171,19 @@ impl Library {
     }
 
     /// Copies the files of `payload` into the library in the background.
-    pub fn add_asset(&mut self, name: String, payload: ClipboardPayload) {
+    pub fn add_asset(&mut self, name: String, folder: Option<String>, payload: ClipboardPayload) {
         let (tx, done) = mpsc::channel();
         let root = self.root.clone();
-        let id = new_id();
-        let thread_name = name.clone();
+        let asset = Asset {
+            id: new_id(),
+            name: name.clone(),
+            folder,
+            payload,
+        };
         std::thread::spawn(move || {
             let result = match root {
-                Some(root) => store_asset(&root, id, thread_name, payload),
-                None => Ok(Asset {
-                    id,
-                    name: thread_name,
-                    payload,
-                }),
+                Some(root) => store_asset(&root, asset),
+                None => Ok(asset),
             };
             let _ = tx.send(result);
         });
@@ -201,12 +225,90 @@ impl Library {
         };
         let mut asset = self.assets.remove(index);
         asset.name = name;
-        let result = match &self.root {
-            Some(root) => write_asset(root, &asset),
-            None => Ok(()),
-        };
+        let result = self.save_asset(&asset);
         self.insert_asset(asset);
         result
+    }
+
+    pub fn move_assets(&mut self, ids: &[String], folder: Option<String>) -> Result<(), String> {
+        for index in 0..self.assets.len() {
+            if ids.contains(&self.assets[index].id) && self.assets[index].folder != folder {
+                self.assets[index].folder = folder.clone();
+                self.save_asset(&self.assets[index])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn save_asset(&self, asset: &Asset) -> Result<(), String> {
+        match &self.root {
+            Some(root) => write_asset(root, asset),
+            None => Ok(()),
+        }
+    }
+
+    pub fn folder(&self, id: &str) -> Option<&LibraryFolder> {
+        self.folders.iter().find(|f| f.id == id)
+    }
+
+    pub fn add_folder(&mut self, name: String, parent: Option<String>) -> Result<String, String> {
+        let id = new_id();
+        self.folders.push(LibraryFolder {
+            id: id.clone(),
+            name,
+            parent,
+        });
+        self.save_folders()?;
+        Ok(id)
+    }
+
+    pub fn rename_folder(&mut self, id: &str, name: String) -> Result<(), String> {
+        if let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) {
+            folder.name = name;
+        }
+        self.save_folders()
+    }
+
+    /// The caller checks that `parent` is not inside `id`.
+    pub fn move_folder(&mut self, id: &str, parent: Option<String>) -> Result<(), String> {
+        if let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) {
+            folder.parent = parent;
+        }
+        self.save_folders()
+    }
+
+    /// As in the project's pool, its content moves up one level.
+    pub fn remove_folder(&mut self, id: &str) -> Result<(), String> {
+        let Some(index) = self.folders.iter().position(|f| f.id == id) else {
+            return Ok(());
+        };
+        let removed = self.folders.remove(index);
+        for folder in &mut self.folders {
+            if folder.parent.as_deref() == Some(id) {
+                folder.parent = removed.parent.clone();
+            }
+        }
+        let contained: Vec<String> = self
+            .assets
+            .iter()
+            .filter(|a| a.folder.as_deref() == Some(id))
+            .map(|a| a.id.clone())
+            .collect();
+        self.move_assets(&contained, removed.parent)?;
+        self.save_folders()
+    }
+
+    fn save_folders(&self) -> Result<(), String> {
+        match &self.root {
+            Some(root) => write_json(
+                &root.join("folders.json"),
+                &FoldersFile {
+                    version: VERSION,
+                    folders: self.folders.clone(),
+                },
+            ),
+            None => Ok(()),
+        }
     }
 
     /// Also deletes the copied files no other asset uses.
@@ -227,6 +329,11 @@ impl Library {
                 .any(|a| a.payload.files().any(|f| f.path == item.path));
             if !used && item.path.starts_with(&media_dir) {
                 remove_file(&item.path)?;
+                if let Some(dir) = item.path.parent()
+                    && dir != media_dir
+                {
+                    let _ = std::fs::remove_dir(dir);
+                }
             }
         }
         Ok(())
@@ -292,17 +399,12 @@ impl Library {
     }
 }
 
-/// Copies each file into `media/`, named after its content hash so two
-/// assets sharing a file share the copy.
-fn store_asset(
-    root: &Path,
-    id: String,
-    name: String,
-    mut payload: ClipboardPayload,
-) -> Result<Asset, String> {
+/// Copies each file into `media/<content hash>/`, so two assets sharing a
+/// file share the copy and the file keeps its name in the projects.
+fn store_asset(root: &Path, mut asset: Asset) -> Result<Asset, String> {
     let media_dir = root.join("media");
     std::fs::create_dir_all(&media_dir).map_err(|e| e.to_string())?;
-    for item in payload.files_mut() {
+    for item in asset.payload.files_mut() {
         if item.path.starts_with(&media_dir) {
             continue;
         }
@@ -311,7 +413,9 @@ fn store_asset(
             .file_name()
             .ok_or_else(|| format!("{}: not a file", item.path.display()))?
             .to_string_lossy();
-        let dest = media_dir.join(format!("{:016x}-{file_name}", item.content_hash));
+        let dir = media_dir.join(format!("{:016x}", item.content_hash));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dest = dir.join(file_name.as_ref());
         if !dest.exists() {
             // Through a temporary name: a copy cut short must not look done.
             let partial = dest.with_extension("partial");
@@ -321,7 +425,6 @@ fn store_asset(
         }
         item.path = dest;
     }
-    let asset = Asset { id, name, payload };
     write_asset(root, &asset)?;
     Ok(asset)
 }
@@ -332,6 +435,7 @@ fn write_asset(root: &Path, asset: &Asset) -> Result<(), String> {
         &AssetFile {
             version: VERSION,
             name: asset.name.clone(),
+            folder: asset.folder.clone(),
             payload: asset.payload.to_text(),
         },
     )

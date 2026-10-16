@@ -1,7 +1,10 @@
-//! "Library" tab of the media pool: assets shared by all projects. Dragging
-//! one imports it into the project's pool and carries it like a pool item.
+//! "Library" tab of the media pool: assets shared by all projects, in the
+//! same browser as the project's pool. Dragging assets imports them into the
+//! project's pool and carries them like pool items.
 
 use super::*;
+use media_pool::{PoolState, RenameTarget};
+use pool_view::{MenuChoice, PoolEntry, PoolEvent, PoolFolder, PoolMenus, PoolView, Thumb};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum PoolTab {
@@ -13,14 +16,44 @@ pub(crate) enum PoolTab {
 #[derive(Default)]
 pub(crate) struct LibraryUiState {
     pub tab: PoolTab,
-    search: String,
-    /// Asset being renamed and its new name.
-    pub renaming: Option<(String, String)>,
+    pub pool: PoolState<String, String>,
     /// What each asset became in a project, per `(epoch, asset id)`: a
     /// second drag reuses it instead of duplicating a compound clip.
     imports: HashMap<(u64, String), Vec<MediaId>>,
-    /// Payload of the asset being dragged, set when the drag starts.
-    drag: Option<timeline_ui::MediaDragSet>,
+    /// Assets whose deletion waits for a confirmation.
+    pub confirm_delete: Option<Vec<String>>,
+}
+
+struct LibraryMenus;
+
+enum LibraryAction {
+    AddToProject,
+    Delete,
+}
+
+impl PoolMenus<String, String> for LibraryMenus {
+    type Action = LibraryAction;
+
+    fn item_menu(
+        &self,
+        ui: &mut egui::Ui,
+        entry: &PoolEntry<String, String>,
+        _selected: usize,
+        out: &mut Vec<MenuChoice<String, LibraryAction>>,
+    ) {
+        if ui.button(t!("library.add_to_project")).clicked() {
+            out.push(MenuChoice::Action(LibraryAction::AddToProject));
+            ui.close();
+        }
+        pool_view::rename_button(ui, entry, out);
+        ui.separator();
+        ui.menu_button(t!("library.delete"), |ui| {
+            if ui.button(t!("library.delete_confirm")).clicked() {
+                out.push(MenuChoice::Action(LibraryAction::Delete));
+                ui.close();
+            }
+        });
+    }
 }
 
 impl VenturiApp {
@@ -29,6 +62,12 @@ impl VenturiApp {
         if !errors.is_empty() {
             self.project_error =
                 Some(t!("library.save_failed", error = errors.join("\n")).into_owned());
+        }
+    }
+
+    fn library_result(&mut self, result: Result<(), String>) {
+        if let Err(e) = result {
+            self.project_error = Some(t!("library.save_failed", error = e).into_owned());
         }
     }
 
@@ -46,7 +85,7 @@ impl VenturiApp {
                 &[id],
                 &[],
             );
-            self.library.add_asset(name, payload);
+            self.library.add_asset(name, None, payload);
         }
     }
 
@@ -73,236 +112,284 @@ impl VenturiApp {
         pasted.media
     }
 
-    fn add_library_asset_to_project(&mut self, asset_id: &str) {
-        let media = self.import_library_asset(asset_id);
+    fn add_library_assets_to_project(&mut self, assets: &[String]) {
+        let media: Vec<MediaId> = assets
+            .iter()
+            .flat_map(|id| self.import_library_asset(id))
+            .collect();
         if let Some(&first) = media.first() {
-            self.library_ui.tab = PoolTab::Project;
-            self.media_pool_state.select_only(media);
             self.reveal_in_media_pool(first);
+            self.media_pool_state.select_only(media);
         }
     }
 
     pub(crate) fn show_pool_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let tab = self.library_ui.tab;
             ui.selectable_value(
                 &mut self.library_ui.tab,
                 PoolTab::Project,
                 t!("pool.tab_project"),
             );
-            // A hidden pool selection would still take Del and Ctrl+C.
-            if ui
-                .selectable_value(
-                    &mut self.library_ui.tab,
-                    PoolTab::Library,
-                    t!("pool.tab_library"),
-                )
-                .on_hover_text(t!("library.tab_hint"))
-                .clicked()
-            {
-                self.media_pool_state.select_only([]);
+            ui.selectable_value(
+                &mut self.library_ui.tab,
+                PoolTab::Library,
+                t!("pool.tab_library"),
+            )
+            .on_hover_text(t!("library.tab_hint"));
+            // A hidden selection would still take Ctrl+C.
+            if self.library_ui.tab != tab {
+                self.media_pool_state.clear();
+                self.library_ui.pool.clear();
             }
         });
     }
 
+    fn library_selection(&self) -> Vec<String> {
+        self.library_ui.pool.selected.iter().cloned().collect()
+    }
+
+    /// Del on the Library tab: deleting removes the copied files, so it
+    /// asks first.
+    pub(crate) fn delete_selected_library_assets(&mut self) {
+        if !self.library_ui.pool.selected.is_empty() {
+            self.library_ui.confirm_delete = Some(self.library_selection());
+        }
+    }
+
+    pub(crate) fn select_all_library_assets(&mut self) {
+        let all: Vec<String> = self.library.assets.iter().map(|a| a.id.clone()).collect();
+        self.library_ui.pool.select_only(all);
+    }
+
+    pub(crate) fn rename_selected_library_item(&mut self) {
+        let pool = &mut self.library_ui.pool;
+        if let Some(folder) = pool.selected_folder.clone() {
+            if let Some(f) = self.library.folder(&folder) {
+                pool.start_rename(RenameTarget::Folder(folder), f.name.clone());
+            }
+        } else if let Some(id) = pool.single_selected().cloned()
+            && let Some(asset) = self.library.assets.iter().find(|a| a.id == id)
+        {
+            pool.start_rename(RenameTarget::Item(id), asset.name.clone());
+        }
+    }
+
+    /// Enter on the Library tab.
+    pub(crate) fn add_selected_library_assets_to_project(&mut self) {
+        let selected = self.library_selection();
+        self.add_library_assets_to_project(&selected);
+    }
+
+    fn remove_library_assets(&mut self, ids: &[String]) {
+        for id in ids {
+            let result = self.library.remove_asset(id);
+            self.library_result(result);
+        }
+    }
+
+    fn new_library_folder(&mut self, parent: Option<String>) {
+        let taken: Vec<&str> = self
+            .library
+            .folders
+            .iter()
+            .filter(|f| f.parent == parent)
+            .map(|f| f.name.as_str())
+            .collect();
+        let name = new_folder_name(&taken);
+        match self.library.add_folder(name.clone(), parent.clone()) {
+            Ok(folder) => {
+                let pool = &mut self.library_ui.pool;
+                pool.expanded.extend(parent);
+                pool.start_rename(RenameTarget::Folder(folder), name);
+            }
+            Err(e) => self.library_result(Err(e)),
+        }
+    }
+
     pub(crate) fn show_library(&mut self, ui: &mut egui::Ui) {
-        ui.add(
-            egui::TextEdit::singleline(&mut self.library_ui.search)
-                .hint_text(t!("pool.search"))
-                .desired_width(f32::INFINITY),
-        );
-        let query = self.library_ui.search.trim().to_owned();
-        let mut add_to_project = None;
-        let mut rename = None;
-        let mut delete = None;
-        let mut drag_started = None;
-        egui::ScrollArea::vertical()
-            .id_salt("library_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for name in self.library.pending() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(t!("library.copying", name = name));
-                    });
-                }
-                if self.library.assets.is_empty() && self.library.pending().next().is_none() {
-                    ui.weak(t!("library.empty_hint"));
-                }
-                for asset in &self.library.assets {
-                    if !query.is_empty() && !media_pool::matches_search(&asset.name, &query) {
-                        continue;
-                    }
-                    let Some(item) = asset.item() else {
-                        continue;
-                    };
-                    if item.compound.is_none()
-                        && item.meta.has_video
-                        && !self.thumbnails.contains_key(&item.content_hash)
-                    {
-                        self.thumbnails.insert(item.content_hash, None);
-                        self.thumbnail_worker
-                            .get_or_insert_with(thumbnail_worker::ThumbnailWorker::spawn)
-                            .enqueue(
-                                item.path.clone(),
-                                item.content_hash,
-                                item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
-                            );
-                    }
-                    let thumbnail = self.thumbnails.get(&item.content_hash).cloned().flatten();
-                    let id = ui.id().with(("library_asset", &asset.id));
-                    let resp = library_row(ui, id, &asset.name, item, thumbnail.as_ref());
-                    if resp.double_clicked() {
-                        add_to_project = Some(asset.id.clone());
-                    }
-                    if resp.drag_started() {
-                        drag_started = Some(asset.id.clone());
-                    }
-                    if resp.dragged() {
-                        if let Some(set) = &self.library_ui.drag {
-                            resp.dnd_set_drag_payload(set.clone());
-                        }
-                        show_drag_ghost(ui, id, &asset.name);
-                    }
-                    resp.context_menu(|ui| {
-                        if ui.button(t!("library.add_to_project")).clicked() {
-                            add_to_project = Some(asset.id.clone());
-                            ui.close();
-                        }
-                        ui.menu_button(t!("pool.rename"), |ui| {
-                            let name = self
-                                .library_ui
-                                .renaming
-                                .get_or_insert_with(|| (asset.id.clone(), asset.name.clone()));
-                            if name.0 != asset.id {
-                                *name = (asset.id.clone(), asset.name.clone());
-                            }
-                            let edit = ui.text_edit_singleline(&mut name.1);
-                            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                rename = Some(name.clone());
-                                ui.close();
-                            }
-                        });
-                        ui.separator();
-                        ui.menu_button(t!("library.delete"), |ui| {
-                            if ui.button(t!("library.delete_confirm")).clicked() {
-                                delete = Some(asset.id.clone());
-                                ui.close();
-                            }
-                        });
-                    });
-                }
+        for name in self.library.pending() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(t!("library.copying", name = name));
             });
+        }
         if self.library.pending().next().is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
-        if let Some(asset_id) = drag_started {
-            let media = self.import_library_asset(&asset_id);
-            self.library_ui.drag = Some(timeline_ui::MediaDragSet {
-                items: media
-                    .iter()
-                    .map(|&id| {
-                        timeline_ui::MediaDrag::whole(id, &self.session.project.media_pool[id].meta)
-                    })
-                    .collect(),
-            });
-            if let Some(set) = &self.library_ui.drag {
-                egui::DragAndDrop::set_payload(ui.ctx(), set.clone());
-            }
-        }
-        if let Some(asset_id) = add_to_project {
-            self.add_library_asset_to_project(&asset_id);
-        }
-        let result = if let Some((id, name)) = rename {
-            self.library_ui.renaming = None;
-            match name.trim() {
-                "" => Ok(()),
-                name => self.library.rename_asset(&id, name.to_owned()),
-            }
-        } else if let Some(id) = delete {
-            self.library.remove_asset(&id)
-        } else {
-            Ok(())
-        };
-        if let Err(e) = result {
-            self.project_error = Some(t!("library.save_failed", error = e).into_owned());
-        }
-    }
-}
-
-fn library_row(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    name: &str,
-    item: &vv_core::MediaItem,
-    thumbnail: Option<&egui::TextureHandle>,
-) -> egui::Response {
-    let meta = &item.meta;
-    let group = ui.group(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.horizontal(|ui| {
-            let thumb_size = egui::vec2(64.0, 36.0);
-            let (rect, _) = ui.allocate_exact_size(thumb_size, egui::Sense::hover());
-            match thumbnail {
-                Some(texture) => {
-                    let tex_size = texture.size_vec2();
-                    let scale = (thumb_size.x / tex_size.x).min(thumb_size.y / tex_size.y);
-                    ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
-                    egui::Image::new(texture)
-                        .fit_to_exact_size(tex_size * scale)
-                        .paint_at(
-                            ui,
-                            egui::Rect::from_center_size(rect.center(), tex_size * scale),
-                        );
-                }
-                None => {
-                    ui.painter()
-                        .rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-                    let icon = if item.compound.is_some() {
-                        "🎞"
-                    } else if !meta.has_video {
-                        "🔊"
-                    } else {
-                        ""
-                    };
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        icon,
-                        egui::FontId::proportional(18.0),
-                        ui.visuals().weak_text_color(),
+        let pool = &mut self.library_ui.pool;
+        pool.refresh_offline_files(self.library.assets.iter().filter_map(|a| {
+            let item = a.item().filter(|item| item.compound.is_none())?;
+            Some((a.id.clone(), item.path.as_path()))
+        }));
+        let mut entries = Vec::new();
+        for asset in &self.library.assets {
+            let Some(item) = asset.item() else {
+                continue;
+            };
+            let offline = pool.is_offline(&asset.id);
+            if item.compound.is_none()
+                && item.meta.has_video
+                && !offline
+                && !self.thumbnails.contains_key(&item.content_hash)
+            {
+                self.thumbnails.insert(item.content_hash, None);
+                self.thumbnail_worker
+                    .get_or_insert_with(thumbnail_worker::ThumbnailWorker::spawn)
+                    .enqueue(
+                        item.path.clone(),
+                        item.content_hash,
+                        item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
                     );
+            }
+            let thumb = if item.compound.is_some() {
+                Thumb::Timeline
+            } else if offline {
+                Thumb::Offline
+            } else {
+                match self.thumbnails.get(&item.content_hash).cloned().flatten() {
+                    Some(texture) => Thumb::Texture(texture),
+                    None => Thumb::None,
+                }
+            };
+            entries.push(PoolEntry {
+                id: asset.id.clone(),
+                name: asset.name.clone(),
+                folder: asset.folder.clone(),
+                meta: item.meta.clone(),
+                thumb,
+                proxy: None,
+                renamable: true,
+            });
+        }
+        let folders = self
+            .library
+            .folders
+            .iter()
+            .map(|f| PoolFolder {
+                id: f.id.clone(),
+                name: f.name.clone(),
+                parent: f.parent.clone(),
+            })
+            .collect();
+        let events = pool_view::show_pool(
+            ui,
+            pool,
+            PoolView {
+                folders,
+                entries,
+                menus: &LibraryMenus,
+                kinetic_scroll: self.settings.kinetic_scroll_media_pool,
+                item_hint: t!("library.item_hint"),
+                empty_hint: Some(t!("library.empty_hint")),
+            },
+        );
+        for event in events {
+            match event {
+                PoolEvent::Rename(id, name) => {
+                    let result = self.library.rename_asset(&id, name);
+                    self.library_result(result);
+                }
+                PoolEvent::RenameFolder(id, name) => {
+                    let result = self.library.rename_folder(&id, name);
+                    self.library_result(result);
+                }
+                PoolEvent::NewFolder(parent) => self.new_library_folder(parent),
+                PoolEvent::DeleteFolder(id) => {
+                    let result = self.library.remove_folder(&id);
+                    self.library_result(result);
+                }
+                PoolEvent::MoveItems(ids, folder) => {
+                    let result = self.library.move_assets(&ids, folder);
+                    self.library_result(result);
+                }
+                PoolEvent::MoveFolder(id, parent) => {
+                    let result = self.library.move_folder(&id, parent);
+                    self.library_result(result);
+                }
+                PoolEvent::Open(id) => self.add_library_assets_to_project(&[id]),
+                // Imported only once the drag leaves the library, see below.
+                PoolEvent::DragStarted(_) => {}
+                PoolEvent::Action(LibraryAction::AddToProject) => {
+                    self.add_selected_library_assets_to_project()
+                }
+                PoolEvent::Action(LibraryAction::Delete) => {
+                    let selected = self.library_selection();
+                    self.remove_library_assets(&selected);
                 }
             }
-            ui.vertical(|ui| {
-                ui.label(name);
-                ui.small(if item.compound.is_some() {
-                    t!("library.compound")
-                } else if meta.is_image() {
-                    t!("pool.meta_image", width = meta.width, height = meta.height)
-                } else if meta.has_video {
-                    format!(
-                        "{}x{} · {:.2}fps",
-                        meta.width,
-                        meta.height,
-                        meta.fps.as_f64()
-                    )
-                    .into()
-                } else {
-                    t!(
-                        "pool.meta_audio",
-                        rate = meta.sample_rate,
-                        channels = meta.channels
-                    )
-                });
+        }
+        self.import_dragged_assets(ui.ctx());
+        let library = &self.library;
+        self.library_ui.pool.forget(
+            |id| library.assets.iter().any(|a| a.id == *id),
+            |id| library.folder(id).is_some(),
+        );
+        self.show_library_delete_confirm(ui.ctx());
+    }
+
+    /// Assets dragged out of the library become pool items, so that the
+    /// timeline can take them: moving them between the library's own
+    /// folders imports nothing.
+    fn import_dragged_assets(&mut self, ctx: &egui::Context) {
+        let Some(drag) = egui::DragAndDrop::payload::<pool_view::ItemsDrag<String>>(ctx) else {
+            return;
+        };
+        let inside = self
+            .library_ui
+            .pool
+            .scroll_area
+            .is_some_and(|area| timeline_ui::pointer_over(ctx, area.viewport));
+        if inside {
+            return;
+        }
+        let media: Vec<MediaId> = drag
+            .0
+            .iter()
+            .flat_map(|id| self.import_library_asset(id))
+            .collect();
+        let set = timeline_ui::MediaDragSet {
+            items: media
+                .iter()
+                .map(|&id| {
+                    timeline_ui::MediaDrag::whole(id, &self.session.project.media_pool[id].meta)
+                })
+                .collect(),
+        };
+        egui::DragAndDrop::set_payload(ctx, set);
+    }
+
+    fn show_library_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some(ids) = &self.library_ui.confirm_delete else {
+            return;
+        };
+        let count = ids.len();
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("library_delete_confirm")).show(ctx, |ui| {
+            ui.label(if count == 1 {
+                t!("library.delete_question_one")
+            } else {
+                t!("library.delete_question_many", count = count)
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !meta.is_image() {
-                    ui.monospace(format_duration(meta.duration_frames, meta.fps.as_f64()));
+            ui.horizontal(|ui| {
+                if ui.button(t!("common.cancel")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    choice = Some(false);
+                }
+                if ui.button(t!("library.delete")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    choice = Some(true);
                 }
             });
         });
-    });
-    ui.interact(group.response.rect, id, egui::Sense::click_and_drag())
-        .on_hover_text(t!("library.item_hint"))
+        if let Some(delete) = choice {
+            let ids = self.library_ui.confirm_delete.take().unwrap_or_default();
+            if delete {
+                self.remove_library_assets(&ids);
+            }
+        }
+    }
 }
