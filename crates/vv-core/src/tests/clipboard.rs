@@ -210,3 +210,34 @@ fn an_offline_clip_stays_offline() {
 
     assert!(!dest.media_pool.contains_key(source_of(&pasted.clips[0])));
 }
+
+/// The library copies every file of a compound clip and points the payload
+/// at the copies.
+#[test]
+fn the_files_of_a_payload_include_those_inside_compound_clips() {
+    let mut project = Project::default();
+    let inner = project.media_pool.insert(file("/media/inner.mp4", 1));
+    let outer = compound(&mut project, "Compound Clip 1", inner);
+    let mut payload = ClipboardPayload::new(ORIGIN, &project, &[outer], &[]);
+
+    assert_eq!(
+        payload
+            .media_items()
+            .map(|m| m.compound.is_some())
+            .collect::<Vec<_>>(),
+        vec![true]
+    );
+    for item in payload.files_mut() {
+        item.path = "/library/inner.mp4".into();
+    }
+
+    let mut target = Project::default();
+    paste(payload, &mut target);
+    let paths: Vec<_> = target
+        .media_pool
+        .values()
+        .filter(|m| m.compound.is_none())
+        .map(|m| m.path.clone())
+        .collect();
+    assert_eq!(paths, vec![std::path::PathBuf::from("/library/inner.mp4")]);
+}

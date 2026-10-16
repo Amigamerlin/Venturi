@@ -802,6 +802,11 @@ impl VenturiApp {
         ui: &mut egui::Ui,
         preview_action: &mut Option<MediaId>,
     ) {
+        self.show_pool_tabs(ui);
+        if self.library_ui.tab == library_ui::PoolTab::Library {
+            self.show_library(ui);
+            return;
+        }
         if let Some(worker) = &self.proxy_worker {
             let progress = worker.progress();
             let paused = worker.is_paused();
@@ -1204,6 +1209,15 @@ impl VenturiApp {
                                     self.relink_media_dialog();
                                     ui.close();
                                 }
+                                ui.separator();
+                                if ui
+                                    .button(t!("pool.add_to_library"))
+                                    .on_hover_text(t!("pool.add_to_library_hint"))
+                                    .clicked()
+                                {
+                                    self.add_selected_media_to_library();
+                                    ui.close();
+                                }
                             });
                             // Dragging an item outside the selection replaces it
                             // with that item (as on the timeline, see
@@ -1319,7 +1333,7 @@ impl VenturiApp {
     }
 
     /// Effects section: generators and effects to drag onto the timeline.
-    pub(crate) fn show_effects_list(ui: &mut egui::Ui) {
+    pub(crate) fn show_effects_list(&mut self, ui: &mut egui::Ui) {
         effects_section_header(ui, &t!("effects.generators"));
         egui::ScrollArea::vertical()
             .id_salt("effects_scroll")
@@ -1338,6 +1352,8 @@ impl VenturiApp {
                 for transition in timeline_ui::ALL_TRANSITION_KINDS {
                     transition_item(ui, transition);
                 }
+                ui.add_space(8.0);
+                self.show_preset_list(ui);
             });
     }
 }

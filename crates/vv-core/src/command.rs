@@ -72,6 +72,7 @@ pub enum CommandLabel {
     MoveKeyframes,
     SetInterpolation,
     PasteAttributes,
+    ApplyPreset,
     ClipSpeed,
     FreezeFrame,
     RemoveSilences,

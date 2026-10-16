@@ -129,6 +129,10 @@ pub struct TimelineState {
     /// "Paste attributes" asked from the context menu: the dialog lives in
     /// the app, which opens it and clears the flag.
     pub paste_attributes_requested: bool,
+    /// The clips to save a preset from.
+    pub save_preset_requested: Option<Vec<(usize, ClipId)>>,
+    /// A library preset dropped on clips: its id and the clips.
+    pub preset_drop: Option<(String, Vec<(usize, ClipId)>)>,
     /// The playhead jumped programmatically (e.g. ripple delete): the next
     /// frame brings it into view if it left, without waiting for playback.
     pub reveal_playhead: bool,
@@ -438,6 +442,8 @@ impl Default for TimelineState {
             audio_scroll_vel: 0.0,
             export_marks: crate::transport::MarkRange::default(),
             paste_attributes_requested: false,
+            save_preset_requested: None,
+            preset_drop: None,
             reveal_playhead: false,
             retime_controls: BTreeSet::new(),
             speed_dialog_requested: None,
@@ -1694,6 +1700,7 @@ impl TimelineDrag {
         // drop on the clip would no longer see anything (see the same oversight
         // already made and repaired for the filters).
         if egui::DragAndDrop::has_payload_of_type::<FilterEntry>(&resp.ctx)
+            || egui::DragAndDrop::has_payload_of_type::<PresetDrag>(&resp.ctx)
             || egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(&resp.ctx)
             || egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(&resp.ctx)
         {
@@ -1730,6 +1737,11 @@ pub const FILTER_ENTRIES: [FilterEntry; 6] = [
     FilterEntry::plain(vv_core::FilterKind::GaussianBlur),
     FilterEntry::plain(vv_core::FilterKind::DropShadow),
 ];
+
+/// A library preset dragged from the Effects panel: like a filter, it lands
+/// only on a clip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetDrag(pub String);
 
 /// A filter of the Effects panel, the drag payload: a kind and, for the
 /// color correction, possibly a preset (the one-click black and white).
@@ -2368,7 +2380,8 @@ pub fn show_timeline(
                 // filter never lands on an empty space, but the cursor
                 // stays consistent anyway while passing over it).
                 if pointer_over_panel
-                    && egui::DragAndDrop::has_payload_of_type::<FilterEntry>(ui.ctx())
+                    && (egui::DragAndDrop::has_payload_of_type::<FilterEntry>(ui.ctx())
+                        || egui::DragAndDrop::has_payload_of_type::<PresetDrag>(ui.ctx()))
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 {
                     paint_gear_icon(
@@ -2843,6 +2856,30 @@ pub fn show_timeline(
                                 clip_id: visual.clip.id,
                                 filter: *filter,
                             });
+                        }
+                    }
+
+                    // Preset: on any unlocked clip; onto the whole selection
+                    // when the clip is part of it.
+                    if !visual.locked
+                        && egui::DragAndDrop::has_payload_of_type::<PresetDrag>(ui.ctx())
+                    {
+                        if resp.dnd_hover_payload::<PresetDrag>().is_some() {
+                            painter.rect_stroke(
+                                clip_rect,
+                                4.0,
+                                egui::Stroke::new(3.0, FILTER_HIGHLIGHT_COLOR),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if let Some(preset) = resp.dnd_release_payload::<PresetDrag>() {
+                            let clip = (visual.track_index, visual.clip.id);
+                            let targets = if state.selected.contains(&clip) {
+                                state.selected.iter().copied().collect()
+                            } else {
+                                vec![clip]
+                            };
+                            state.preset_drop = Some((preset.0.clone(), targets));
                         }
                     }
 
@@ -3535,6 +3572,15 @@ pub fn show_timeline(
                             .clicked()
                         {
                             state.paste_attributes_requested = true;
+                            ui.close();
+                        }
+                        if ui.button(t!("timeline.save_preset")).clicked() {
+                            let clip = (visual.track_index, visual.clip.id);
+                            state.save_preset_requested = Some(if state.selected.contains(&clip) {
+                                state.selected.iter().copied().collect()
+                            } else {
+                                vec![clip]
+                            });
                             ui.close();
                         }
                         ui.menu_button(t!("timeline.clip_color"), |ui| {

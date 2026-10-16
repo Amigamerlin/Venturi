@@ -44,6 +44,10 @@ history.paste_attributes:
   en: "Paste properties"
   it: "Incolla proprietà"
 
+history.apply_preset:
+  en: "Apply preset"
+  it: "Applica preset"
+
 history.clip_speed:
   en: "Clip speed"
   it: "Velocità clip"

@@ -51,10 +51,12 @@ pub enum Action {
     SlipTool,
     OpenCompound,
     ExitCompound,
+    /// Slot 1-9 of `presets::HOTKEY_SLOTS`.
+    ApplyPreset(u8),
 }
 
 impl Action {
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 46] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -92,6 +94,15 @@ impl Action {
         Action::SlipTool,
         Action::OpenCompound,
         Action::ExitCompound,
+        Action::ApplyPreset(1),
+        Action::ApplyPreset(2),
+        Action::ApplyPreset(3),
+        Action::ApplyPreset(4),
+        Action::ApplyPreset(5),
+        Action::ApplyPreset(6),
+        Action::ApplyPreset(7),
+        Action::ApplyPreset(8),
+        Action::ApplyPreset(9),
     ];
 
     /// Key in the settings file: must never be changed.
@@ -134,6 +145,20 @@ impl Action {
             Action::SlipTool => "slip_tool",
             Action::OpenCompound => "open_compound",
             Action::ExitCompound => "exit_compound",
+            Action::ApplyPreset(slot) => {
+                const IDS: [&str; 9] = [
+                    "apply_preset_1",
+                    "apply_preset_2",
+                    "apply_preset_3",
+                    "apply_preset_4",
+                    "apply_preset_5",
+                    "apply_preset_6",
+                    "apply_preset_7",
+                    "apply_preset_8",
+                    "apply_preset_9",
+                ];
+                IDS[(slot as usize).clamp(1, 9) - 1]
+            }
         }
     }
 
@@ -182,6 +207,7 @@ impl Action {
             | Action::ExitCompound => {
                 t!("action_category.timeline")
             }
+            Action::ApplyPreset(_) => t!("action_category.presets"),
         }
     }
 
@@ -246,6 +272,7 @@ impl Action {
                 alt: true,
                 ..plain(Key::ArrowLeft)
             }],
+            Action::ApplyPreset(_) => Vec::new(),
         }
     }
 

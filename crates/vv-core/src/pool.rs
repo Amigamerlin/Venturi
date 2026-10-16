@@ -65,6 +65,10 @@ impl AddEntities {
     pub fn media_ids(&self) -> impl Iterator<Item = MediaId> + '_ {
         self.media.iter().map(|(id, _)| *id)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.timelines.is_empty() && self.media.is_empty()
+    }
 }
 
 impl Command for AddEntities {

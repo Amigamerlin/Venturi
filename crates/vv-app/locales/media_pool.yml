@@ -110,6 +110,10 @@ effects.transitions:
   en: "Transitions"
   it: "Transizioni"
 
+effects.presets:
+  en: "Presets"
+  it: "Preset"
+
 transition.push:
   en: "Push"
   it: "Push"

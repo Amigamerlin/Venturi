@@ -1,0 +1,109 @@
+_version: 2
+
+pool.tab_project:
+  en: "Project"
+  it: "Progetto"
+
+pool.tab_library:
+  en: "Library"
+  it: "Libreria"
+
+pool.add_to_library:
+  en: "Add to library"
+  it: "Aggiungi alla libreria"
+
+pool.add_to_library_hint:
+  en: "Copies the selected items into the library shared by all projects"
+  it: "Copia gli elementi selezionati nella libreria condivisa tra tutti i progetti"
+
+library.tab_hint:
+  en: "Media and compound clips shared by all projects"
+  it: "Media e compound clip condivisi tra tutti i progetti"
+
+library.empty_hint:
+  en: "Empty. Right click an item of the project pool and choose \"Add to library\"."
+  it: "Vuota. Tasto destro su un elemento del pool del progetto e scegli \"Aggiungi alla libreria\"."
+
+library.item_hint:
+  en: "Drag onto the timeline or double click to add it to the project"
+  it: "Trascina sulla timeline o doppio clic per aggiungerlo al progetto"
+
+library.copying:
+  en: "Copying %{name}…"
+  it: "Copia di %{name}…"
+
+library.compound:
+  en: "compound clip"
+  it: "compound clip"
+
+library.add_to_project:
+  en: "Add to project"
+  it: "Aggiungi al progetto"
+
+library.delete:
+  en: "Delete from library"
+  it: "Elimina dalla libreria"
+
+library.delete_confirm:
+  en: "Delete for good"
+  it: "Elimina definitivamente"
+
+library.save_failed:
+  en: "Library: %{error}"
+  it: "Libreria: %{error}"
+
+preset.save_title:
+  en: "Save Preset"
+  it: "Salva preset"
+
+preset.name:
+  en: "Name"
+  it: "Nome"
+
+preset.save:
+  en: "Save"
+  it: "Salva"
+
+preset.anchor_start:
+  en: "Keep timing from the start of the clip"
+  it: "Mantieni i tempi dall'inizio della clip"
+
+preset.anchor_end:
+  en: "Keep timing from the end of the clip"
+  it: "Mantieni i tempi dalla fine della clip"
+
+preset.filters_replace:
+  en: "Replace the clip's filters"
+  it: "Sostituisci i filtri della clip"
+
+preset.filters_append:
+  en: "Add after the clip's filters"
+  it: "Aggiungi dopo i filtri della clip"
+
+preset.hotkey:
+  en: "Shortcut"
+  it: "Scorciatoia"
+
+preset.hotkey_none:
+  en: "None"
+  it: "Nessuna"
+
+preset.hotkey_hint:
+  en: "Slot of the \"Apply preset N\" shortcuts, set in Settings › Shortcuts"
+  it: "Slot delle scorciatoie \"Applica preset N\", da impostare in Impostazioni › Scorciatoie"
+
+preset.empty_hint:
+  en: "Right click a clip › \"Save properties as preset...\""
+  it: "Tasto destro su una clip › \"Salva proprietà come preset...\""
+
+preset.item_hint:
+  en: "Drag onto a clip, or double click to apply to the selected clips"
+  it: "Trascina su una clip, o doppio clic per applicarlo alle clip selezionate"
+
+preset.apply_to_selection:
+  en: "Apply to selected clips"
+  it: "Applica alle clip selezionate"
+
+preset.rename:
+  en: "Rename"
+  it: "Rinomina"

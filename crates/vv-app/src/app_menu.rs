@@ -150,6 +150,11 @@ impl VenturiApp {
             if pressed(Action::PasteAttributes) {
                 self.open_paste_attributes_dialog();
             }
+            for slot in crate::presets::HOTKEY_SLOTS {
+                if pressed(Action::ApplyPreset(slot)) {
+                    self.apply_preset_hotkey(slot);
+                }
+            }
             if pressed(Action::ZoomIn) {
                 self.timeline_state.zoom_in();
             }
@@ -362,6 +367,18 @@ impl VenturiApp {
                             .clicked()
                         {
                             self.open_paste_attributes_dialog();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.timeline_state.selected.is_empty(),
+                                egui::Button::new(t!("timeline.save_preset")),
+                            )
+                            .clicked()
+                        {
+                            let clips: Vec<_> =
+                                self.timeline_state.selected.iter().copied().collect();
+                            self.open_save_preset_dialog(&clips);
                             ui.close();
                         }
                         ui.separator();
@@ -743,6 +760,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::MoveKeyframes => t!("history.move_keyframes"),
         L::SetInterpolation => t!("history.set_interpolation"),
         L::PasteAttributes => t!("history.paste_attributes"),
+        L::ApplyPreset => t!("history.apply_preset"),
         L::ClipSpeed => t!("history.clip_speed"),
         L::FreezeFrame => t!("history.freeze_frame"),
         L::RemoveSilences => t!("history.remove_silences"),

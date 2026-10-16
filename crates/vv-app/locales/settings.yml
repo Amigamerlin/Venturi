@@ -215,6 +215,9 @@ action_category.file:
 action_category.timeline:
   en: Timeline
   it: Timeline
+action_category.presets:
+  en: Presets
+  it: Preset
 
 action.toggle_playback:
   en: Play/pause
@@ -327,3 +330,30 @@ action.select_tool:
 action.slip_tool:
   en: Slip tool
   it: Strumento slip
+action.apply_preset_1:
+  en: Apply preset 1
+  it: Applica preset 1
+action.apply_preset_2:
+  en: Apply preset 2
+  it: Applica preset 2
+action.apply_preset_3:
+  en: Apply preset 3
+  it: Applica preset 3
+action.apply_preset_4:
+  en: Apply preset 4
+  it: Applica preset 4
+action.apply_preset_5:
+  en: Apply preset 5
+  it: Applica preset 5
+action.apply_preset_6:
+  en: Apply preset 6
+  it: Applica preset 6
+action.apply_preset_7:
+  en: Apply preset 7
+  it: Applica preset 7
+action.apply_preset_8:
+  en: Apply preset 8
+  it: Applica preset 8
+action.apply_preset_9:
+  en: Apply preset 9
+  it: Applica preset 9
