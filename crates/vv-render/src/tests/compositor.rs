@@ -712,19 +712,20 @@ fn a_text_shadow_darkens_the_layer_below() {
     let title = vv_core::TitleParams {
         content: "II".into(),
         size: 60.0,
-        shadow: vv_core::TitleShadow {
-            enabled: true,
-            offset: [10.0, -10.0],
-            blur: 0.0,
-            opacity: 100.0,
-            ..Default::default()
-        },
         ..Default::default()
     };
+    let shadow = [vv_core::FilterValue {
+        radius: 0.0,
+        amount: 100.0,
+        ..vv_core::FilterValue::new(vv_core::FilterKind::DropShadow)
+    }];
     let out = compositor.render_layers(
         &[
             Layer::new(LayerContent::Solid(RED), Transform::default()),
-            Layer::new(LayerContent::Text(&title), Transform::default()),
+            Layer {
+                filters: &shadow,
+                ..Layer::new(LayerContent::Text(&title), Transform::default())
+            },
         ],
         OutputFrame::exact(160, 90),
     );

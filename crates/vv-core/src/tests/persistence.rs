@@ -234,3 +234,52 @@ fn the_view_round_trips_and_an_older_file_without_it_still_loads() {
     std::fs::write(&path, format!("{})", &contents[..view])).unwrap();
     assert_eq!(load_project(&path).unwrap().view, ProjectView::default());
 }
+
+#[test]
+fn the_old_title_shadow_loads_as_a_drop_shadow_filter() {
+    let stack = EffectStack {
+        title: Some(TitleParams::default()),
+        ..EffectStack::default()
+    };
+    let color = Rgba {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    let old_shadow = |enabled: bool| {
+        format!(
+            "shadow: (enabled: {enabled}, color: {}, offset: {}, grow: 2.0, blur: 5.0, opacity: 50.0), background:",
+            ron::to_string(&color).unwrap(),
+            ron::to_string(&[3.0f32, -4.0]).unwrap(),
+        )
+    };
+    let saved = ron::to_string(&stack).unwrap();
+    assert!(!saved.contains("shadow"));
+
+    let loaded: EffectStack =
+        ron::from_str(&saved.replacen("background:", &old_shadow(true), 1)).unwrap();
+    assert_eq!(loaded.title, Some(TitleParams::default()));
+    let expected = ClipFilter {
+        radius: Keyframed::constant(5.0),
+        amount: Keyframed::constant(50.0),
+        offset: [3.0, -4.0].map(Keyframed::constant),
+        grow: Keyframed::constant(2.0),
+        color,
+        ..ClipFilter::new(FilterKind::DropShadow)
+    };
+    assert_eq!(loaded.filters, [expected.clone()]);
+
+    let disabled: EffectStack =
+        ron::from_str(&saved.replacen("background:", &old_shadow(false), 1)).unwrap();
+    assert!(disabled.filters.is_empty());
+
+    // The OTIO metadata carry the effects as JSON.
+    let mut json = serde_json::to_value(&stack).unwrap();
+    json["title"]["shadow"] = serde_json::json!({
+        "enabled": true, "color": color, "offset": [3.0, -4.0],
+        "grow": 2.0, "blur": 5.0, "opacity": 50.0,
+    });
+    let from_json: EffectStack = serde_json::from_value(json).unwrap();
+    assert_eq!(from_json.filters, [expected]);
+}

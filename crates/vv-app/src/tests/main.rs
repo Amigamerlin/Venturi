@@ -2235,13 +2235,16 @@ fn title_edit_only_carries_the_changed_fields_to_other_clips() {
     assert_eq!(merged.content, "Altro");
     assert_eq!(merged.size, 40.0);
 
-    // Inside the shadow, only the touched field.
+    // Inside the background, only the touched field.
     let mut after = before.clone();
-    after.shadow.blur = 30.0;
+    after.background.width = 0.5;
     let mut other = before.clone();
-    other.shadow.opacity = 10.0;
+    other.background.opacity = 10.0;
     let merged = apply_title_edit(&other, &before, &after);
-    assert_eq!((merged.shadow.blur, merged.shadow.opacity), (30.0, 10.0));
+    assert_eq!(
+        (merged.background.width, merged.background.opacity),
+        (0.5, 10.0)
+    );
 }
 
 #[test]

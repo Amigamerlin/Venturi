@@ -9,7 +9,7 @@ use super::generator;
 use super::resolve::{self, Scale};
 use super::{MeasureTitle, OtioError};
 use crate::model::{
-    Clip, ClipSource, FrameIdx, Project, Rational, Rgba, TimelineId, Track, TrackKind,
+    Clip, ClipSource, FilterKind, FrameIdx, Project, Rational, Rgba, TimelineId, Track, TrackKind,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -174,7 +174,16 @@ fn clip_to_otio(
         }
         ClipSource::Text => {
             let title = clip.effects.title.clone().unwrap_or_default();
-            ("Text".to_owned(), generator::text(&title, frame, measure))
+            let shadow = clip
+                .effects
+                .filters
+                .iter()
+                .find(|f| f.enabled && f.kind == FilterKind::DropShadow)
+                .map(|f| f.value_at(clip.source_in()));
+            (
+                "Text".to_owned(),
+                generator::text(&title, shadow, frame, measure),
+            )
         }
         ClipSource::Adjustment => ("Adjustment Clip".to_owned(), missing_reference()),
     };

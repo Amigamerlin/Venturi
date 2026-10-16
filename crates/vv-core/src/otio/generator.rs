@@ -7,7 +7,10 @@
 //! are ours in timeline pixels become fractions of the frame.
 
 use super::MeasureTitle;
-use crate::model::{HAnchor, Rgba, TextAlign, TitleBackground, TitleParams, TitleShadow, VAnchor};
+use crate::model::{
+    ClipFilter, FilterKind, FilterValue, HAnchor, Keyframed, Rgba, TextAlign, TitleBackground,
+    TitleParams, VAnchor,
+};
 use serde_json::{Value, json};
 
 pub(super) fn solid_color(color: Rgba) -> Value {
@@ -28,13 +31,20 @@ pub(super) fn solid_color(color: Rgba) -> Value {
     )
 }
 
-pub(super) fn text(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> Value {
+/// `shadow`: the clip's Drop Shadow filter, which Resolve keeps in the
+/// generator.
+pub(super) fn text(
+    title: &TitleParams,
+    shadow: Option<FilterValue>,
+    frame: (f32, f32),
+    measure: Option<MeasureTitle>,
+) -> Value {
     reference(
         "Text",
         "Rich",
         json!([
             rich_text(title, frame),
-            drop_shadow(&title.shadow, frame),
+            drop_shadow(shadow, frame),
             stroke(),
             background(title, frame, measure),
         ]),
@@ -75,13 +85,15 @@ fn rich_text(title: &TitleParams, frame: (f32, f32)) -> Value {
     )
 }
 
-fn drop_shadow(shadow: &TitleShadow, frame: (f32, f32)) -> Value {
+fn drop_shadow(shadow: Option<FilterValue>, frame: (f32, f32)) -> Value {
+    let enabled = shadow.is_some();
+    let shadow = shadow.unwrap_or(FilterValue::new(FilterKind::DropShadow));
     block(
         "Drop Shadow",
         "Drop Shadow",
         8,
         1,
-        shadow.enabled,
+        enabled,
         json!([
             parameter("shadow color", hex(shadow.color), json!("#000000"), "Color"),
             point(
@@ -91,13 +103,13 @@ fn drop_shadow(shadow: &TitleShadow, frame: (f32, f32)) -> Value {
             ),
             animatable(
                 "shadow",
-                json!(shadow.blur.round() as i64),
+                json!(shadow.radius.round() as i64),
                 json!(20),
                 [1.0, 100.0]
             ),
             animatable(
                 "shadow opacity",
-                json!(shadow.opacity.round() as i64),
+                json!(shadow.amount.round() as i64),
                 json!(75),
                 [0.0, 100.0]
             ),
@@ -403,22 +415,22 @@ pub(super) fn read_solid_color(reference: &Value) -> Option<Rgba> {
 }
 
 /// The title of a `Rich` generator, with what we cannot read left at its
-/// default.
+/// default, and its shadow as a Drop Shadow filter.
 pub(super) fn read_text(
     reference: &Value,
     frame: (f32, f32),
     measure: Option<MeasureTitle>,
-) -> TitleParams {
+) -> (TitleParams, Option<ClipFilter>) {
     let mut title = TitleParams::default();
+    let mut shadow = None;
     for block in blocks(reference) {
         let enabled = block["Enabled"] != false;
         match block["Effect Name"].as_str().unwrap_or("") {
             "Rich Text" => {
                 read_rich_text(&block, &mut title, frame);
             }
-            "Drop Shadow" => {
-                title.shadow.enabled = enabled;
-                read_shadow(&block, &mut title.shadow, frame);
+            "Drop Shadow" if enabled => {
+                shadow = Some(read_shadow(&block, frame));
             }
             "Background" => {
                 title.background.enabled = enabled;
@@ -432,7 +444,7 @@ pub(super) fn read_text(
     let box_size = rectangle(&title, frame, measure);
     title.background.corner_radius =
         corner_radius_from_resolve(title.background.corner_radius, box_size, frame.1);
-    title
+    (title, shadow)
 }
 
 fn read_rich_text(block: &Value, title: &mut TitleParams, frame: (f32, f32)) {
@@ -453,19 +465,21 @@ fn read_rich_text(block: &Value, title: &mut TitleParams, frame: (f32, f32)) {
     }
 }
 
-fn read_shadow(block: &Value, shadow: &mut TitleShadow, frame: (f32, f32)) {
+fn read_shadow(block: &Value, frame: (f32, f32)) -> ClipFilter {
+    let mut shadow = ClipFilter::new(FilterKind::DropShadow);
     if let Some(color) = value_of(block, "shadow color").and_then(|v| read_hex(&v)) {
         shadow.color = color;
     }
     if let Some(offset) = value_of(block, "shadow offset").and_then(read_point) {
-        shadow.offset = [offset[0] * frame.0, offset[1] * frame.1];
+        shadow.offset = [offset[0] * frame.0, offset[1] * frame.1].map(Keyframed::constant);
     }
     if let Some(blur) = value_of(block, "shadow").and_then(|v| v.as_f64()) {
-        shadow.blur = blur as f32;
+        shadow.radius = Keyframed::constant(blur as f32);
     }
     if let Some(opacity) = value_of(block, "shadow opacity").and_then(|v| v.as_f64()) {
-        shadow.opacity = opacity as f32;
+        shadow.amount = Keyframed::constant(opacity as f32);
     }
+    shadow
 }
 
 fn read_background(block: &Value, background: &mut TitleBackground, frame: (f32, f32)) {

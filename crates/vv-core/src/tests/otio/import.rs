@@ -219,6 +219,19 @@ fn reads_back_the_generators_without_our_metadata() {
         ..Default::default()
     };
     text.effects.title = Some(title.clone());
+    let shadow = crate::model::ClipFilter {
+        radius: Keyframed::constant(12.0),
+        amount: Keyframed::constant(60.0),
+        offset: [19.2, -21.6].map(Keyframed::constant),
+        color: Rgba {
+            r: 0.2,
+            g: 0.4,
+            b: 0.6,
+            a: 1.0,
+        },
+        ..crate::model::ClipFilter::new(crate::model::FilterKind::DropShadow)
+    };
+    text.effects.filters = vec![shadow.clone()];
     project.timelines[timeline_id].tracks[0].clips.push(color);
     project.timelines[timeline_id].tracks[1].clips.push(text);
 
@@ -260,6 +273,14 @@ fn reads_back_the_generators_without_our_metadata() {
         "the radius comes back in our units: {}",
         back.background.corner_radius
     );
+
+    let filters = &tl.tracks[1].clips[0].effects.filters;
+    assert_eq!(filters.len(), 1, "the shadow, from Resolve's own block");
+    let back = filters[0].value_at(0);
+    let sent = shadow.value_at(0);
+    assert_eq!((back.radius, back.amount), (sent.radius, sent.amount));
+    assert!((back.offset[0] - 19.2).abs() < 0.01 && (back.offset[1] + 21.6).abs() < 0.01);
+    assert!((back.color.b - sent.color.b).abs() < 1.0 / 255.0);
 }
 
 /// Resolve marks an adjustment clip only with a parameterless effect of

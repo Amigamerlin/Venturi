@@ -864,6 +864,8 @@ pub enum FontCase {
 
 /// Parameters of a `ClipSource::Text` clip. The measures are in timeline
 /// pixels, like those of the `Transform`.
+/// Loaded through `StoredTitle`: a new field goes there too, with the same
+/// serde attributes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleParams {
     pub content: String,
@@ -887,38 +889,92 @@ pub struct TitleParams {
     /// From the center of the frame, Y upwards.
     pub position: [f32; 2],
     #[serde(default)]
-    pub shadow: TitleShadow,
-    #[serde(default)]
     pub background: TitleBackground,
 }
 
-/// Shadow of the text alone.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TitleShadow {
-    pub enabled: bool,
-    pub color: Rgba,
-    /// In timeline pixels, Y upwards.
-    pub offset: [f32; 2],
-    /// How much the shadow is thickened around the text before the blur, in
-    /// timeline pixels.
+/// The shadow titles had before the Drop Shadow filter, which replaces it
+/// on load (see `StoredEffectStack`).
+#[derive(Deserialize)]
+struct StoredTitleShadow {
+    enabled: bool,
+    color: Rgba,
+    offset: [f32; 2],
     #[serde(default)]
-    pub grow: f32,
-    /// Blur radius, in timeline pixels.
-    pub blur: f32,
-    /// 0-100.
-    pub opacity: f32,
+    grow: f32,
+    blur: f32,
+    opacity: f32,
 }
 
-impl Default for TitleShadow {
+impl Default for StoredTitleShadow {
     fn default() -> Self {
         Self {
             enabled: false,
             color: Rgba::BLACK,
-            offset: [8.0, -8.0],
+            offset: [0.0; 2],
             grow: 0.0,
-            blur: 6.0,
-            opacity: 75.0,
+            blur: 0.0,
+            opacity: 0.0,
         }
+    }
+}
+
+impl StoredTitleShadow {
+    fn into_filter(self) -> ClipFilter {
+        ClipFilter {
+            radius: Keyframed::constant(self.blur),
+            amount: Keyframed::constant(self.opacity),
+            offset: self.offset.map(Keyframed::constant),
+            grow: Keyframed::constant(self.grow),
+            color: self.color,
+            ..ClipFilter::new(FilterKind::DropShadow)
+        }
+    }
+}
+
+/// `TitleParams` as saved, with the old shadow (`serde(flatten)` would
+/// want RON's map syntax).
+#[derive(Deserialize)]
+struct StoredTitle {
+    content: String,
+    font_family: String,
+    font_weight: u16,
+    italic: bool,
+    color: Rgba,
+    size: f32,
+    tracking: f32,
+    line_spacing: f32,
+    underline: bool,
+    strikethrough: bool,
+    case: FontCase,
+    align: TextAlign,
+    anchor: (HAnchor, VAnchor),
+    position: [f32; 2],
+    #[serde(default)]
+    shadow: StoredTitleShadow,
+    #[serde(default)]
+    background: TitleBackground,
+}
+
+impl StoredTitle {
+    fn split(self) -> (TitleParams, StoredTitleShadow) {
+        let title = TitleParams {
+            content: self.content,
+            font_family: self.font_family,
+            font_weight: self.font_weight,
+            italic: self.italic,
+            color: self.color,
+            size: self.size,
+            tracking: self.tracking,
+            line_spacing: self.line_spacing,
+            underline: self.underline,
+            strikethrough: self.strikethrough,
+            case: self.case,
+            align: self.align,
+            anchor: self.anchor,
+            position: self.position,
+            background: self.background,
+        };
+        (title, self.shadow)
     }
 }
 
@@ -974,7 +1030,6 @@ impl Default for TitleParams {
             align: TextAlign::Center,
             anchor: (HAnchor::Center, VAnchor::Middle),
             position: [0.0, 0.0],
-            shadow: TitleShadow::default(),
             background: TitleBackground::default(),
         }
     }
@@ -1433,6 +1488,7 @@ impl BlendMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "StoredEffectStack")]
 pub struct EffectStack {
     pub transform: TransformTracks,
     pub gain_db: Keyframed<f32>,
@@ -1452,6 +1508,49 @@ pub struct EffectStack {
     pub blend_mode: BlendMode,
     #[serde(default)]
     pub masks: Vec<crate::mask::ClipMask>,
+}
+
+/// `EffectStack` as saved, older files included.
+#[derive(Deserialize)]
+struct StoredEffectStack {
+    transform: TransformTracks,
+    gain_db: Keyframed<f32>,
+    color: Option<Keyframed<Rgba>>,
+    #[serde(default)]
+    title: Option<StoredTitle>,
+    #[serde(default)]
+    filters: Vec<ClipFilter>,
+    #[serde(default)]
+    transition_in: Option<Transition>,
+    #[serde(default)]
+    transition_out: Option<Transition>,
+    #[serde(default)]
+    blend_mode: BlendMode,
+    #[serde(default)]
+    masks: Vec<crate::mask::ClipMask>,
+}
+
+impl From<StoredEffectStack> for EffectStack {
+    fn from(stored: StoredEffectStack) -> Self {
+        let mut filters = stored.filters;
+        let (title, shadow) = stored.title.map(StoredTitle::split).unzip();
+        if let Some(shadow) = shadow.filter(|s| s.enabled)
+            && !filters.iter().any(|f| f.kind == FilterKind::DropShadow)
+        {
+            filters.push(shadow.into_filter());
+        }
+        Self {
+            transform: stored.transform,
+            gain_db: stored.gain_db,
+            color: stored.color,
+            title,
+            filters,
+            transition_in: stored.transition_in,
+            transition_out: stored.transition_out,
+            blend_mode: stored.blend_mode,
+            masks: stored.masks,
+        }
+    }
 }
 
 impl Default for EffectStack {

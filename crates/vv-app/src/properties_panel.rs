@@ -440,46 +440,6 @@ pub(crate) fn title_editor(
         }
 
         ui.add_space(8.0);
-        let shadow = &mut title.shadow;
-        if title_section_header(ui, &t!("props.drop_shadow"), &mut shadow.enabled) {
-            *shadow = vv_core::TitleShadow {
-                enabled: shadow.enabled,
-                ..Default::default()
-            };
-        }
-        if shadow.enabled {
-            let d = vv_core::TitleShadow::default();
-            if color_row(ui, &t!("props.color"), &mut shadow.color).reset {
-                shadow.color = d.color;
-            }
-            let row = param_row(ui, &t!("props.offset"), None, |ui| {
-                axis_field(ui, "X", &mut shadow.offset[0], 0.5, 1, -frame_w..=frame_w)
-                    | axis_field(ui, "Y", &mut shadow.offset[1], 0.5, 1, -frame_h..=frame_h)
-            });
-            if row.reset {
-                shadow.offset = d.offset;
-            }
-            for (label, value, default, range) in [
-                (t!("props.grow"), &mut shadow.grow, d.grow, 0.0..=100.0),
-                (t!("props.blur"), &mut shadow.blur, d.blur, 0.0..=200.0),
-                (
-                    t!("props.opacity"),
-                    &mut shadow.opacity,
-                    d.opacity,
-                    0.0..=100.0,
-                ),
-            ] {
-                if param_row(ui, &label, None, |ui| {
-                    slider_field(ui, value, range, 0.5, 0)
-                })
-                .reset
-                {
-                    *value = default;
-                }
-            }
-        }
-
-        ui.add_space(8.0);
         let bg = &mut title.background;
         if title_section_header(ui, &t!("props.background"), &mut bg.enabled) {
             *bg = vv_core::TitleBackground {
@@ -625,7 +585,6 @@ pub(crate) fn apply_title_edit(
             })*
         };
     }
-    copy_changed!(shadow: enabled, color, offset, grow, blur, opacity);
     copy_changed!(
         background: enabled,
         color,
@@ -784,6 +743,32 @@ fn keyframe_group_size(ui: &egui::Ui) -> egui::Vec2 {
         KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_TOGGLE_SIZE.x + spacing * 2.0,
         KEYFRAME_TOGGLE_SIZE.y,
     )
+}
+
+/// Adds a `kind` filter to the `targets` without one, or (`on` false)
+/// removes it from those that have it.
+pub(crate) fn toggle_filter_commands(
+    tl: Option<&vv_core::Timeline>,
+    targets: &[PanelTarget],
+    kind: vv_core::FilterKind,
+    on: bool,
+) -> Vec<BoxedCommand> {
+    targets
+        .iter()
+        .filter_map(|t| {
+            let effects = target_effects(tl, t)?;
+            if effects.filters.iter().any(|f| f.kind == kind) == on {
+                return None;
+            }
+            let mut filters = effects.filters.clone();
+            if on {
+                filters.push(vv_core::ClipFilter::new(kind));
+            } else {
+                filters.retain(|f| f.kind != kind);
+            }
+            Some(set_filters((t.timeline, t.track_index, t.clip_id), filters))
+        })
+        .collect()
 }
 
 /// The effects of a clip targeted by the panel.
@@ -1734,6 +1719,16 @@ impl VenturiApp {
                                                     };
                                                     pending_effects.push(set_title((t.timeline, t.track_index, t.clip_id), apply_title_edit(current, &before, &title)));
                                                 }
+                                            }
+                                            // A shortcut to the filter, edited in its section below.
+                                            ui.add_space(8.0);
+                                            let had_shadow = info.filters.iter().any(|f| f.kind == vv_core::FilterKind::DropShadow);
+                                            let mut shadow = had_shadow;
+                                            title_section_header(ui, &t!("props.drop_shadow"), &mut shadow);
+                                            if shadow != had_shadow {
+                                                let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
+                                                let titles: Vec<_> = targets.iter().filter(|t| t.is_text).cloned().collect();
+                                                pending_effects.extend(toggle_filter_commands(tl, &titles, vv_core::FilterKind::DropShadow, shadow));
                                             }
                                             ui.add_space(6.0);
                                     }
