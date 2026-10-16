@@ -1475,6 +1475,8 @@ impl VenturiApp {
                     offset: [f.offset[0].value_at(frame), f.offset[1].value_at(frame)],
                     offset_key: RowKeyframe::of(&f.offset[0], frame, in_clip)
                         .merge(RowKeyframe::of(&f.offset[1], frame, in_clip)),
+                    grow: f.grow.value_at(frame),
+                    grow_key: RowKeyframe::of(&f.grow, frame, in_clip),
                     color: f.color,
                 })
                 .collect(),
@@ -2132,6 +2134,7 @@ impl VenturiApp {
                                                     let mut reset_direction = reset;
                                                     let mut reset_amount = reset;
                                                     let mut reset_offset = reset;
+                                                    let mut reset_grow = reset;
                                                     let mut reset_color = reset;
                                                     let mut new_color = None;
                                                     let mut keyframes: Vec<(KeyframeEdit, vv_core::KeyframeTarget)> = Vec::new();
@@ -2217,7 +2220,8 @@ impl VenturiApp {
                                                             axis_field(ui, "X", &mut offset[0], 0.5, 1, -frame_w..=frame_w)
                                                                 | axis_field(ui, "Y", &mut offset[1], 0.5, 1, -frame_h..=frame_h)
                                                         });
-                                                        for (axis, (&value, &before)) in offset.iter().zip(&filter.offset).enumerate() {
+                                                        for axis in vv_core::Axis::ALL {
+                                                            let (value, before) = (offset[axis.index()], filter.offset[axis.index()]);
                                                             let target = vv_core::KeyframeTarget::FilterOffset(kind, axis);
                                                             if row.changed && value != before {
                                                                 keyframes.push((KeyframeEdit::Set(vv_core::KeyframeValue::FilterOffset(kind, axis, value)), target));
@@ -2229,28 +2233,21 @@ impl VenturiApp {
                                                         reset_offset |= row.reset;
                                                         goto = goto.or(row.goto);
 
-                                                        for (label, value, key, max, is_radius) in [
-                                                            (t!("props.softness"), filter.radius, filter.radius_key, vv_core::BLUR_RADIUS_MAX, true),
-                                                            (t!("props.opacity"), filter.amount, filter.amount_key, 100.0, false),
+                                                        for (label, value, key, max, set, reset) in [
+                                                            (t!("props.grow"), filter.grow, filter.grow_key, vv_core::SHADOW_GROW_MAX, vv_core::KeyframeValue::FilterGrow as fn(_, _) -> _, &mut reset_grow),
+                                                            (t!("props.softness"), filter.radius, filter.radius_key, vv_core::BLUR_RADIUS_MAX, vv_core::KeyframeValue::FilterRadius, &mut reset_radius),
+                                                            (t!("props.opacity"), filter.amount, filter.amount_key, 100.0, vv_core::KeyframeValue::FilterAmount, &mut reset_amount),
                                                         ] {
                                                             let mut value = value;
                                                             let row = param_row(ui, &label, Some(key), |ui| slider_field(ui, &mut value, 0.0..=max, 0.5, 1));
-                                                            let (set, target) = if is_radius {
-                                                                (vv_core::KeyframeValue::FilterRadius(kind, value), vv_core::KeyframeTarget::FilterRadius(kind))
-                                                            } else {
-                                                                (vv_core::KeyframeValue::FilterAmount(kind, value), vv_core::KeyframeTarget::FilterAmount(kind))
-                                                            };
+                                                            let set = set(kind, value);
                                                             if row.changed {
-                                                                keyframes.push((KeyframeEdit::Set(set), target));
+                                                                keyframes.push((KeyframeEdit::Set(set), set.target()));
                                                             }
                                                             if row.toggled_keyframe {
-                                                                keyframes.push((KeyframeEdit::Toggle(key.on_keyframe), target));
+                                                                keyframes.push((KeyframeEdit::Toggle(key.on_keyframe), set.target()));
                                                             }
-                                                            if is_radius {
-                                                                reset_radius |= row.reset;
-                                                            } else {
-                                                                reset_amount |= row.reset;
-                                                            }
+                                                            *reset |= row.reset;
                                                             goto = goto.or(row.goto);
                                                         }
                                                     }
@@ -2282,6 +2279,7 @@ impl VenturiApp {
                                                         && !reset_direction
                                                         && !reset_amount
                                                         && !reset_offset
+                                                        && !reset_grow
                                                         && !reset_color
                                                         && new_color.is_none()
                                                         && keyframes.is_empty()
@@ -2319,6 +2317,9 @@ impl VenturiApp {
                                                         if reset_offset {
                                                             own.offset = defaults.offset.clone();
                                                         }
+                                                        if reset_grow {
+                                                            own.grow = defaults.grow.clone();
+                                                        }
                                                         if reset_color {
                                                             own.color = defaults.color;
                                                         }
@@ -2339,8 +2340,11 @@ impl VenturiApp {
                                                                 KeyframeEdit::Set(vv_core::KeyframeValue::FilterAmount(_, v)) if own.amount.is_constant() => {
                                                                     own.amount.default = v;
                                                                 }
-                                                                KeyframeEdit::Set(vv_core::KeyframeValue::FilterOffset(_, axis, v)) if own.offset[axis].is_constant() => {
-                                                                    own.offset[axis].default = v;
+                                                                KeyframeEdit::Set(vv_core::KeyframeValue::FilterOffset(_, axis, v)) if own.offset[axis.index()].is_constant() => {
+                                                                    own.offset[axis.index()].default = v;
+                                                                }
+                                                                KeyframeEdit::Set(vv_core::KeyframeValue::FilterGrow(_, v)) if own.grow.is_constant() => {
+                                                                    own.grow.default = v;
                                                                 }
                                                                 KeyframeEdit::Set(value) => {
                                                                     pending_keyframes.push(upsert_keyframe(clip_ref, t.source_frame, value));
@@ -2357,7 +2361,10 @@ impl VenturiApp {
                                                                             vv_core::KeyframeValue::FilterAmount(kind, own.amount.value_at(t.source_frame))
                                                                         }
                                                                         vv_core::KeyframeTarget::FilterOffset(_, axis) => {
-                                                                            vv_core::KeyframeValue::FilterOffset(kind, *axis, own.offset[*axis].value_at(t.source_frame))
+                                                                            vv_core::KeyframeValue::FilterOffset(kind, *axis, own.offset[axis.index()].value_at(t.source_frame))
+                                                                        }
+                                                                        vv_core::KeyframeTarget::FilterGrow(_) => {
+                                                                            vv_core::KeyframeValue::FilterGrow(kind, own.grow.value_at(t.source_frame))
                                                                         }
                                                                         _ => vv_core::KeyframeValue::FilterDirection(kind, own.direction.value_at(t.source_frame)),
                                                                     };

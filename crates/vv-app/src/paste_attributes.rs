@@ -498,6 +498,7 @@ fn merged_attributes(
                             direction: remap.apply(&f.direction),
                             amount: remap.apply(&f.amount),
                             offset: f.offset.each_ref().map(|t| remap.apply(t)),
+                            grow: remap.apply(&f.grow),
                             ..f.clone()
                         };
                         for track in filter.grade.tracks_mut() {

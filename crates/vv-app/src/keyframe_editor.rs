@@ -138,10 +138,13 @@ fn rows(effects: &EffectStack) -> Vec<KeyframeTarget> {
         if !filter.amount.is_constant() {
             rows.push(KeyframeTarget::FilterAmount(filter.kind));
         }
-        for (axis, track) in filter.offset.iter().enumerate() {
+        for (axis, track) in vv_core::Axis::ALL.into_iter().zip(&filter.offset) {
             if !track.is_constant() {
                 rows.push(KeyframeTarget::FilterOffset(filter.kind, axis));
             }
+        }
+        if !filter.grow.is_constant() {
+            rows.push(KeyframeTarget::FilterGrow(filter.kind));
         }
         if filter.kind.has_grade() {
             for param in vv_core::GradeParam::ALL {
@@ -210,7 +213,16 @@ fn frames_of(effects: &EffectStack, target: KeyframeTarget) -> Vec<FrameIdx> {
             .map(|f| f.amount.keyframes().iter().map(|k| k.0).collect())
             .unwrap_or_default(),
         KeyframeTarget::FilterOffset(kind, axis) => filter(effects, kind)
-            .map(|f| f.offset[axis].keyframes().iter().map(|k| k.0).collect())
+            .map(|f| {
+                f.offset[axis.index()]
+                    .keyframes()
+                    .iter()
+                    .map(|k| k.0)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        KeyframeTarget::FilterGrow(kind) => filter(effects, kind)
+            .map(|f| f.grow.keyframes().iter().map(|k| k.0).collect())
             .unwrap_or_default(),
         KeyframeTarget::Grade(param) => grade_track(effects, param)
             .map(|k| k.keyframes().iter().map(|k| k.0).collect())
@@ -234,8 +246,9 @@ fn scalar_at(
         KeyframeTarget::FilterRadius(kind) => filter(effects, kind)?.radius.keyframe_at(frame),
         KeyframeTarget::FilterAmount(kind) => filter(effects, kind)?.amount.keyframe_at(frame),
         KeyframeTarget::FilterOffset(kind, axis) => {
-            filter(effects, kind)?.offset[axis].keyframe_at(frame)
+            filter(effects, kind)?.offset[axis.index()].keyframe_at(frame)
         }
+        KeyframeTarget::FilterGrow(kind) => filter(effects, kind)?.grow.keyframe_at(frame),
         KeyframeTarget::Grade(param) => grade_track(effects, param)?.keyframe_at(frame),
         KeyframeTarget::Mask(index, param) => mask_track(effects, index, param)?.keyframe_at(frame),
         KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => None,
@@ -257,7 +270,10 @@ fn scalar_keyframes(
             .map(|f| f.amount.keyframes().to_vec())
             .unwrap_or_default(),
         KeyframeTarget::FilterOffset(kind, axis) => filter(effects, kind)
-            .map(|f| f.offset[axis].keyframes().to_vec())
+            .map(|f| f.offset[axis.index()].keyframes().to_vec())
+            .unwrap_or_default(),
+        KeyframeTarget::FilterGrow(kind) => filter(effects, kind)
+            .map(|f| f.grow.keyframes().to_vec())
             .unwrap_or_default(),
         KeyframeTarget::Grade(param) => grade_track(effects, param)
             .map(|k| k.keyframes().to_vec())
@@ -293,8 +309,9 @@ fn scalar_value_at(effects: &EffectStack, target: KeyframeTarget, frame: FrameId
         KeyframeTarget::FilterRadius(kind) => Some(filter(effects, kind)?.radius.value_at(frame)),
         KeyframeTarget::FilterAmount(kind) => Some(filter(effects, kind)?.amount.value_at(frame)),
         KeyframeTarget::FilterOffset(kind, axis) => {
-            Some(filter(effects, kind)?.offset[axis].value_at(frame))
+            Some(filter(effects, kind)?.offset[axis.index()].value_at(frame))
         }
+        KeyframeTarget::FilterGrow(kind) => Some(filter(effects, kind)?.grow.value_at(frame)),
         KeyframeTarget::Grade(param) => Some(grade_track(effects, param)?.value_at(frame)),
         KeyframeTarget::Mask(index, param) => {
             Some(mask_track(effects, index, param)?.value_at(frame))
@@ -348,7 +365,12 @@ fn target_label(target: KeyframeTarget) -> String {
             "{} {} {}",
             crate::timeline_ui::filter_label(kind),
             t!("props.offset"),
-            ["X", "Y"][axis]
+            axis.label()
+        ),
+        KeyframeTarget::FilterGrow(kind) => format!(
+            "{} {}",
+            crate::timeline_ui::filter_label(kind),
+            t!("props.grow")
         ),
         KeyframeTarget::Grade(param) => crate::grade_panel::grade_param_label(param),
         KeyframeTarget::Mask(index, param) => format!(
@@ -1045,6 +1067,7 @@ fn keyframe_value(target: KeyframeTarget, value: f32) -> vv_core::KeyframeValue 
         KeyframeTarget::FilterOffset(kind, axis) => {
             vv_core::KeyframeValue::FilterOffset(kind, axis, value)
         }
+        KeyframeTarget::FilterGrow(kind) => vv_core::KeyframeValue::FilterGrow(kind, value),
         KeyframeTarget::Grade(param) => vv_core::KeyframeValue::Grade(param, value),
         KeyframeTarget::Mask(index, param) => vv_core::KeyframeValue::Mask(index, param, value),
         // Without a curve one does not get here: they are edited from the Properties panel.

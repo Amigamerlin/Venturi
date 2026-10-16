@@ -1054,9 +1054,33 @@ impl FilterKind {
 pub const EXPOSURE_MIN: f32 = -20.0;
 pub const EXPOSURE_MAX: f32 = 20.0;
 
+/// Index of `ClipFilter::offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Axis {
+    X,
+    Y,
+}
+
+impl Axis {
+    pub const ALL: [Self; 2] = [Self::X, Self::Y];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+        }
+    }
+}
+
 /// Defaults of a `DropShadow` filter.
 pub const DEFAULT_SHADOW_OFFSET: [f32; 2] = [10.0, -10.0];
 pub const DEFAULT_SHADOW_OPACITY: f32 = 75.0;
+/// Bound of `ClipFilter::grow`, in timeline pixels.
+pub const SHADOW_GROW_MAX: f32 = 100.0;
 
 /// Bounds of `ClipFilter::radius`, in timeline pixels.
 pub const BLUR_RADIUS_MAX: f32 = 250.0;
@@ -1117,6 +1141,9 @@ pub struct ClipFilter {
     pub grade: GradeTracks,
     /// Drop shadow only: in timeline pixels, Y upwards.
     pub offset: [Keyframed<f32>; 2],
+    /// Drop shadow only: how much it is thickened before the softness, in
+    /// timeline pixels.
+    pub grow: Keyframed<f32>,
     /// Drop shadow only.
     pub color: Rgba,
 }
@@ -1136,12 +1163,18 @@ struct StoredClipFilter {
     grade: GradeTracks,
     #[serde(default = "default_shadow_offset")]
     offset: [Keyframed<f32>; 2],
+    #[serde(default = "default_shadow_grow")]
+    grow: Keyframed<f32>,
     #[serde(default = "default_shadow_color")]
     color: Rgba,
 }
 
 fn default_shadow_offset() -> [Keyframed<f32>; 2] {
     DEFAULT_SHADOW_OFFSET.map(Keyframed::constant)
+}
+
+fn default_shadow_grow() -> Keyframed<f32> {
+    Keyframed::constant(0.0)
 }
 
 fn default_shadow_color() -> Rgba {
@@ -1181,6 +1214,7 @@ impl From<StoredClipFilter> for ClipFilter {
             amount: stored.amount,
             grade,
             offset: stored.offset,
+            grow: stored.grow,
             color: stored.color,
         }
     }
@@ -1199,6 +1233,7 @@ pub struct FilterValue {
     pub amount: f32,
     pub grade: GradeValue,
     pub offset: [f32; 2],
+    pub grow: f32,
     pub color: Rgba,
 }
 
@@ -1211,6 +1246,7 @@ impl FilterValue {
             amount: default_amount(kind),
             grade: GradeValue::NEUTRAL,
             offset: DEFAULT_SHADOW_OFFSET,
+            grow: 0.0,
             color: Rgba::BLACK,
         }
     }
@@ -1233,6 +1269,7 @@ impl ClipFilter {
             amount: Keyframed::constant(default_amount(kind)),
             grade: GradeTracks::default(),
             offset: default_shadow_offset(),
+            grow: default_shadow_grow(),
             color: Rgba::BLACK,
         }
     }
@@ -1248,6 +1285,7 @@ impl ClipFilter {
                 self.offset[0].value_at(frame),
                 self.offset[1].value_at(frame),
             ],
+            grow: self.grow.value_at(frame),
             color: self.color,
         }
     }
@@ -1513,6 +1551,7 @@ impl EffectStack {
             f(&mut filter.radius);
             f(&mut filter.amount);
             filter.offset.iter_mut().for_each(&mut f);
+            f(&mut filter.grow);
             filter.grade.tracks_mut().for_each(&mut f);
         }
         for mask in &mut self.masks {

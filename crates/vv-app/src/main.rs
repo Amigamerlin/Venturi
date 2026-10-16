@@ -215,6 +215,8 @@ struct FilterPanelInfo {
     offset: [f32; 2],
     /// Of both axes, edited in one row.
     offset_key: RowKeyframe,
+    grow: f32,
+    grow_key: RowKeyframe,
     color: vv_core::Rgba,
 }
 
