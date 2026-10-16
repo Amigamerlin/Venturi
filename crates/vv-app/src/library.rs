@@ -51,6 +51,11 @@ impl Asset {
     pub fn item(&self) -> Option<&MediaItem> {
         self.payload.media_items().next()
     }
+
+    /// Whether a file it needs, also inside a compound clip, is gone.
+    pub fn is_offline(&self) -> bool {
+        self.payload.files().any(|f| !f.path.is_file())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -247,6 +252,35 @@ impl Library {
         }
     }
 
+    pub fn media_dir(&self) -> Option<PathBuf> {
+        self.root.as_ref().map(|root| root.join("media"))
+    }
+
+    /// Looks for the missing files of the asset under `base_dir`, by name,
+    /// and copies them in. Returns how many are still missing.
+    pub fn relink_asset(&mut self, id: &str, base_dir: &Path) -> Result<usize, String> {
+        let Some(media_dir) = self.media_dir() else {
+            return Ok(0);
+        };
+        let Some(index) = self.assets.iter().position(|a| a.id == id) else {
+            return Ok(0);
+        };
+        let mut missing = 0;
+        for item in self.assets[index].payload.files_mut() {
+            if item.path.is_file() {
+                continue;
+            }
+            match find_file(base_dir, &original_name(&item.path)?) {
+                Some(found) => {
+                    item.path = copy_to_media(&media_dir, &found, item.content_hash)?;
+                }
+                None => missing += 1,
+            }
+        }
+        self.save_asset(&self.assets[index])?;
+        Ok(missing)
+    }
+
     pub fn folder(&self, id: &str) -> Option<&LibraryFolder> {
         self.folders.iter().find(|f| f.id == id)
     }
@@ -399,34 +433,101 @@ impl Library {
     }
 }
 
-/// Copies each file into `media/<content hash>/`, so two assets sharing a
-/// file share the copy and the file keeps its name in the projects.
+/// Copies each file into `media/`. A missing file fails the whole asset:
+/// stored, it would only come back offline.
 fn store_asset(root: &Path, mut asset: Asset) -> Result<Asset, String> {
     let media_dir = root.join("media");
-    std::fs::create_dir_all(&media_dir).map_err(|e| e.to_string())?;
     for item in asset.payload.files_mut() {
-        if item.path.starts_with(&media_dir) {
-            continue;
+        if !item.path.is_file() {
+            return Err(t!("library.file_missing", path = item.path.display()).into_owned());
         }
-        let file_name = item
-            .path
-            .file_name()
-            .ok_or_else(|| format!("{}: not a file", item.path.display()))?
-            .to_string_lossy();
-        let dir = media_dir.join(format!("{:016x}", item.content_hash));
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let dest = dir.join(file_name.as_ref());
-        if !dest.exists() {
-            // Through a temporary name: a copy cut short must not look done.
-            let partial = dest.with_extension("partial");
-            std::fs::copy(&item.path, &partial)
-                .map_err(|e| format!("{}: {e}", item.path.display()))?;
-            std::fs::rename(&partial, &dest).map_err(|e| e.to_string())?;
+        if !item.path.starts_with(&media_dir) {
+            item.path = copy_to_media(&media_dir, &item.path, item.content_hash)?;
         }
-        item.path = dest;
     }
     write_asset(root, &asset)?;
     Ok(asset)
+}
+
+/// Into `media/<content hash>/`, so two assets sharing a file share the
+/// copy and the file keeps its name.
+fn copy_to_media(media_dir: &Path, src: &Path, content_hash: u64) -> Result<PathBuf, String> {
+    let dir = media_dir.join(format!("{content_hash:016x}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(original_name(src)?);
+    if !dest.exists() {
+        copy_file(src, &dest)?;
+    }
+    Ok(dest)
+}
+
+/// Through a temporary name: a copy cut short must not look done.
+fn copy_file(src: &Path, dest: &Path) -> Result<(), String> {
+    let partial = dest.with_extension("partial");
+    std::fs::copy(src, &partial).map_err(|e| format!("{}: {e}", src.display()))?;
+    std::fs::rename(&partial, dest).map_err(|e| e.to_string())
+}
+
+/// The file name without the `<content hash>-` prefix the first library
+/// copies were given.
+fn original_name(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a file", path.display()))?
+        .to_string_lossy();
+    let hashed = name.len() > 17
+        && name.as_bytes()[16] == b'-'
+        && name[..16].bytes().all(|b| b.is_ascii_hexdigit());
+    Ok(if hashed { &name[17..] } else { &name }.to_owned())
+}
+
+/// A copy of a library file in `dir`, for a project: an identical file
+/// already there is reused, a different one with the same name gets
+/// " (2)", " (3)", ... appended.
+pub(crate) fn copy_for_project(src: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let name = original_name(src)?;
+    let size = std::fs::metadata(src)
+        .map_err(|e| format!("{}: {e}", src.display()))?
+        .len();
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
+        _ => (name.clone(), String::new()),
+    };
+    for n in 1.. {
+        let dest = match n {
+            1 => dir.join(&name),
+            n => dir.join(format!("{stem} ({n}){ext}")),
+        };
+        match std::fs::metadata(&dest) {
+            Ok(meta) if meta.len() == size => return Ok(dest),
+            Ok(_) => continue,
+            Err(_) => {
+                copy_file(src, &dest)?;
+                return Ok(dest);
+            }
+        }
+    }
+    unreachable!("infinite candidates")
+}
+
+/// The first file named `name` under `dir`, at any depth.
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut dirs = vec![dir.to_owned()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                dirs.push(path);
+            } else if kind.is_file() && entry.file_name().to_string_lossy() == name {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn write_asset(root: &Path, asset: &Asset) -> Result<(), String> {

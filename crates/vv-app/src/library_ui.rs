@@ -22,12 +22,16 @@ pub(crate) struct LibraryUiState {
     imports: HashMap<(u64, String), Vec<MediaId>>,
     /// Assets whose deletion waits for a confirmation.
     pub confirm_delete: Option<Vec<String>>,
+    /// Whether each asset misses a file: checked once, until `offline` is
+    /// cleared.
+    offline: HashMap<String, bool>,
 }
 
 struct LibraryMenus;
 
 enum LibraryAction {
     AddToProject,
+    Relink(String),
     Delete,
 }
 
@@ -46,6 +50,15 @@ impl PoolMenus<String, String> for LibraryMenus {
             ui.close();
         }
         pool_view::rename_button(ui, entry, out);
+        if matches!(entry.thumb, Thumb::Offline)
+            && ui
+                .button(t!("library.relink"))
+                .on_hover_text(t!("library.relink_hint"))
+                .clicked()
+        {
+            out.push(MenuChoice::Action(LibraryAction::Relink(entry.id.clone())));
+            ui.close();
+        }
         ui.separator();
         ui.menu_button(t!("library.delete"), |ui| {
             if ui.button(t!("library.delete_confirm")).clicked() {
@@ -109,7 +122,55 @@ impl VenturiApp {
             .merge_into(&mut self.session.project, &mut add);
         self.add_pasted_entities(add);
         self.library_ui.imports.insert(key, pasted.media.clone());
+        if let Some(project) = self.session.path().map(Path::to_path_buf) {
+            self.copy_library_media_into_project(&project);
+        }
         pasted.media
+    }
+
+    /// The media the project takes from the library get their own copy in
+    /// `library/` next to `project_file`: the project stays whole in its
+    /// folder, whatever happens to the library. An unsaved project has no
+    /// folder yet: it gets the copies when saved.
+    pub(crate) fn copy_library_media_into_project(&mut self, project_file: &Path) {
+        let (Some(media_dir), Some(project_dir)) =
+            (self.library.media_dir(), project_file.parent())
+        else {
+            return;
+        };
+        let dest = project_dir.join("library");
+        let from_library: Vec<(MediaId, PathBuf)> = self
+            .session
+            .project
+            .media_pool
+            .iter()
+            .filter(|(_, item)| item.compound.is_none() && item.path.starts_with(&media_dir))
+            .map(|(id, item)| (id, item.path.clone()))
+            .collect();
+        for (id, path) in from_library {
+            match library::copy_for_project(&path, &dest) {
+                // Not a command: the file is the same, only where it lives
+                // changes, and an undo must not point back at the library.
+                Ok(copy) => self.session.project.media_pool[id].path = copy,
+                Err(e) => {
+                    self.project_error =
+                        Some(t!("library.project_copy_failed", error = e).into_owned());
+                }
+            }
+        }
+        self.media_pool_state.invalidate_offline();
+    }
+
+    pub(crate) fn relink_library_asset(&mut self, id: &str, base_dir: &Path) {
+        self.library_ui.offline.remove(id);
+        match self.library.relink_asset(id, base_dir) {
+            Ok(0) => self.relink_message = Some(t!("library.relink_done").into_owned()),
+            Ok(missing) => {
+                self.relink_message =
+                    Some(t!("library.relink_partial", missing = missing).into_owned())
+            }
+            Err(e) => self.library_result(Err(e)),
+        }
     }
 
     fn add_library_assets_to_project(&mut self, assets: &[String]) {
@@ -219,16 +280,16 @@ impl VenturiApp {
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
         let pool = &mut self.library_ui.pool;
-        pool.refresh_offline_files(self.library.assets.iter().filter_map(|a| {
-            let item = a.item().filter(|item| item.compound.is_none())?;
-            Some((a.id.clone(), item.path.as_path()))
-        }));
+        let checked = &mut self.library_ui.offline;
+        checked.retain(|id, _| self.library.assets.iter().any(|a| a.id == *id));
         let mut entries = Vec::new();
         for asset in &self.library.assets {
             let Some(item) = asset.item() else {
                 continue;
             };
-            let offline = pool.is_offline(&asset.id);
+            let offline = *checked
+                .entry(asset.id.clone())
+                .or_insert_with(|| asset.is_offline());
             if item.compound.is_none()
                 && item.meta.has_video
                 && !offline
@@ -314,6 +375,10 @@ impl VenturiApp {
                 PoolEvent::Action(LibraryAction::AddToProject) => {
                     self.add_selected_library_assets_to_project()
                 }
+                PoolEvent::Action(LibraryAction::Relink(id)) => self
+                    .spawn_file_dialog(project_io::DialogKind::RelinkLibraryAsset(id), |dlg| {
+                        dlg.pick_folder()
+                    }),
                 PoolEvent::Action(LibraryAction::Delete) => {
                     let selected = self.library_selection();
                     self.remove_library_assets(&selected);
@@ -393,3 +458,7 @@ impl VenturiApp {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/library_ui.rs"]
+mod tests;

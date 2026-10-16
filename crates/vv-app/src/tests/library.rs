@@ -160,3 +160,54 @@ fn removing_a_folder_moves_its_content_up_and_survives_a_reopen() {
     assert_eq!(library.folder(&deepest).unwrap().parent, Some(outer));
     assert!(library.folder(&inner).is_none());
 }
+
+#[test]
+fn an_asset_with_a_missing_file_is_refused() {
+    let root = temp_root("missing");
+    let original = root.join("gone.mp4");
+    let (project, id) = project_with_file(&original, 0x12);
+    std::fs::remove_file(&original).unwrap();
+
+    assert!(store_asset(&root, asset("a", "A", payload(&project, id))).is_err());
+    assert!(Library::open(root).assets.is_empty());
+}
+
+#[test]
+fn relinking_finds_the_missing_files_by_name_and_copies_them_in() {
+    let root = temp_root("relink");
+    let (project, id) = project_with_file(&root.join("music.mp3"), 0x34);
+    store_asset(&root, asset("a", "A", payload(&project, id))).unwrap();
+    let mut library = Library::open(root.clone());
+    let copied = library.assets[0].item().unwrap().path.clone();
+    std::fs::remove_file(&copied).unwrap();
+    assert!(library.assets[0].is_offline());
+    let found = root.join("elsewhere").join("deep");
+    std::fs::create_dir_all(&found).unwrap();
+    std::fs::rename(root.join("music.mp3"), found.join("music.mp3")).unwrap();
+
+    assert_eq!(library.relink_asset("a", &root.join("elsewhere")), Ok(0));
+
+    let library = Library::open(root);
+    assert!(!library.assets[0].is_offline());
+    assert_eq!(library.assets[0].item().unwrap().path, copied);
+}
+
+#[test]
+fn project_copies_reuse_an_identical_file_and_never_overwrite_another() {
+    let root = temp_root("project-copy");
+    let src = root.join("0123456789abcdef-logo.png");
+    std::fs::write(&src, b"logo").unwrap();
+    let dir = root.join("project").join("library");
+
+    let first = copy_for_project(&src, &dir).unwrap();
+    assert_eq!(first, dir.join("logo.png"), "without the hash prefix");
+    assert_eq!(copy_for_project(&src, &dir).unwrap(), first);
+
+    let other = root.join("logo.png");
+    std::fs::write(&other, b"another logo").unwrap();
+    assert_eq!(
+        copy_for_project(&other, &dir).unwrap(),
+        dir.join("logo (2).png")
+    );
+    assert_eq!(std::fs::read(&first).unwrap(), b"logo");
+}

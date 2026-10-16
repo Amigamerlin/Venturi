@@ -123,3 +123,27 @@ preset.edit:
 preset.edit_title:
   en: "Edit preset"
   it: "Modifica preset"
+
+library.file_missing:
+  en: "%{path} is missing: relink it in the project first"
+  it: "%{path} non esiste: ricollegalo prima nel progetto"
+
+library.project_copy_failed:
+  en: "Copying a library file into the project folder: %{error}"
+  it: "Copia di un file della libreria nella cartella del progetto: %{error}"
+
+library.relink:
+  en: "Relink..."
+  it: "Ricollega..."
+
+library.relink_hint:
+  en: "Choose a folder to look for the missing files in, by name"
+  it: "Scegli una cartella in cui cercare per nome i file mancanti"
+
+library.relink_done:
+  en: "All the files of the asset were found and copied into the library"
+  it: "Tutti i file dell'asset sono stati trovati e copiati nella libreria"
+
+library.relink_partial:
+  en: "%{missing} files of the asset are still missing"
+  it: "Mancano ancora %{missing} file dell'asset"
