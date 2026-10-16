@@ -80,17 +80,25 @@ preset.filters_append:
   en: "Add after the clip's filters"
   it: "Aggiungi dopo i filtri della clip"
 
-preset.hotkey:
+preset.shortcut:
   en: "Shortcut"
   it: "Scorciatoia"
 
-preset.hotkey_none:
+preset.shortcut_none:
   en: "None"
   it: "Nessuna"
 
-preset.hotkey_hint:
-  en: "Slot of the \"Apply preset N\" shortcuts, set in Settings › Shortcuts"
-  it: "Slot delle scorciatoie \"Applica preset N\", da impostare in Impostazioni › Scorciatoie"
+preset.shortcut_hint:
+  en: "Click and press the keys that apply the preset to the selected clips (Esc cancels)"
+  it: "Clicca e premi i tasti che applicano il preset alle clip selezionate (Esc annulla)"
+
+preset.shortcut_used:
+  en: "%{shortcut} is already used by: %{actions}"
+  it: "%{shortcut} è già usata da: %{actions}"
+
+preset.shortcut_moved:
+  en: "Saving removes it from the preset \"%{name}\""
+  it: "Salvando verrà tolta dal preset \"%{name}\""
 
 preset.empty_hint:
   en: "Right click a clip › \"Save properties as preset...\""
@@ -104,6 +112,10 @@ preset.apply_to_selection:
   en: "Apply to selected clips"
   it: "Applica alle clip selezionate"
 
-preset.rename:
-  en: "Rename"
-  it: "Rinomina"
+preset.edit:
+  en: "Edit preset..."
+  it: "Modifica preset..."
+
+preset.edit_title:
+  en: "Edit preset"
+  it: "Modifica preset"

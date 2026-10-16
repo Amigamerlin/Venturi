@@ -21,7 +21,11 @@ impl VenturiApp {
         let capturing_shortcut = self
             .settings_dialog
             .as_ref()
-            .is_some_and(|d| d.is_capturing());
+            .is_some_and(|d| d.is_capturing())
+            || self
+                .preset_dialog
+                .as_ref()
+                .is_some_and(|d| d.is_capturing());
         let keymap = self.settings.keymap.clone();
         let menu_paste = std::mem::take(&mut self.menu_paste_pending);
         let mut open_compound = false;
@@ -150,10 +154,11 @@ impl VenturiApp {
             if pressed(Action::PasteAttributes) {
                 self.open_paste_attributes_dialog();
             }
-            for slot in crate::presets::HOTKEY_SLOTS {
-                if pressed(Action::ApplyPreset(slot)) {
-                    self.apply_preset_hotkey(slot);
-                }
+            // An action bound later to the same keys wins over the preset.
+            if !Action::ALL.into_iter().any(pressed)
+                && let Some(id) = self.library.preset_pressed(i)
+            {
+                self.apply_preset_to_selection(&id);
             }
             if pressed(Action::ZoomIn) {
                 self.timeline_state.zoom_in();

@@ -45,7 +45,7 @@ fn save_preset(
     anchor: KeyframeAnchor,
 ) -> AttributePreset {
     app.open_save_preset_dialog(&[(track, id)]);
-    let mut dialog = app.save_preset.take().expect("the dialog opens");
+    let mut dialog = app.preset_dialog.take().expect("the dialog opens");
     dialog.preset.name = "Punch in".into();
     dialog.preset.anchor = anchor;
     dialog.preset.attributes = attributes.to_vec();
@@ -215,7 +215,7 @@ fn applying_a_preset_is_a_single_undo_step_on_every_target() {
 }
 
 #[test]
-fn the_hotkey_applies_its_preset_to_the_selection() {
+fn a_preset_applies_to_the_selection() {
     let (mut app, track) = app_with_timeline(30, (1920, 1080));
     let source = add_clip(&mut app, track, 0, 20);
     clip_mut(&mut app, track, source)
@@ -223,21 +223,19 @@ fn the_hotkey_applies_its_preset_to_the_selection() {
         .transform
         .track_mut(TransformParam::Opacity)
         .default = 40.0;
-    let mut preset = save_preset(
+    let preset = save_preset(
         &mut app,
         track,
         source,
         &[Attribute::Opacity],
         KeyframeAnchor::Start,
     );
-    preset.hotkey = Some(4);
-    app.library.add_preset(preset).unwrap();
+    let id = app.library.add_preset(preset).unwrap();
     let target = add_clip(&mut app, track, 100, 20);
     app.timeline_state
         .set_selection(std::collections::BTreeSet::from([(track, target)]), None);
 
-    app.apply_preset_hotkey(3);
-    app.apply_preset_hotkey(4);
+    app.apply_preset_to_selection(&id);
 
     assert_eq!(
         clip_of(&app, track, target)
@@ -246,5 +244,41 @@ fn the_hotkey_applies_its_preset_to_the_selection() {
             .track(TransformParam::Opacity)
             .default,
         40.0
+    );
+}
+
+#[test]
+fn keyframes_past_a_shorter_clip_end_at_its_last_frame() {
+    let (mut app, track) = app_with_timeline(30, (1920, 1080));
+    let source = add_clip(&mut app, track, 0, 41);
+    let zoom = clip_mut(&mut app, track, source)
+        .effects
+        .transform
+        .track_mut(TransformParam::ZoomX);
+    zoom.upsert(0, 1.0, Interpolation::Linear);
+    zoom.upsert(40, 2.0, Interpolation::Linear);
+    let preset = save_preset(
+        &mut app,
+        track,
+        source,
+        &[Attribute::Zoom],
+        KeyframeAnchor::Start,
+    );
+    let target = add_clip(&mut app, track, 100, 21);
+
+    app.apply_preset(&preset, &[(track, target)]);
+
+    let track = clip_of(&app, track, target)
+        .effects
+        .transform
+        .track(TransformParam::ZoomX);
+    assert_eq!(
+        track
+            .keyframes()
+            .iter()
+            .map(|k| (k.0, k.1))
+            .collect::<Vec<_>>(),
+        vec![(0, 1.0), (20, 1.5)],
+        "the zoom is cut halfway"
     );
 }

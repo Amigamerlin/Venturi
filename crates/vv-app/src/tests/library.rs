@@ -75,35 +75,37 @@ fn removing_an_asset_keeps_the_files_other_assets_use() {
     assert!(Library::open(root).assets.is_empty());
 }
 
-fn preset(name: &str, hotkey: Option<u8>) -> AttributePreset {
+fn preset(name: &str, shortcut: Option<Shortcut>) -> AttributePreset {
     let format = TimelineFormat {
         fps: Rational::new(30, 1),
         resolution: (1920, 1080),
     };
     let mut preset = AttributePreset::new(name.into(), format, None, None);
     preset.attributes = vec![Attribute::Zoom];
-    preset.hotkey = hotkey;
+    preset.shortcut = shortcut;
     preset
 }
 
 #[test]
-fn a_hotkey_belongs_to_one_preset_only() {
-    let root = temp_root("hotkey");
+fn a_shortcut_belongs_to_one_preset_only() {
+    let root = temp_root("shortcut");
     let mut library = Library::open(root.clone());
-    library.add_preset(preset("First", Some(3))).unwrap();
-    library.add_preset(preset("Second", Some(3))).unwrap();
+    let key = Shortcut {
+        shift: true,
+        ..Shortcut::plain(egui::Key::Num1)
+    };
+    library.add_preset(preset("First", Some(key))).unwrap();
+    library.add_preset(preset("Second", Some(key))).unwrap();
 
     let library = Library::open(root);
+    let with_shortcut: Vec<_> = library
+        .presets
+        .iter()
+        .filter(|(_, p)| p.shortcut.is_some())
+        .map(|(_, p)| (p.name.as_str(), p.shortcut))
+        .collect();
     assert_eq!(library.presets.len(), 2);
-    assert_eq!(library.preset_for_hotkey(3).unwrap().name, "Second");
-    assert_eq!(
-        library
-            .presets
-            .iter()
-            .filter(|(_, p)| p.hotkey.is_some())
-            .count(),
-        1
-    );
+    assert_eq!(with_shortcut, vec![("Second", Some(key))]);
 }
 
 #[test]

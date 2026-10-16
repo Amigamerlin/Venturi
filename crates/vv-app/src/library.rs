@@ -10,6 +10,7 @@ use vv_core::clipboard::ClipboardPayload;
 use vv_core::{Clip, MediaItem, Rational};
 
 use crate::paste_attributes::{Attribute, KeyframeAnchor, TimelineFormat};
+use crate::settings::Shortcut;
 
 const VERSION: u32 = 1;
 
@@ -44,9 +45,9 @@ pub(crate) struct AttributePreset {
     /// Added after the target's filters instead of replacing them.
     #[serde(default)]
     pub append_filters: bool,
-    /// 1-9: the "Apply preset N" shortcut.
+    /// Applies the preset to the selected clips; unique among presets.
     #[serde(default)]
-    pub hotkey: Option<u8>,
+    pub shortcut: Option<Shortcut>,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub video: Option<Clip>,
@@ -66,7 +67,7 @@ impl AttributePreset {
             attributes: Vec::new(),
             anchor: KeyframeAnchor::Start,
             append_filters: false,
-            hotkey: None,
+            shortcut: None,
             fps: format.fps,
             resolution: format.resolution,
             video,
@@ -235,11 +236,12 @@ impl Library {
         self.presets.iter().find(|(i, _)| i == id).map(|(_, p)| p)
     }
 
-    pub fn preset_for_hotkey(&self, slot: u8) -> Option<&AttributePreset> {
+    /// Id of the preset whose shortcut was pressed.
+    pub fn preset_pressed(&self, input: &egui::InputState) -> Option<String> {
         self.presets
             .iter()
-            .map(|(_, p)| p)
-            .find(|p| p.hotkey == Some(slot))
+            .find(|(_, p)| p.shortcut.is_some_and(|s| s.pressed(input)))
+            .map(|(id, _)| id.clone())
     }
 
     pub fn add_preset(&mut self, preset: AttributePreset) -> Result<String, String> {
@@ -249,7 +251,7 @@ impl Library {
         Ok(id)
     }
 
-    /// Changes a preset and saves it. A hotkey taken by this preset is
+    /// Changes a preset and saves it. A shortcut taken by this preset is
     /// taken away from the others.
     pub fn update_preset(
         &mut self,
@@ -261,10 +263,10 @@ impl Library {
         };
         change(&mut self.presets[index].1);
         let mut dirty = vec![index];
-        if let Some(slot) = self.presets[index].1.hotkey {
+        if let Some(shortcut) = self.presets[index].1.shortcut {
             for (i, (_, other)) in self.presets.iter_mut().enumerate() {
-                if i != index && other.hotkey == Some(slot) {
-                    other.hotkey = None;
+                if i != index && other.shortcut == Some(shortcut) {
+                    other.shortcut = None;
                     dirty.push(i);
                 }
             }

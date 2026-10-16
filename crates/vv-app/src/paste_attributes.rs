@@ -3,7 +3,7 @@
 
 use super::*;
 use std::collections::HashSet;
-use vv_core::{Clip, ClipAttributes, FrameIdx, Keyframed, Rational, TransformParam};
+use vv_core::{Clip, ClipAttributes, FrameIdx, Keyframed, Lerp, Rational, TransformParam};
 
 /// Serialized in the library presets: the names must never change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
@@ -757,17 +757,16 @@ impl KeyframeRemap {
         }
     }
 
-    /// Keyframes outside the target clip are dropped: they would not be
-    /// reachable and the trim would delete them anyway.
-    fn apply<T: Clone>(&self, track: &Keyframed<T>) -> Keyframed<T> {
+    /// Keyframes outside the target clip are cut as a trim would: the
+    /// animation keeps the value it has at the edges of the clip.
+    fn apply<T: Lerp + Clone + PartialEq>(&self, track: &Keyframed<T>) -> Keyframed<T> {
         let range = self.target_range();
         let mut out = Keyframed::constant(track.default.clone());
         for (frame, value, interpolation) in track.keyframes() {
-            let frame = self.frame(*frame);
-            if range.contains(&frame) {
-                out.upsert(frame, value.clone(), *interpolation);
-            }
+            out.upsert(self.frame(*frame), value.clone(), *interpolation);
         }
+        out.drop_before(range.start);
+        out.drop_from(range.end);
         out
     }
 }

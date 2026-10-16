@@ -401,7 +401,7 @@ struct VenturiApp {
     paste_attributes: Option<PasteAttributesDialog>,
     library: library::Library,
     library_ui: library_ui::LibraryUiState,
-    save_preset: Option<presets::SavePresetDialog>,
+    preset_dialog: Option<presets::PresetDialog>,
     /// A clipboard read for a paste in flight, see `request_clipboard_image`.
     clipboard_image_rx: Option<mpsc::Receiver<Option<paste_image::ClipboardImage>>>,
     paste_image_dialog: Option<paste_image::PasteImageDialog>,
@@ -548,7 +548,7 @@ impl Default for VenturiApp {
             paste_attributes: None,
             library: Default::default(),
             library_ui: Default::default(),
-            save_preset: None,
+            preset_dialog: None,
             clipboard_image_rx: None,
             paste_image_dialog: None,
             paste_image_needs_save: false,
@@ -3996,7 +3996,7 @@ impl VenturiApp {
         if let Some(clips) = self.timeline_state.save_preset_requested.take() {
             self.open_save_preset_dialog(&clips);
         }
-        self.show_save_preset_dialog(ui.ctx());
+        self.show_preset_dialog(ui.ctx());
         if let Some((preset, targets)) = self.timeline_state.preset_drop.take() {
             self.apply_preset_by_id(&preset, &targets);
         }

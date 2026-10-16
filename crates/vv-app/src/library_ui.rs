@@ -14,7 +14,7 @@ pub(crate) enum PoolTab {
 pub(crate) struct LibraryUiState {
     pub tab: PoolTab,
     search: String,
-    /// Item being renamed (asset or preset id) and its new name.
+    /// Asset being renamed and its new name.
     pub renaming: Option<(String, String)>,
     /// What each asset became in a project, per `(epoch, asset id)`: a
     /// second drag reuses it instead of duplicating a compound clip.

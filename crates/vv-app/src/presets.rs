@@ -1,25 +1,90 @@
 //! Attribute presets of the library: saved from a clip with the "paste
 //! attributes" checkboxes, applied by dropping them on clips, double
-//! clicking them or with their "Apply preset N" shortcut.
+//! clicking them or with their own shortcut.
 
 use super::*;
 use std::collections::HashSet;
 use vv_core::Clip;
 
-use crate::library::AttributePreset;
+use crate::library::{AttributePreset, Library};
 use crate::paste_attributes::{
     Attribute, Conversion, KeyframeAnchor, Section, TimelineFormat, attribute_checkboxes,
 };
+use crate::settings::{Action, Keymap, Shortcut};
 
-pub(crate) struct SavePresetDialog {
+/// Saves a new preset or edits one of the library.
+pub(crate) struct PresetDialog {
+    /// Id of the preset being edited, `None` for a new one.
+    editing: Option<String>,
     name: String,
     preset: AttributePreset,
     selected: HashSet<Attribute>,
     focus_name: bool,
+    capturing: bool,
+    notice: Option<String>,
 }
 
-/// Slots of the "Apply preset N" shortcuts.
-pub(crate) const HOTKEY_SLOTS: std::ops::RangeInclusive<u8> = 1..=9;
+impl PresetDialog {
+    fn new(editing: Option<String>, name: String, preset: AttributePreset) -> Self {
+        Self {
+            editing,
+            name,
+            selected: preset.attributes.iter().copied().collect(),
+            preset,
+            focus_name: true,
+            capturing: false,
+            notice: None,
+        }
+    }
+
+    /// While waiting for a key, global shortcuts must be suspended.
+    pub(crate) fn is_capturing(&self) -> bool {
+        self.capturing
+    }
+
+    /// Takes the key combination pressed while capturing, unless an action
+    /// of the program already uses it. Returns whether a key was taken.
+    fn capture_shortcut(
+        &mut self,
+        ctx: &egui::Context,
+        keymap: &Keymap,
+        library: &Library,
+    ) -> bool {
+        if !self.capturing {
+            return false;
+        }
+        let Some(shortcut) = ctx.input(|i| i.events.iter().find_map(Shortcut::captured)) else {
+            return false;
+        };
+        self.capturing = false;
+        if shortcut == Shortcut::plain(egui::Key::Escape) {
+            return true;
+        }
+        let actions: Vec<_> = Action::ALL
+            .into_iter()
+            .filter(|&a| keymap.shortcuts(a).contains(&shortcut))
+            .map(|a| a.label())
+            .collect();
+        if !actions.is_empty() {
+            self.notice = Some(
+                t!(
+                    "preset.shortcut_used",
+                    shortcut = shortcut,
+                    actions = actions.join(", ")
+                )
+                .into_owned(),
+            );
+            return true;
+        }
+        self.preset.shortcut = Some(shortcut);
+        self.notice = library
+            .presets
+            .iter()
+            .find(|(id, p)| p.shortcut == Some(shortcut) && Some(id) != self.editing.as_ref())
+            .map(|(_, p)| t!("preset.shortcut_moved", name = p.name).into_owned());
+        true
+    }
+}
 
 impl VenturiApp {
     /// From the first video and the first audio clip of `clips`, in
@@ -49,32 +114,41 @@ impl VenturiApp {
             resolution: tl.resolution,
         };
         let name = self.clip_display_name(source);
-        let selected = self
-            .paste_attributes_selection
-            .iter()
-            .copied()
+        let mut preset = AttributePreset::new(String::new(), format, video, audio);
+        preset.attributes = Attribute::ALL
+            .into_iter()
+            .filter(|a| self.paste_attributes_selection.contains(a))
             .filter(|a| match a.section().kind() {
-                Some(TrackKind::Video) => video.is_some(),
-                Some(TrackKind::Audio) => audio.is_some(),
+                Some(TrackKind::Video) => preset.video.is_some(),
+                Some(TrackKind::Audio) => preset.audio.is_some(),
                 None => true,
             })
             .collect();
-        self.save_preset = Some(SavePresetDialog {
-            name,
-            preset: AttributePreset::new(String::new(), format, video, audio),
-            selected,
-            focus_name: true,
-        });
+        self.preset_dialog = Some(PresetDialog::new(None, name, preset));
     }
 
-    pub(crate) fn show_save_preset_dialog(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = &mut self.save_preset else {
+    fn open_edit_preset_dialog(&mut self, id: &str) {
+        if let Some(preset) = self.library.preset(id) {
+            let dialog =
+                PresetDialog::new(Some(id.to_owned()), preset.name.clone(), preset.clone());
+            self.preset_dialog = Some(dialog);
+        }
+    }
+
+    pub(crate) fn show_preset_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.preset_dialog else {
             return;
         };
+        // The key that ends a capture must not also confirm the dialog.
+        let captured = dialog.capture_shortcut(ctx, &self.settings.keymap, &self.library);
         let mut open = true;
         let (mut save, mut cancel) = (false, false);
-        egui::Window::new(t!("preset.save_title"))
-            .id(egui::Id::new("save_preset_dialog"))
+        let title = match dialog.editing {
+            Some(_) => t!("preset.edit_title"),
+            None => t!("preset.save_title"),
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("preset_dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -87,6 +161,9 @@ impl VenturiApp {
                         edit.request_focus();
                     }
                 });
+                shortcut_field(ui, dialog);
+
+                ui.separator();
                 let sections: Vec<Section> = Section::ALL
                     .into_iter()
                     .filter(|s| match s.kind() {
@@ -120,8 +197,6 @@ impl VenturiApp {
                         t!("preset.filters_append"),
                     );
                 }
-                ui.separator();
-                hotkey_picker(ui, &mut dialog.preset.hotkey);
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -129,10 +204,13 @@ impl VenturiApp {
                         cancel = true;
                     }
                     let ready = !dialog.selected.is_empty() && !dialog.name.trim().is_empty();
+                    let enter = !captured
+                        && !dialog.capturing
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui
                         .add_enabled(ready, egui::Button::new(t!("preset.save")))
                         .clicked()
-                        || (ready && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        || (ready && enter)
                     {
                         save = true;
                     }
@@ -144,7 +222,7 @@ impl VenturiApp {
         if !(save || cancel) {
             return;
         }
-        let dialog = self.save_preset.take().expect("just checked");
+        let dialog = self.preset_dialog.take().expect("just checked");
         if !save {
             return;
         }
@@ -154,7 +232,11 @@ impl VenturiApp {
             .into_iter()
             .filter(|a| dialog.selected.contains(a))
             .collect();
-        if let Err(e) = self.library.add_preset(preset) {
+        let result = match dialog.editing {
+            Some(id) => self.library.update_preset(&id, |p| *p = preset),
+            None => self.library.add_preset(preset).map(drop),
+        };
+        if let Err(e) = result {
             self.project_error = Some(t!("library.save_failed", error = e).into_owned());
         }
     }
@@ -165,12 +247,9 @@ impl VenturiApp {
         }
     }
 
-    pub(crate) fn apply_preset_hotkey(&mut self, slot: u8) {
-        if let Some(preset) = self.library.preset_for_hotkey(slot).cloned() {
-            let targets: Vec<(usize, ClipId)> =
-                self.timeline_state.selected.iter().copied().collect();
-            self.apply_preset(&preset, &targets);
-        }
+    pub(crate) fn apply_preset_to_selection(&mut self, id: &str) {
+        let targets: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
+        self.apply_preset_by_id(id, &targets);
     }
 
     pub(crate) fn apply_preset(&mut self, preset: &AttributePreset, targets: &[(usize, ClipId)]) {
@@ -207,7 +286,8 @@ impl VenturiApp {
             return;
         }
         let mut apply = None;
-        let mut changes: Vec<(String, PresetChange)> = Vec::new();
+        let mut edit = None;
+        let mut delete = None;
         for (id, preset) in &self.library.presets {
             let resp = preset_item(ui, id, preset);
             if resp.double_clicked() {
@@ -224,78 +304,63 @@ impl VenturiApp {
                     apply = Some(id.clone());
                     ui.close();
                 }
-                ui.menu_button(t!("preset.rename"), |ui| {
-                    let name = self
-                        .library_ui
-                        .renaming
-                        .get_or_insert_with(|| (id.clone(), preset.name.clone()));
-                    if name.0 != *id {
-                        *name = (id.clone(), preset.name.clone());
-                    }
-                    let edit = ui.text_edit_singleline(&mut name.1);
-                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        changes.push((id.clone(), PresetChange::Rename(name.1.clone())));
-                        ui.close();
-                    }
-                });
-                ui.menu_button(t!("preset.hotkey"), |ui| {
-                    let mut hotkey = preset.hotkey;
-                    if hotkey_picker(ui, &mut hotkey) {
-                        changes.push((id.clone(), PresetChange::Hotkey(hotkey)));
-                        ui.close();
-                    }
-                });
+                if ui.button(t!("preset.edit")).clicked() {
+                    edit = Some(id.clone());
+                    ui.close();
+                }
                 ui.separator();
                 ui.menu_button(t!("library.delete"), |ui| {
                     if ui.button(t!("library.delete_confirm")).clicked() {
-                        changes.push((id.clone(), PresetChange::Delete));
+                        delete = Some(id.clone());
                         ui.close();
                     }
                 });
             });
         }
         if let Some(id) = apply {
-            let targets: Vec<(usize, ClipId)> =
-                self.timeline_state.selected.iter().copied().collect();
-            self.apply_preset_by_id(&id, &targets);
+            self.apply_preset_to_selection(&id);
         }
-        for (id, change) in changes {
-            let result = match change {
-                PresetChange::Rename(name) if !name.trim().is_empty() => self
-                    .library
-                    .update_preset(&id, |p| p.name = name.trim().to_owned()),
-                PresetChange::Rename(_) => Ok(()),
-                PresetChange::Hotkey(hotkey) => {
-                    self.library.update_preset(&id, |p| p.hotkey = hotkey)
-                }
-                PresetChange::Delete => self.library.remove_preset(&id),
-            };
-            if let Err(e) = result {
-                self.project_error = Some(t!("library.save_failed", error = e).into_owned());
-            }
+        if let Some(id) = edit {
+            self.open_edit_preset_dialog(&id);
+        }
+        if let Some(id) = delete
+            && let Err(e) = self.library.remove_preset(&id)
+        {
+            self.project_error = Some(t!("library.save_failed", error = e).into_owned());
         }
     }
 }
 
-enum PresetChange {
-    Rename(String),
-    Hotkey(Option<u8>),
-    Delete,
-}
-
-/// Returns whether the choice changed.
-fn hotkey_picker(ui: &mut egui::Ui, hotkey: &mut Option<u8>) -> bool {
-    let before = *hotkey;
-    ui.horizontal_wrapped(|ui| {
-        ui.label(t!("preset.hotkey"));
-        ui.selectable_value(hotkey, None, t!("preset.hotkey_none"));
-        for slot in HOTKEY_SLOTS {
-            ui.selectable_value(hotkey, Some(slot), slot.to_string());
+fn shortcut_field(ui: &mut egui::Ui, dialog: &mut PresetDialog) {
+    ui.horizontal(|ui| {
+        ui.label(t!("preset.shortcut"));
+        let text = match (dialog.capturing, dialog.preset.shortcut) {
+            (true, _) => t!("settings.press_a_key").into_owned(),
+            (false, Some(shortcut)) => shortcut.to_string(),
+            (false, None) => t!("preset.shortcut_none").into_owned(),
+        };
+        if ui
+            .button(text)
+            .on_hover_text(t!("preset.shortcut_hint"))
+            .clicked()
+        {
+            dialog.capturing = !dialog.capturing;
+            dialog.notice = None;
         }
-    })
-    .response
-    .on_hover_text(t!("preset.hotkey_hint"));
-    *hotkey != before
+        if dialog.preset.shortcut.is_some()
+            && ui
+                .small_button("x")
+                .on_hover_text(t!("settings.remove"))
+                .clicked()
+        {
+            dialog.preset.shortcut = None;
+            dialog.capturing = false;
+            dialog.notice = None;
+        }
+    });
+    if let Some(notice) = &dialog.notice {
+        ui.colored_label(egui::Color32::YELLOW, notice);
+    }
 }
 
 fn preset_item(ui: &mut egui::Ui, id: &str, preset: &AttributePreset) -> egui::Response {
@@ -341,11 +406,11 @@ fn preset_item(ui: &mut egui::Ui, id: &str, preset: &AttributePreset) -> egui::R
         egui::FontId::proportional(13.0),
         visuals.text_color(),
     );
-    if let Some(slot) = preset.hotkey {
+    if let Some(shortcut) = preset.shortcut {
         painter.text(
             rect.right_center() - egui::vec2(8.0, 0.0),
             egui::Align2::RIGHT_CENTER,
-            slot.to_string(),
+            shortcut.to_string(),
             egui::FontId::monospace(12.0),
             visuals.weak_text_color(),
         );

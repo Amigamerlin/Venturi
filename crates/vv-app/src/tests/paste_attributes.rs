@@ -117,9 +117,9 @@ fn stretch_to_fit_scales_the_keyframes_on_the_target_duration() {
     );
 }
 
-/// A keyframe past the end of the target clip has nowhere to go.
+/// As a trim would, the animation is cut keeping its value at the edge.
 #[test]
-fn keyframes_outside_the_target_clip_are_dropped() {
+fn keyframes_outside_the_target_clip_leave_their_value_at_its_edge() {
     let mut source = source_clip();
     source
         .effects
@@ -148,7 +148,7 @@ fn keyframes_outside_the_target_clip_are_dropped() {
             .transform
             .track(TransformParam::ZoomX)
             .default,
-        2.0
+        3.0
     );
 }
 
