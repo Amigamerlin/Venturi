@@ -55,6 +55,7 @@ fn library_media_are_copied_into_the_project_folder() {
     let asset = app.library.assets[0].id.clone();
 
     let media = app.import_library_asset(&asset);
+    app.wait_for_library_copies();
 
     let path = &app.session.project.media_pool[media[0]].path;
     assert_eq!(*path, dir.join("project").join("library").join("music.mp3"));
@@ -77,9 +78,13 @@ fn an_unsaved_project_gets_its_copies_when_saved() {
     let project_file = dir.join("project").join("show.vvproj");
     std::fs::create_dir_all(project_file.parent().unwrap()).unwrap();
     app.save_project_to(&project_file);
+    app.wait_for_library_copies();
 
+    let copy = dir.join("project").join("library").join("music.mp3");
+    assert_eq!(app.session.project.media_pool[media].path, copy);
+    let saved = vv_core::load_project(&project_file).unwrap();
     assert_eq!(
-        app.session.project.media_pool[media].path,
-        dir.join("project").join("library").join("music.mp3")
+        saved.media_pool[media].path, copy,
+        "with nothing else unsaved, the file is written again"
     );
 }

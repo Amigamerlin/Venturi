@@ -199,14 +199,14 @@ fn project_copies_reuse_an_identical_file_and_never_overwrite_another() {
     std::fs::write(&src, b"logo").unwrap();
     let dir = root.join("project").join("library");
 
-    let first = copy_for_project(&src, &dir).unwrap();
+    let first = copy_for_project(&src, &dir, &|_| true).unwrap();
     assert_eq!(first, dir.join("logo.png"), "without the hash prefix");
-    assert_eq!(copy_for_project(&src, &dir).unwrap(), first);
+    assert_eq!(copy_for_project(&src, &dir, &|_| true).unwrap(), first);
 
     let other = root.join("logo.png");
     std::fs::write(&other, b"another logo").unwrap();
     assert_eq!(
-        copy_for_project(&other, &dir).unwrap(),
+        copy_for_project(&other, &dir, &|_| true).unwrap(),
         dir.join("logo (2).png")
     );
     assert_eq!(std::fs::read(&first).unwrap(), b"logo");

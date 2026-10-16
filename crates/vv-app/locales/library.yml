@@ -147,3 +147,11 @@ library.relink_done:
 library.relink_partial:
   en: "%{missing} files of the asset are still missing"
   it: "Mancano ancora %{missing} file dell'asset"
+
+library.copying_to_project:
+  en: "%{percent}% · %{name}"
+  it: "%{percent}% · %{name}"
+
+library.copying_to_project_hint:
+  en: "Library files being copied into the project's folder, under library/: %{count}. Until a copy is ready the project uses the library's file"
+  it: "File della libreria in copia nella cartella del progetto, in library/: %{count}. Finché la copia non è pronta il progetto usa il file della libreria"

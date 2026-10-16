@@ -129,9 +129,9 @@ impl VenturiApp {
     }
 
     /// The media the project takes from the library get their own copy in
-    /// `library/` next to `project_file`: the project stays whole in its
-    /// folder, whatever happens to the library. An unsaved project has no
-    /// folder yet: it gets the copies when saved.
+    /// `library/` next to `project_file`, in the background: the project
+    /// stays whole in its folder, whatever happens to the library. An
+    /// unsaved project has no folder yet: it gets the copies when saved.
     pub(crate) fn copy_library_media_into_project(&mut self, project_file: &Path) {
         let (Some(media_dir), Some(project_dir)) =
             (self.library.media_dir(), project_file.parent())
@@ -139,6 +139,7 @@ impl VenturiApp {
             return;
         };
         let dest = project_dir.join("library");
+        let epoch = self.session.epoch();
         let from_library: Vec<(MediaId, PathBuf)> = self
             .session
             .project
@@ -148,17 +149,82 @@ impl VenturiApp {
             .map(|(id, item)| (id, item.path.clone()))
             .collect();
         for (id, path) in from_library {
-            match library::copy_for_project(&path, &dest) {
-                // Not a command: the file is the same, only where it lives
-                // changes, and an undo must not point back at the library.
-                Ok(copy) => self.session.project.media_pool[id].path = copy,
+            self.project_copier
+                .get_or_insert_with(library_copy::ProjectCopier::spawn)
+                .enqueue(epoch, id, path, dest.clone());
+        }
+    }
+
+    /// Points the media at their finished copies. With nothing else
+    /// unsaved the project file is written again, so that it no longer
+    /// needs the library.
+    pub(crate) fn poll_library_copies(&mut self) {
+        let Some(copier) = &mut self.project_copier else {
+            return;
+        };
+        let done = copier.poll();
+        let idle = copier.progress().is_none();
+        let mut moved = false;
+        for copy in done {
+            match copy.result {
+                Ok(path) => {
+                    // Not a command: the file is the same, only where it
+                    // lives changes, and an undo must not point back at the
+                    // library.
+                    if copy.epoch == self.session.epoch()
+                        && let Some(item) = self.session.project.media_pool.get_mut(copy.media)
+                        && item.path == copy.src
+                    {
+                        item.path = path;
+                        moved = true;
+                    }
+                }
                 Err(e) => {
                     self.project_error =
                         Some(t!("library.project_copy_failed", error = e).into_owned());
                 }
             }
         }
+        if !moved {
+            return;
+        }
         self.media_pool_state.invalidate_offline();
+        if idle
+            && !self.session.has_unsaved_changes()
+            && let Some(path) = self.session.path().map(Path::to_path_buf)
+            && let Err(e) = self.session.save_to(&path)
+        {
+            self.project_error = Some(t!("project.save_failed", error = e).into_owned());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_library_copies(&mut self) {
+        while self
+            .project_copier
+            .as_ref()
+            .is_some_and(|c| c.progress().is_some())
+        {
+            self.poll_library_copies();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn show_library_copy_progress(&self, ui: &mut egui::Ui) {
+        let Some(progress) = self.project_copier.as_ref().and_then(|c| c.progress()) else {
+            return;
+        };
+        ui.add(egui::ProgressBar::new(progress.fraction).text(t!(
+            "library.copying_to_project",
+            name = progress.name,
+            percent = format!("{:.0}", progress.fraction * 100.0)
+        )))
+        .on_hover_text(t!(
+            "library.copying_to_project_hint",
+            count = progress.files
+        ));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
     }
 
     pub(crate) fn relink_library_asset(&mut self, id: &str, base_dir: &Path) {
@@ -204,6 +270,7 @@ impl VenturiApp {
                 self.library_ui.pool.clear();
             }
         });
+        self.show_library_copy_progress(ui);
     }
 
     fn library_selection(&self) -> Vec<String> {

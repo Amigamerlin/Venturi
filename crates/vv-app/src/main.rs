@@ -17,6 +17,7 @@ mod hw_decode;
 mod i18n;
 mod keyframe_editor;
 mod library;
+mod library_copy;
 mod library_ui;
 mod mask_overlay;
 mod mask_panel;
@@ -401,6 +402,7 @@ struct VenturiApp {
     new_timeline_dialog: Option<NewTimelineDialog>,
     paste_attributes: Option<PasteAttributesDialog>,
     library: library::Library,
+    project_copier: Option<library_copy::ProjectCopier>,
     library_ui: library_ui::LibraryUiState,
     preset_dialog: Option<presets::PresetDialog>,
     /// A clipboard read for a paste in flight, see `request_clipboard_image`.
@@ -548,6 +550,7 @@ impl Default for VenturiApp {
             new_timeline_dialog: None,
             paste_attributes: None,
             library: Default::default(),
+            project_copier: None,
             library_ui: Default::default(),
             preset_dialog: None,
             clipboard_image_rx: None,
@@ -4002,6 +4005,7 @@ impl VenturiApp {
             self.apply_preset_by_id(&preset, &targets);
         }
         self.poll_library();
+        self.poll_library_copies();
         if let Some(targets) = self.timeline_state.speed_dialog_requested.take() {
             self.open_speed_dialog(targets);
         }

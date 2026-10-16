@@ -456,15 +456,36 @@ fn copy_to_media(media_dir: &Path, src: &Path, content_hash: u64) -> Result<Path
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dest = dir.join(original_name(src)?);
     if !dest.exists() {
-        copy_file(src, &dest)?;
+        copy_file(src, &dest, &|_| true)?;
     }
     Ok(dest)
 }
 
 /// Through a temporary name: a copy cut short must not look done.
-fn copy_file(src: &Path, dest: &Path) -> Result<(), String> {
-    let partial = dest.with_extension("partial");
-    std::fs::copy(src, &partial).map_err(|e| format!("{}: {e}", src.display()))?;
+/// `progress` gets the bytes of each chunk and returns `false` to stop.
+fn copy_file(src: &Path, dest: &Path, progress: &dyn Fn(u64) -> bool) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let mut partial_name = dest.file_name().unwrap_or_default().to_owned();
+    partial_name.push(".partial");
+    let partial = dest.with_file_name(partial_name);
+    let src_error = |e: std::io::Error| format!("{}: {e}", src.display());
+    let dest_error = |e: std::io::Error| format!("{}: {e}", partial.display());
+    let mut reader = std::fs::File::open(src).map_err(src_error)?;
+    let mut writer = std::fs::File::create(&partial).map_err(dest_error)?;
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        let read = reader.read(&mut buffer).map_err(src_error)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read]).map_err(dest_error)?;
+        if !progress(read as u64) {
+            drop(writer);
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("{}: cancelled", src.display()));
+        }
+    }
+    drop(writer);
     std::fs::rename(&partial, dest).map_err(|e| e.to_string())
 }
 
@@ -483,8 +504,12 @@ fn original_name(path: &Path) -> Result<String, String> {
 
 /// A copy of a library file in `dir`, for a project: an identical file
 /// already there is reused, a different one with the same name gets
-/// " (2)", " (3)", ... appended.
-pub(crate) fn copy_for_project(src: &Path, dir: &Path) -> Result<PathBuf, String> {
+/// " (2)", " (3)", ... appended. `progress` as in `copy_file`.
+pub(crate) fn copy_for_project(
+    src: &Path,
+    dir: &Path,
+    progress: &dyn Fn(u64) -> bool,
+) -> Result<PathBuf, String> {
     let name = original_name(src)?;
     let size = std::fs::metadata(src)
         .map_err(|e| format!("{}: {e}", src.display()))?
@@ -503,7 +528,7 @@ pub(crate) fn copy_for_project(src: &Path, dir: &Path) -> Result<PathBuf, String
             Ok(meta) if meta.len() == size => return Ok(dest),
             Ok(_) => continue,
             Err(_) => {
-                copy_file(src, &dest)?;
+                copy_file(src, &dest, progress)?;
                 return Ok(dest);
             }
         }
