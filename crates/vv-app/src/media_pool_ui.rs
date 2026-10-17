@@ -164,7 +164,7 @@ pub(crate) fn filter_item(ui: &mut egui::Ui, filter: timeline_ui::FilterEntry) {
     painter.rect_filled(rect, 3.0, bg);
     let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
     painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
-    timeline_ui::paint_gear_icon(painter, thumb.center(), 11.0, egui::Color32::from_gray(220));
+    timeline_ui::paint_fx_icon(painter, thumb.center(), 15.0, egui::Color32::from_gray(220));
     painter.rect_stroke(
         rect,
         3.0,
@@ -253,19 +253,27 @@ pub(crate) struct EffectsPanelState {
     pub search: String,
 }
 
-/// Five-pointed star, outlined.
-fn paint_star_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
-    let points = (0..10)
-        .map(|i| {
-            let radius = if i % 2 == 0 { 8.0 } else { 3.6 };
-            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            center + radius * egui::vec2(angle.cos(), angle.sin())
-        })
-        .collect();
-    painter.add(egui::Shape::closed_line(
-        points,
-        egui::Stroke::new(1.3, color),
-    ));
+/// Magic wand with sparkles near its tip.
+fn paint_wand_icon(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    painter.line_segment(
+        [
+            center + egui::vec2(-7.0, 7.0),
+            center + egui::vec2(3.0, -3.0),
+        ],
+        egui::Stroke::new(2.0, color),
+    );
+    let stroke = egui::Stroke::new(1.2, color);
+    for (offset, arm) in [((5.0, -5.0), 3.0), ((-2.0, -6.0), 1.8), ((6.0, 2.0), 1.8)] {
+        let at = center + egui::vec2(offset.0, offset.1);
+        painter.line_segment(
+            [at - egui::vec2(arm, 0.0), at + egui::vec2(arm, 0.0)],
+            stroke,
+        );
+        painter.line_segment(
+            [at - egui::vec2(0.0, arm), at + egui::vec2(0.0, arm)],
+            stroke,
+        );
+    }
 }
 
 pub(crate) fn file_label(path: &std::path::Path) -> String {
@@ -658,12 +666,12 @@ impl VenturiApp {
             pool_view::SideTab {
                 tab: EffectsTab::Effects,
                 hint: t!("effects.tab_effects"),
-                icon: |p, c, color| timeline_ui::paint_gear_icon(p, c, 8.0, color),
+                icon: paint_wand_icon,
             },
             pool_view::SideTab {
                 tab: EffectsTab::Presets,
                 hint: t!("effects.presets"),
-                icon: paint_star_icon,
+                icon: |p, c, color| timeline_ui::paint_preset_icon(p, c, 8.0, color),
             },
         ];
         let (content, _) = pool_view::side_tabs(ui, area, &mut self.effects_panel.tab, &tabs);

@@ -1375,27 +1375,62 @@ fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
     }
 }
 
-/// Hand-drawn gear (ring + radial teeth): no Unicode glyph, which
-/// on some platforms (Asahi) is missing from egui's fonts (see the comment
-/// on the link icon in `paint_clip_overlay`).
-pub(crate) fn paint_gear_icon(
+/// Icons are hand-drawn: Unicode symbols are missing from egui's fonts on
+/// some platforms (Asahi, see the link icon in `paint_clip_overlay`).
+pub(crate) fn paint_fx_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    size: f32,
+    color: egui::Color32,
+) {
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        "fx",
+        egui::FontId::proportional(size),
+        color,
+    );
+}
+
+/// Three sliders with staggered knobs: saved settings.
+pub(crate) fn paint_preset_icon(
     painter: &egui::Painter,
     center: egui::Pos2,
     radius: f32,
     color: egui::Color32,
 ) {
-    let stroke = egui::Stroke::new(1.6, color);
-    painter.circle_stroke(center, radius * 0.55, stroke);
-    painter.circle_filled(center, radius * 0.16, color);
-    const TEETH: usize = 8;
-    for i in 0..TEETH {
-        let angle = std::f32::consts::TAU * i as f32 / TEETH as f32;
-        let dir = egui::vec2(angle.cos(), angle.sin());
-        painter.line_segment(
-            [center + dir * radius * 0.55, center + dir * radius],
-            stroke,
+    let stroke = egui::Stroke::new(radius * 0.16, color);
+    for (row, knob) in [(-1.0, -0.35), (0.0, 0.45), (1.0, -0.1)] {
+        let y = center.y + row * radius * 0.6;
+        painter.hline(center.x - radius..=center.x + radius, y, stroke);
+        painter.circle_filled(
+            egui::pos2(center.x + knob * radius, y),
+            radius * 0.27,
+            color,
         );
     }
+}
+
+/// Clip A overlapping clip B diagonally.
+pub(crate) fn paint_transition_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: egui::Color32,
+) {
+    let size = egui::vec2(radius * 1.3, radius);
+    let offset = egui::vec2(radius * 0.35, radius * 0.3);
+    painter.rect_stroke(
+        egui::Rect::from_center_size(center - offset, size),
+        1.0,
+        egui::Stroke::new(1.6, color),
+        egui::StrokeKind::Middle,
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(center + offset, size),
+        1.0,
+        color,
+    );
 }
 
 /// "S"/"M" button: filled with `active` when it is on.
@@ -2375,7 +2410,7 @@ pub fn show_timeline(
                     media_drop = Some((drag, frame, target));
                 }
 
-                // Ghost of a filter: a gear instead of the green rectangle,
+                // Ghost of a filter: an icon instead of the green rectangle,
                 // anywhere on the timeline (not only on the tracks, as above: a
                 // filter never lands on an empty space, but the cursor
                 // stays consistent anyway while passing over it).
@@ -2384,15 +2419,15 @@ pub fn show_timeline(
                         || egui::DragAndDrop::has_payload_of_type::<PresetDrag>(ui.ctx()))
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 {
-                    paint_gear_icon(
-                        &ghost_painter,
-                        pos + egui::vec2(14.0, 14.0),
-                        10.0,
-                        egui::Color32::WHITE,
-                    );
+                    let at = pos + egui::vec2(14.0, 14.0);
+                    if egui::DragAndDrop::has_payload_of_type::<PresetDrag>(ui.ctx()) {
+                        paint_preset_icon(&ghost_painter, at, 9.0, egui::Color32::WHITE);
+                    } else {
+                        paint_fx_icon(&ghost_painter, at, 18.0, egui::Color32::WHITE);
+                    }
                 }
 
-                // Same gear ghost as the filters: a transition
+                // Like the filters: a transition
                 // too (from the panel or duplicated with Alt+drag)
                 // lands only on an existing clip, never on an empty
                 // space.
@@ -2401,10 +2436,10 @@ pub fn show_timeline(
                         || egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(ui.ctx()))
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 {
-                    paint_gear_icon(
+                    paint_transition_icon(
                         &ghost_painter,
                         pos + egui::vec2(14.0, 14.0),
-                        10.0,
+                        9.0,
                         egui::Color32::WHITE,
                     );
                 }
@@ -4864,7 +4899,7 @@ fn paint_mirrored_marker_on_neighbor(
 
 /// The marker of a transition: a colored band at the bottom of the clip from the
 /// edge to `x`. A single edge (`is_crossing: false`) shows a
-/// gear on the fixed side (the real edge of the clip, against
+/// dot on the fixed side (the real edge of the clip, against
 /// transparency) and a bracket on the end `x` (the draggable side) —
 /// "X]" for `In`, "[X" for `Out`. A crossing (`is_crossing: true`) has no
 /// "fixed" side: the edge shared with the neighbor shows another
@@ -4914,10 +4949,9 @@ fn paint_transition_marker(
             egui::Color32::WHITE,
         );
     } else {
-        paint_gear_icon(
-            painter,
+        painter.circle_filled(
             egui::pos2(edge_x, band.center().y),
-            band.height() * 0.4,
+            band.height() * 0.22,
             egui::Color32::WHITE,
         );
     }
@@ -4930,9 +4964,9 @@ fn paint_transition_marker(
     );
 }
 
-/// Hand-drawn bracket (no Unicode glyph, see `paint_gear_icon`):
+/// Hand-drawn bracket (no Unicode glyph, see `paint_fx_icon`):
 /// a vertical line with two notches opening towards the fixed edge of the
-/// clip (`In`: notches on the left, towards the gear; `Out`: on the right).
+/// clip (`In`: notches on the left, towards the dot; `Out`: on the right).
 pub(crate) fn paint_bracket_icon(
     painter: &egui::Painter,
     center: egui::Pos2,
