@@ -7,6 +7,9 @@ use super::*;
 use media_pool::{FolderDrag, PoolId, PoolRow, PoolState, Rename, RenameTarget};
 
 pub(crate) const DURATION_COL_W: f32 = 64.0;
+const MIN_NAME_COL_W: f32 = 80.0;
+/// Room kept for the proxy badge at the end of the name column.
+const PROXY_BADGE_W: f32 = 24.0;
 
 /// Free background on the sides and below the items: always somewhere to
 /// right click, even with the pool full.
@@ -425,13 +428,15 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             }
         }
         None => {
-            ui.painter().text(
-                text_rect.left_center(),
-                egui::Align2::LEFT_CENTER,
-                &folder.name,
-                egui::FontId::proportional(14.0),
-                color,
-            );
+            ui.painter()
+                .with_clip_rect(text_rect.intersect(ui.clip_rect()))
+                .text(
+                    text_rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    &folder.name,
+                    egui::FontId::proportional(14.0),
+                    color,
+                );
         }
     }
     if state.selected_folder.as_ref() == Some(id) {
@@ -499,14 +504,32 @@ fn item_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 paint_thumb(ui, &entry.thumb, meta);
+                // Cut at the name column, not widening the row: the header
+                // decides how wide it is.
+                let name_right = state
+                    .name_col_right
+                    .min(ui.max_rect().right() - DURATION_COL_W);
+                let badge = if entry.proxy.is_some() {
+                    PROXY_BADGE_W
+                } else {
+                    0.0
+                };
+                let name_w =
+                    (name_right - badge - ui.cursor().min.x - ui.spacing().item_spacing.x).max(0.0);
                 ui.vertical(|ui| {
+                    ui.set_width(name_w);
                     match renaming {
                         Some(rename) => rename_done = rename_field(ui, rename),
-                        None => label_rect = ui.label(&entry.name).rect,
+                        None => label_rect = ui.add(egui::Label::new(&entry.name).truncate()).rect,
                     }
-                    ui.small(meta_line(entry));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(meta_line(entry)).small()).truncate(),
+                    );
                 });
-                let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                let row = egui::vec2(
+                    (name_right + DURATION_COL_W - ui.cursor().min.x).max(0.0),
+                    ui.spacing().interact_size.y,
+                );
                 ui.allocate_ui_with_layout(
                     row,
                     egui::Layout::right_to_left(egui::Align::Center),
@@ -711,16 +734,16 @@ fn pool_header<I: PoolId, F: PoolId>(ui: &mut egui::Ui, state: &mut PoolState<I,
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
     let duration_w = DURATION_COL_W.min(width);
-    let (name_rect, duration_rect) = (
-        egui::Rect::from_min_max(
-            rect.left_top(),
-            egui::pos2(rect.right() - duration_w, rect.bottom()),
-        ),
-        egui::Rect::from_min_max(
-            egui::pos2(rect.right() - duration_w, rect.top()),
-            rect.right_bottom(),
-        ),
+    let name_w = name_col_width(state.name_col_w, width);
+    let name_rect = egui::Rect::from_min_size(rect.left_top(), egui::vec2(name_w, HEADER_HEIGHT));
+    let duration_rect =
+        egui::Rect::from_min_size(name_rect.right_top(), egui::vec2(duration_w, HEADER_HEIGHT));
+    ui.painter().rect_filled(
+        rect.with_min_x(duration_rect.right()),
+        0.0,
+        ui.visuals().widgets.inactive.weak_bg_fill,
     );
+    state.name_col_right = name_rect.right();
     let sort = state.sort;
     for (key, label, cell) in [
         (SortKey::Name, t!("pool.name"), name_rect),
@@ -776,6 +799,31 @@ fn pool_header<I: PoolId, F: PoolId>(ui: &mut egui::Ui, state: &mut PoolState<I,
             state.toggle_sort(key);
         }
     }
+    // After the cells: in egui the last one interacted with wins.
+    let divider = ui
+        .interact(
+            egui::Rect::from_center_size(name_rect.right_center(), egui::vec2(6.0, HEADER_HEIGHT)),
+            ui.id().with("media_pool_name_divider"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if divider.double_clicked() {
+        state.name_col_w = None;
+    } else if divider.dragged() {
+        state.name_col_w = Some(name_col_width(Some(name_w + divider.drag_delta().x), width));
+    }
+    ui.painter().vline(
+        name_rect.right(),
+        name_rect.y_range().shrink(4.0),
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+}
+
+/// The name column's width out of `width`: never so wide that the duration
+/// leaves the panel, nor narrower than `MIN_NAME_COL_W` while there is room.
+fn name_col_width(wanted: Option<f32>, width: f32) -> f32 {
+    let max = (width - DURATION_COL_W).max(0.0);
+    wanted.unwrap_or(max).max(MIN_NAME_COL_W).min(max)
 }
 
 pub(crate) struct SideTab<'a, T> {
@@ -893,7 +941,7 @@ fn rename_field<I, F>(ui: &mut egui::Ui, rename: &mut Rename<I, F>) -> Option<Op
     let edit_id = ui.id().with("media_pool_rename");
     let mut output = egui::TextEdit::singleline(&mut rename.text)
         .id(edit_id)
-        .desired_width(ui.available_width() - DURATION_COL_W)
+        .desired_width(ui.available_width())
         .show(ui);
     if rename.just_started {
         rename.just_started = false;
@@ -1036,3 +1084,7 @@ pub(crate) fn kinetic_pool_scroll<I, F>(
         ctx.request_repaint();
     }
 }
+
+#[cfg(test)]
+#[path = "tests/pool_view.rs"]
+mod tests;
