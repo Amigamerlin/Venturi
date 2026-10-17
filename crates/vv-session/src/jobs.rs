@@ -103,11 +103,14 @@ pub enum RelinkEnd {
     Failed,
 }
 
+/// Files to import, each with the pool folder it goes into.
+type ImportBatch = Vec<(PathBuf, Option<FolderId>)>;
+
 #[derive(Default)]
 pub(crate) struct Jobs {
     next_id: JobId,
     events: Vec<SessionEvent>,
-    queued_imports: VecDeque<(JobId, Vec<(PathBuf, Option<FolderId>)>)>,
+    queued_imports: VecDeque<(JobId, ImportBatch)>,
     import: Option<RunningImport>,
     /// The undo step of the last import, while it can still grow.
     import_step: Option<(JobId, JoinableStep)>,
