@@ -598,7 +598,7 @@ fn a_dropped_folder_is_imported_into_matching_pool_folders() {
     clip_file(&shots.join("Day 1"), "b.mp4");
     let mut session = Session::default();
 
-    session.import_media_tree(crate::MediaTree::scan(&[shots.clone()]), None);
+    session.import_media_tree(crate::MediaTree::scan(std::slice::from_ref(&shots)), None);
     run_jobs(&mut session);
 
     assert_eq!(folder_of(&session, "a.mp4"), ("Shots".into(), None));
