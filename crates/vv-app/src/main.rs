@@ -3262,9 +3262,6 @@ impl VenturiApp {
         }
     }
 
-    /// Cuts at the playhead the selected clips covering it or, without a
-    /// selection, all of them. The right halves of a linked group get
-    /// relinked to each other.
     fn add_marker_at_playhead(&mut self) {
         if let Some(timeline_id) = self.timeline_id {
             timeline_ui::add_marker_at_playhead(
@@ -3276,6 +3273,9 @@ impl VenturiApp {
         }
     }
 
+    /// Cuts at the playhead the selected clips covering it or, without a
+    /// selection, all of them. When the selection is already cut there,
+    /// cuts every other clip under the playhead instead.
     fn split_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -3292,6 +3292,25 @@ impl VenturiApp {
         .into_iter()
         .map(|(left, _)| left)
         .collect();
+
+        if targets.is_empty() {
+            let timeline = &self.session.project.timelines[timeline_id];
+            let selection_cut_here = selected.iter().any(|&(track_index, clip_id)| {
+                timeline.clip(track_index, clip_id).is_some_and(|clip| {
+                    clip.timeline_start == playhead || clip.timeline_end() == playhead
+                })
+            });
+            if selection_cut_here {
+                vv_core::edit::split_clips(
+                    &mut self.session.project,
+                    &mut self.session.history,
+                    timeline_id,
+                    playhead,
+                    None,
+                );
+            }
+            return;
+        }
 
         // Selects the *left* half (the one under the playhead would be the
         // right one): after a cut one usually works on what comes before.
