@@ -5006,8 +5006,9 @@ pub(crate) fn paint_bracket_icon(
 
 /// Transitions of the Effects panel, in the order they appear there — see
 /// `FILTER_ENTRIES`, same idea.
-pub const ALL_TRANSITION_KINDS: [vv_core::TransitionKind; 2] = [
+pub const ALL_TRANSITION_KINDS: [vv_core::TransitionKind; 3] = [
     vv_core::TransitionKind::CrossDissolve,
+    vv_core::TransitionKind::SmoothCut,
     vv_core::TransitionKind::Push,
 ];
 
@@ -5015,6 +5016,7 @@ pub fn transition_kind_label(kind: vv_core::TransitionKind) -> std::borrow::Cow<
     match kind {
         vv_core::TransitionKind::Push => t!("transition.push"),
         vv_core::TransitionKind::CrossDissolve => t!("transition.cross_dissolve"),
+        vv_core::TransitionKind::SmoothCut => t!("transition.smooth_cut"),
     }
 }
 
@@ -5639,8 +5641,13 @@ fn apply_pending_action(
             edge,
             kind,
         } => {
+            // A Smooth Cut only bridges a few frames, as in Resolve.
+            let seconds = match kind {
+                vv_core::TransitionKind::SmoothCut => 0.16,
+                _ => 0.45,
+            };
             let default_duration =
-                (project.timelines[timeline_id].fps.as_f64() * 0.45).round() as FrameIdx;
+                (project.timelines[timeline_id].fps.as_f64() * seconds).round() as FrameIdx;
             let transition = vv_core::Transition {
                 kind,
                 duration: default_duration.max(1),

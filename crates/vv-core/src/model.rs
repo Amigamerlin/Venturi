@@ -1354,12 +1354,21 @@ impl ClipFilter {
 pub enum TransitionKind {
     Push,
     CrossDissolve,
+    /// Morphs the frame before the cut into the one after it with optical
+    /// flow, to hide a jump cut. Needs both sides: on a single edge, or
+    /// where the renderer cannot morph, it falls back to a dissolve.
+    SmoothCut,
 }
 
 impl TransitionKind {
     /// Whether `Transition::direction` means anything for this kind.
     pub fn has_direction(self) -> bool {
         matches!(self, Self::Push)
+    }
+
+    /// Whether on a clip edge it changes the opacity (rather than the position).
+    fn fades(self) -> bool {
+        matches!(self, Self::CrossDissolve | Self::SmoothCut)
     }
 }
 
@@ -1458,7 +1467,7 @@ impl Transition {
     pub fn default_ease(kind: TransitionKind) -> Ease {
         match kind {
             TransitionKind::Push => Ease::InOut,
-            TransitionKind::CrossDissolve => Ease::None,
+            TransitionKind::CrossDissolve | TransitionKind::SmoothCut => Ease::None,
         }
     }
 }
@@ -2099,7 +2108,7 @@ impl Clip {
         offset
     }
 
-    /// Opacity multiplier at `timeline_frame` due to the cross dissolve
+    /// Opacity multiplier at `timeline_frame` due to the dissolving
     /// transitions in/out: the clip dissolves against what is below it.
     pub fn transition_opacity_at(&self, timeline_frame: FrameIdx) -> f32 {
         let len = self.timeline_len.max(1);
@@ -2109,7 +2118,7 @@ impl Clip {
             return opacity;
         }
         if let Some(t) = &self.effects.transition_in
-            && t.kind == TransitionKind::CrossDissolve
+            && t.kind.fades()
         {
             let d = t.duration.clamp(1, len);
             if pos >= 0 && pos < d {
@@ -2117,7 +2126,7 @@ impl Clip {
             }
         }
         if let Some(t) = &self.effects.transition_out
-            && t.kind == TransitionKind::CrossDissolve
+            && t.kind.fades()
         {
             let d = t.duration.clamp(1, len);
             let from_end = len - pos;
@@ -2610,7 +2619,7 @@ impl CrossTransition {
     pub fn opacities(&self, progress: f32) -> (f32, f32) {
         match self.transition.kind {
             TransitionKind::Push => (1.0, 1.0),
-            TransitionKind::CrossDissolve => (1.0, progress),
+            TransitionKind::CrossDissolve | TransitionKind::SmoothCut => (1.0, progress),
         }
     }
 }

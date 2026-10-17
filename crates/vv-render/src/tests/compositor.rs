@@ -2501,3 +2501,105 @@ fn a_wide_grow_reaches_as_far_at_a_lower_resolution() {
     assert!(at(190) < 30, "{}", at(190));
     assert!(at(210) > 225, "{}", at(210));
 }
+
+/// Full-range gray frame with blobs of several sizes, shifted right by `shift` pixels.
+fn textured_frame(w: u32, h: u32, shift: f32) -> OwnedYuvFrame {
+    let mut frame = solid_frame(w, h, 0, 128, 128, ColorMatrix::Bt709, true);
+    let mut seed = 12345u32;
+    let mut random = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let blobs: Vec<[f32; 4]> = (0..60)
+        .map(|_| {
+            [
+                random() * w as f32,
+                random() * h as f32,
+                3.0 + random() * w as f32 / 12.0,
+                random() * 2.0 - 1.0,
+            ]
+        })
+        .collect();
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 - shift, y as f32);
+            let mut value = 128.0;
+            for [bx, by, r, sign] in &blobs {
+                value += 70.0 * sign * (-((fx - bx).powi(2) + (fy - by).powi(2)) / (r * r)).exp();
+            }
+            frame.y[(y * w + x) as usize] = value.clamp(0.0, 255.0) as u8;
+        }
+    }
+    frame
+}
+
+fn video(frame: &OwnedYuvFrame) -> Layer<'_> {
+    Layer::new(
+        LayerContent::Video {
+            frame: frame.as_yuv_frame(),
+            source_size: (frame.width, frame.height),
+        },
+        Transform::default(),
+    )
+}
+
+fn mean_red_error(a: &[u8], b: &[u8], w: usize, margin: usize) -> f32 {
+    let h = a.len() / 4 / w;
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in margin..h - margin {
+        for x in margin..w - margin {
+            let i = (y * w + x) * 4;
+            sum += (a[i] as f32 - b[i] as f32).abs();
+            n += 1.0;
+        }
+    }
+    sum / n
+}
+
+/// Halfway through a Smooth Cut between a frame and the same frame shifted,
+/// the picture sits at half the shift: much closer to it than a dissolve.
+#[test]
+fn a_smooth_cut_halfway_shows_the_motion_halfway() {
+    let compositor = Compositor::new_headless();
+    let (w, h) = (320, 192);
+    let output = OutputFrame::exact(w, h);
+    let (from, to, halfway) = (
+        textured_frame(w, h, 0.0),
+        textured_frame(w, h, 30.0),
+        textured_frame(w, h, 15.0),
+    );
+
+    let morph =
+        compositor.render_smooth_cut_to_owned_texture(&video(&from), &video(&to), 0.5, output);
+    let morphed = compositor.render_layers(
+        &[Layer::new(
+            LayerContent::Texture {
+                texture: &morph,
+                source_size: (w, h),
+            },
+            Transform::default(),
+        )],
+        output,
+    );
+    let expected = compositor.render_layers(&[video(&halfway)], output);
+    let dissolved = compositor.render_layers(
+        &[
+            video(&from),
+            Layer {
+                opacity: 0.5,
+                ..video(&to)
+            },
+        ],
+        output,
+    );
+
+    // Past the shift at the left edge the content exists in only one frame.
+    const MARGIN: usize = 30;
+    let morph_error = mean_red_error(&morphed, &expected, w as usize, MARGIN);
+    let dissolve_error = mean_red_error(&dissolved, &expected, w as usize, MARGIN);
+    assert!(
+        morph_error < 1.0 && morph_error * 4.0 < dissolve_error,
+        "morph error {morph_error}, dissolve error {dissolve_error}"
+    );
+}

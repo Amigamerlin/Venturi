@@ -543,6 +543,49 @@ fn crossing_dissolve_fades_the_right_clip_in_over_the_left_one() {
     assert_eq!(position_of(&layers[1]), [0.0, 0.0]);
 }
 
+/// Without a GPU to morph on, a Smooth Cut dissolves between the frame
+/// before its window and the one after, both held still.
+#[test]
+fn a_smooth_cut_without_a_gpu_dissolves_between_the_held_sides() {
+    let left = solid_clip(1, 0, 100, [1.0, 1.0]);
+    let right = solid_clip(2, 100, 100, [1.0, 1.0]);
+    let mut track = Track::new(TrackKind::Video);
+    track.clips = vec![left.clone(), right];
+    track.crossings = vec![CrossTransition {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        transition: Transition {
+            kind: TransitionKind::SmoothCut,
+            duration: 4,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.0,
+        },
+    }];
+    let timeline = Timeline {
+        name: "t".into(),
+        fps: Rational::new(25, 1),
+        resolution: (1920, 1080),
+        tracks: vec![track],
+        markers: Vec::new(),
+        master: Default::default(),
+    };
+    let layers = track_layers_at(
+        &Project::default(),
+        &timeline,
+        0,
+        &left,
+        99,
+        timeline.resolution,
+        &mut NoMediaProvider,
+    )
+    .unwrap();
+
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].opacity, 1.0);
+    assert_eq!(layers[1].opacity, 0.25);
+}
+
 fn gray_frame() -> Arc<FrameYuv420> {
     Arc::new(FrameYuv420 {
         width: 2,

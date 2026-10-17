@@ -2002,7 +2002,14 @@ impl VenturiApp {
             }
             let frame = playhead.max(clip.timeline_start);
             let involved = match timeline.tracks[track_index].crossing_at(frame) {
-                Some((left, right, _)) if left.id == clip.id || right.id == clip.id => 2,
+                Some((left, right, crossing)) if left.id == clip.id || right.id == clip.id => {
+                    // A Smooth Cut merges both sides into one layer.
+                    if crossing.transition.kind == vv_core::TransitionKind::SmoothCut {
+                        1
+                    } else {
+                        2
+                    }
+                }
                 _ => 1,
             };
             let mut provider = frame_provider::GpuCompounds::new(render_ahead, &self.compositor)

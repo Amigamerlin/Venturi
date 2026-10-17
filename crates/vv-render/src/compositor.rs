@@ -840,6 +840,8 @@ pub struct Compositor {
     scratch: Arc<Mutex<Vec<wgpu::Texture>>>,
     /// Name and backend.
     adapter_name: String,
+    /// Built on first use: most projects never need it.
+    smooth_cut: std::sync::OnceLock<crate::smooth_cut::SmoothCut>,
 }
 
 #[derive(Default)]
@@ -1097,6 +1099,7 @@ impl Compositor {
             pool: Mutex::default(),
             scratch: Arc::default(),
             adapter_name,
+            smooth_cut: std::sync::OnceLock::new(),
         };
         compositor.log_work_format();
         compositor
@@ -1374,6 +1377,38 @@ impl Compositor {
     ) -> PooledTexture {
         PooledTexture {
             texture: Some(self.compose(layers, output, TRANSPARENT)),
+            pool: Arc::clone(&self.scratch),
+        }
+    }
+
+    /// The frame at `progress` (0..1) of a Smooth Cut from `from` to `to`:
+    /// each side composed alone, then morphed along their optical flow.
+    /// Owned like `render_layers_to_owned_texture_transparent`, to be used as a
+    /// `LayerContent::Texture`.
+    pub fn render_smooth_cut_to_owned_texture(
+        &self,
+        from: &Layer,
+        to: &Layer,
+        progress: f32,
+        output: OutputFrame,
+    ) -> PooledTexture {
+        let a = self.compose(std::slice::from_ref(from), output, TRANSPARENT);
+        let b = self.compose(std::slice::from_ref(to), output, TRANSPARENT);
+        let out = self.scratch_texture(output.width, output.height);
+        self.smooth_cut
+            .get_or_init(|| crate::smooth_cut::SmoothCut::new(&self.device))
+            .render(
+                &self.device,
+                &self.queue,
+                &self.sampler,
+                &a,
+                &b,
+                &out,
+                progress,
+            );
+        give_back(&mut self.scratch.lock().unwrap(), [a, b]);
+        PooledTexture {
+            texture: Some(out),
             pool: Arc::clone(&self.scratch),
         }
     }

@@ -440,8 +440,9 @@ Done:
   to the color wheels; masks
   (rectangle, ellipse, bezier path; feather, invert, add/subtract/intersect;
   handles and pen in the viewer), which on an adjustment clip limit where its
-  filters apply; Push transitions on a clip's
-  edges or across a cut; fades; adjustment clips; compound clips (a nested
+  filters apply; Push and Cross Dissolve transitions on a clip's
+  edges or across a cut, and Smooth Cut across a cut (optical flow morph,
+  `vv-render/src/smooth_cut.rs`); fades; adjustment clips; compound clips (a nested
   timeline in the media pool); markers.
 - Mixer: per-track and master gain, pan, solo, equalizer, multiband
   compressor, mono and normalization (sample peak, true peak, loudness);

@@ -3,6 +3,7 @@
 
 pub mod compositor;
 pub mod scopes;
+mod smooth_cut;
 pub mod text;
 
 pub use compositor::{

@@ -399,6 +399,8 @@ impl Importer<'_> {
                 let effect = &item["metadata"]["Resolve_OTIO"]["Effects"];
                 let kind = if item["transition_type"] == "SMPTE_Dissolve" {
                     TransitionKind::CrossDissolve
+                } else if item["name"] == "Smooth Cut" {
+                    TransitionKind::SmoothCut
                 } else {
                     TransitionKind::Push
                 };

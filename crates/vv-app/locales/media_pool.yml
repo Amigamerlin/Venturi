@@ -126,6 +126,10 @@ transition.cross_dissolve:
   en: "Cross Dissolve"
   it: "Dissolvenza incrociata"
 
+transition.smooth_cut:
+  en: "Smooth Cut"
+  it: "Smooth Cut"
+
 transition.direction_left:
   en: "Push Left"
   it: "Push a sinistra"

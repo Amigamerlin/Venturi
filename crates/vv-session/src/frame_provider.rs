@@ -35,6 +35,19 @@ pub trait FrameProvider {
     ) -> Result<Option<vv_render::PooledTexture>, ExportError> {
         Ok(None)
     }
+
+    /// The frame at `progress` of a Smooth Cut from `from` to `to`, as a GPU
+    /// texture of `timeline_size`. `None` from the default implementation:
+    /// the caller falls back on a dissolve.
+    fn smooth_cut_texture(
+        &mut self,
+        _from: &OwnedLayer,
+        _to: &OwnedLayer,
+        _progress: f32,
+        _timeline_size: (u32, u32),
+    ) -> Option<vv_render::PooledTexture> {
+        None
+    }
 }
 
 /// The nested timeline of `clip`, if it is a compound clip.
@@ -245,6 +258,21 @@ impl FrameProvider for GpuCompounds<'_> {
                 &render_layers,
                 vv_render::OutputFrame::exact(width, height).reduced(self.preview_divisor),
             ),
+        ))
+    }
+
+    fn smooth_cut_texture(
+        &mut self,
+        from: &OwnedLayer,
+        to: &OwnedLayer,
+        progress: f32,
+        (width, height): (u32, u32),
+    ) -> Option<vv_render::PooledTexture> {
+        Some(self.compositor.render_smooth_cut_to_owned_texture(
+            &from.as_render(),
+            &to.as_render(),
+            progress,
+            vv_render::OutputFrame::exact(width, height).reduced(self.preview_divisor),
         ))
     }
 }
@@ -466,8 +494,19 @@ fn crossing_layers(
     timeline_size: (u32, u32),
     provider: &mut dyn FrameProvider,
 ) -> Result<Vec<OwnedLayer>, ExportError> {
-    let frame_size = (timeline_size.0 as f32, timeline_size.1 as f32);
     let progress = crossing.eased_progress_at(frame, left, right);
+    if crossing.transition.kind == vv_core::TransitionKind::SmoothCut {
+        return smooth_cut_layers(
+            project,
+            left,
+            right,
+            crossing,
+            progress,
+            timeline_size,
+            provider,
+        );
+    }
+    let frame_size = (timeline_size.0 as f32, timeline_size.1 as f32);
     // The zoom of each clip at its own source frame: `offsets` needs it to
     // really clear the screen even if one of the two (or both) is zoomed
     // — see `push_clearance`. Recomputed here and again inside
@@ -505,6 +544,45 @@ fn crossing_layers(
         right_opacity,
     )?);
     Ok(layers)
+}
+
+/// A Smooth Cut morphs the last frame before its window into the first
+/// after it, both held for the whole window. Nothing until both are
+/// available; a dissolve between them where the provider cannot morph.
+fn smooth_cut_layers(
+    project: &Project,
+    left: &Clip,
+    right: &Clip,
+    crossing: &vv_core::CrossTransition,
+    progress: f32,
+    timeline_size: (u32, u32),
+    provider: &mut dyn FrameProvider,
+) -> Result<Vec<OwnedLayer>, ExportError> {
+    let window = crossing.window(left, right);
+    let side = |clip: &Clip, frame: FrameIdx, provider: &mut dyn FrameProvider| {
+        crossing_side_layer(project, clip, frame, timeline_size, provider, [0.0; 2], 1.0)
+    };
+    let (Some(from), Some(mut to)) = (
+        side(left, window.start, provider)?,
+        side(right, window.end - 1, provider)?,
+    ) else {
+        return Ok(Vec::new());
+    };
+    if let Some(texture) = provider.smooth_cut_texture(&from, &to, progress, timeline_size) {
+        return Ok(vec![OwnedLayer {
+            content: OwnedContent::Texture {
+                texture,
+                source_size: timeline_size,
+            },
+            transform: Transform::default(),
+            opacity: 1.0,
+            filters: Vec::new(),
+            blend: from.blend,
+            masks: Vec::new(),
+        }]);
+    }
+    to.opacity *= progress;
+    Ok(vec![from, to])
 }
 
 /// The layers of `clip` (on track `track_index`) at timeline frame
