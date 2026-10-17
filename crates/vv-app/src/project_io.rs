@@ -352,16 +352,46 @@ impl VenturiApp {
         }
     }
 
-    /// Files dropped by the file manager onto the window, wherever they land.
+    /// Files dropped by the file manager onto the window: the media go
+    /// into the library if dropped on its tab, into the project anywhere else.
     pub(crate) fn poll_dropped_files(&mut self, ctx: &egui::Context) {
-        let paths: Vec<PathBuf> = ctx.input(|i| {
-            i.raw
+        let (paths, pointer): (Vec<PathBuf>, _) = ctx.input(|i| {
+            let paths = i
+                .raw
                 .dropped_files
                 .iter()
                 .map(|f| f.path().to_path_buf())
-                .collect()
+                .collect();
+            (paths, i.pointer.latest_pos())
         });
-        self.open_paths(paths);
+        // Drawn again this frame if the pool is still shown.
+        let pool_area = self.library_ui.area.take();
+        let on_library = self.library_ui.tab == library_ui::PoolTab::Library
+            && pool_area
+                .zip(pointer)
+                .is_some_and(|(area, p)| area.contains(p));
+        if on_library {
+            self.open_paths_in_library(paths);
+        } else {
+            self.open_paths(paths);
+        }
+    }
+
+    /// Like `open_paths`, but the media go into the library.
+    fn open_paths_in_library(&mut self, paths: Vec<PathBuf>) {
+        let (media, other): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| {
+            !p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("vvproj") || e.eq_ignore_ascii_case("otio"))
+        });
+        self.open_paths(other);
+        if media.is_empty() {
+            return;
+        }
+        let tree = vv_session::MediaTree::scan(&media);
+        let origin = self.clipboard_origin();
+        if let Err(e) = self.library.import_tree(tree, None, origin) {
+            self.project_error = Some(t!("library.save_failed", error = e).into_owned());
+        }
     }
 
     /// Dropped or passed on the command line: a project is opened and an
@@ -381,15 +411,16 @@ impl VenturiApp {
             self.import_otio_from(otio);
         }
         if !media.is_empty() {
-            self.import_media_files(media);
+            self.session
+                .import_media_tree(vv_session::MediaTree::scan(&media), None);
         }
     }
 
     // Opens the file dialog and imports the chosen files (used by the toolbar
     // button and by the Ctrl+I shortcut).
     pub(crate) fn import_media_dialog(&mut self) {
-        const VIDEO: &[&str] = &["mp4", "mov", "mkv", "avi"];
-        const AUDIO: &[&str] = &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"];
+        const VIDEO: &[&str] = vv_media::VIDEO_EXTENSIONS;
+        const AUDIO: &[&str] = vv_media::AUDIO_EXTENSIONS;
         let media: Vec<&str> = [VIDEO, AUDIO, vv_media::IMAGE_EXTENSIONS].concat();
         self.spawn_dialog(DialogKind::ImportMedia, move |dlg| {
             DialogOutcome::Files(
@@ -733,7 +764,7 @@ impl VenturiApp {
         self.browsing_render_ahead = None;
         self.active_clip = None;
         self.last_synced_playhead = 0;
-        self.browsing_media = None;
+        self.browsing = None;
         if let Some(audio) = &mut self.timeline_audio {
             audio.pause();
             audio.invalidate();

@@ -110,7 +110,7 @@ impl VenturiApp {
     }
 
     /// The asset's pool items in this project, imported if needed.
-    fn import_library_asset(&mut self, asset_id: &str) -> Vec<MediaId> {
+    pub(crate) fn import_library_asset(&mut self, asset_id: &str) -> Vec<MediaId> {
         let key = (self.session.epoch(), asset_id.to_owned());
         if let Some(media) = self.library_ui.imports.get(&key)
             && media
@@ -332,6 +332,9 @@ impl VenturiApp {
     }
 
     fn remove_library_assets(&mut self, ids: &[String]) {
+        if matches!(&self.browsing, Some(Browsed::Asset(id)) if ids.contains(id)) {
+            self.stop_browsing();
+        }
         for id in ids {
             let result = self.library.remove_asset(id);
             self.library_result(result);
@@ -357,7 +360,7 @@ impl VenturiApp {
         }
     }
 
-    pub(crate) fn show_library(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn show_library(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<Browsed>) {
         for name in self.library.pending() {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -458,7 +461,7 @@ impl VenturiApp {
                     let result = self.library.move_folder(&id, parent);
                     self.library_result(result);
                 }
-                PoolEvent::Open(id) => self.add_library_assets_to_project(&[id]),
+                PoolEvent::Open(id) => *preview_action = Some(Browsed::Asset(id)),
                 // Imported only once the drag leaves the library, see below.
                 PoolEvent::DragStarted(_) => {}
                 PoolEvent::Action(LibraryAction::AddToProject) => {

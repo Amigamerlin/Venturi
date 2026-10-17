@@ -211,3 +211,67 @@ fn project_copies_reuse_an_identical_file_and_never_overwrite_another() {
     );
     assert_eq!(std::fs::read(&first).unwrap(), b"logo");
 }
+
+fn wait_for_pending(library: &mut Library) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while library.pending().next().is_some() {
+        assert!(library.poll().is_empty());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "copies never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_dropped_folder_becomes_library_folders_with_its_media() {
+    let root = temp_root("import-tree");
+    let shots = root.join("drop").join("Shots");
+    std::fs::create_dir_all(shots.join("Day 1")).unwrap();
+    for file in [shots.join("a.png"), shots.join("Day 1").join("b.png")] {
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:size=16x16",
+                "-frames:v",
+                "1",
+            ],
+            &file,
+        );
+    }
+    let origin = ClipboardOrigin {
+        instance: 0,
+        epoch: 0,
+    };
+    let mut library = Library::open(root.join("library"));
+
+    let tree = vv_session::MediaTree::scan(std::slice::from_ref(&shots));
+    library.import_tree(tree, None, origin).unwrap();
+    wait_for_pending(&mut library);
+
+    let folder_name = |library: &Library, asset: &str| {
+        let asset = library.assets.iter().find(|a| a.name == asset).unwrap();
+        let folder = library.folder(asset.folder.as_deref().unwrap()).unwrap();
+        let parent = folder
+            .parent
+            .as_deref()
+            .map(|p| library.folder(p).unwrap().name.clone());
+        (folder.name.clone(), parent)
+    };
+    assert_eq!(folder_name(&library, "a.png"), ("Shots".into(), None));
+    assert_eq!(
+        folder_name(&library, "b.png"),
+        ("Day 1".into(), Some("Shots".into()))
+    );
+
+    // Dropped again: same folders, nothing duplicated.
+    let tree = vv_session::MediaTree::scan(std::slice::from_ref(&shots));
+    library.import_tree(tree, None, origin).unwrap();
+    wait_for_pending(&mut library);
+    assert_eq!(library.folders.len(), 2);
+    assert_eq!(library.assets.len(), 2);
+    assert_eq!(Library::open(root.join("library")).assets.len(), 2);
+}

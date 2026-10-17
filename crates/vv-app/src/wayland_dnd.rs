@@ -33,6 +33,9 @@ const URI_LIST: &str = "text/uri-list";
 #[derive(Default)]
 struct Shared {
     hovering: bool,
+    /// Where the drag is, in surface coordinates: egui gets no pointer
+    /// events during it, and the drop target depends on it.
+    position: Option<(f64, f64)>,
     dropped: Vec<PathBuf>,
     selection: Option<SelectionOffer>,
 }
@@ -94,10 +97,16 @@ impl WaylandDnd {
         Some((pipe, extension))
     }
 
-    pub fn feed(&self, raw_input: &mut egui::RawInput) {
+    /// `zoom`: egui's zoom factor, between surface coordinates and points.
+    pub fn feed(&self, raw_input: &mut egui::RawInput, zoom: f32) {
         let mut shared = self.shared.lock().unwrap();
         if shared.hovering {
             raw_input.hovered_files.push(egui::HoveredFile::default());
+        }
+        if let Some((x, y)) = shared.position.take() {
+            raw_input.events.push(egui::Event::PointerMoved(
+                egui::pos2(x as f32, y as f32) / zoom,
+            ));
         }
         raw_input.dropped_files.extend(
             shared.dropped.drain(..).map(|path| {
@@ -154,10 +163,11 @@ impl DataDeviceHandler for State {
         _: &Connection,
         _: &QueueHandle<Self>,
         device: &WlDataDevice,
-        _: f64,
-        _: f64,
+        x: f64,
+        y: f64,
         _: &WlSurface,
     ) {
+        self.shared.lock().unwrap().position = Some((x, y));
         let Some(offer) = self.drag_offer(device) else {
             return;
         };
@@ -173,7 +183,10 @@ impl DataDeviceHandler for State {
         self.set_hovering(false);
     }
 
-    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, x: f64, y: f64) {
+        self.shared.lock().unwrap().position = Some((x, y));
+        self.ctx.request_repaint();
+    }
 
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
         self.shared.lock().unwrap().selection = self

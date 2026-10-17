@@ -573,3 +573,48 @@ fn save_view_writes_the_file_only_when_nothing_else_is_unsaved() {
     );
     assert!(session.has_unsaved_changes());
 }
+
+/// Folder of the media named `name`, and the folder's parent.
+fn folder_of(session: &Session, name: &str) -> (String, Option<String>) {
+    let (_, item) = session
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| crate::file_label(&item.path) == name)
+        .unwrap();
+    let folder = &session.project.folders[item.folder.unwrap()];
+    let parent = folder
+        .parent
+        .map(|p| session.project.folders[p].name.clone());
+    (folder.name.clone(), parent)
+}
+
+#[test]
+fn a_dropped_folder_is_imported_into_matching_pool_folders() {
+    let dir = test_dir("import-tree");
+    let shots = dir.join("Shots");
+    std::fs::create_dir_all(shots.join("Day 1")).unwrap();
+    clip_file(&shots, "a.mp4");
+    clip_file(&shots.join("Day 1"), "b.mp4");
+    let mut session = Session::default();
+
+    session.import_media_tree(crate::MediaTree::scan(&[shots.clone()]), None);
+    run_jobs(&mut session);
+
+    assert_eq!(folder_of(&session, "a.mp4"), ("Shots".into(), None));
+    assert_eq!(
+        folder_of(&session, "b.mp4"),
+        ("Day 1".into(), Some("Shots".into()))
+    );
+
+    // Dropped again, it fills the same folders instead of new ones.
+    clip_file(&shots, "c.mp4");
+    session.import_media_tree(crate::MediaTree::scan(&[shots]), None);
+    run_jobs(&mut session);
+    assert_eq!(session.project.folders.len(), 2);
+    assert_eq!(folder_of(&session, "c.mp4"), ("Shots".into(), None));
+
+    session.history.undo(&mut session.project);
+    session.history.undo(&mut session.project);
+    assert!(session.project.folders.is_empty(), "undone with the import");
+}

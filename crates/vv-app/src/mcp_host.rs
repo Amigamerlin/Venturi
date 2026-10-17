@@ -533,7 +533,10 @@ impl VenturiApp {
                 .map(|&(_, id)| id)
                 .collect(),
             selected_media: self.media_pool_state.selected.iter().copied().collect(),
-            previewed_media: self.browsing_media,
+            previewed_media: match &self.browsing {
+                Some(Browsed::Media(id)) => Some(*id),
+                _ => None,
+            },
         }
     }
 

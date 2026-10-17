@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
-use vv_core::clipboard::ClipboardPayload;
-use vv_core::{Clip, MediaItem, Rational};
+use vv_core::clipboard::{ClipboardOrigin, ClipboardPayload};
+use vv_core::{Clip, MediaItem, Project, Rational};
+use vv_session::MediaTree;
 
 use crate::paste_attributes::{Attribute, KeyframeAnchor, TimelineFormat};
 use crate::settings::Shortcut;
@@ -108,7 +109,8 @@ impl AttributePreset {
 /// An asset whose files are still being copied.
 struct PendingAsset {
     name: String,
-    done: mpsc::Receiver<Result<Asset, String>>,
+    /// `Ok(None)`: the file was already there, nothing added.
+    done: mpsc::Receiver<Result<Option<Asset>, String>>,
 }
 
 #[derive(Default)]
@@ -190,9 +192,70 @@ impl Library {
                 Some(root) => store_asset(&root, asset),
                 None => Ok(asset),
             };
-            let _ = tx.send(result);
+            let _ = tx.send(result.map(Some));
         });
         self.pending.push(PendingAsset { name, done });
+    }
+
+    /// Each media file of `tree` becomes an asset in `parent`, its folders
+    /// library folders: one with the same name and place as an existing
+    /// one is merged into it, and a file already in its folder is skipped.
+    /// Probed and copied in the background, one file at a time.
+    pub fn import_tree(
+        &mut self,
+        tree: MediaTree,
+        parent: Option<String>,
+        origin: ClipboardOrigin,
+    ) -> Result<(), String> {
+        let mut ids: Vec<String> = Vec::with_capacity(tree.folders.len());
+        for (name, inside) in tree.folders {
+            let parent = inside.map(|i| ids[i].clone()).or_else(|| parent.clone());
+            let existing = self
+                .folders
+                .iter()
+                .find(|f| f.parent == parent && f.name == name)
+                .map(|f| f.id.clone());
+            let id = match existing {
+                Some(id) => id,
+                None => self.add_folder(name, parent)?,
+            };
+            ids.push(id);
+        }
+        let present: Vec<(u64, Option<String>)> = self
+            .assets
+            .iter()
+            .filter_map(|a| Some((a.item()?.content_hash, a.folder.clone())))
+            .collect();
+        let mut jobs = Vec::with_capacity(tree.files.len());
+        for (path, inside) in tree.files {
+            let (tx, done) = mpsc::channel();
+            self.pending.push(PendingAsset {
+                name: vv_session::file_label(&path),
+                done,
+            });
+            let folder = inside.map(|i| ids[i].clone()).or_else(|| parent.clone());
+            jobs.push((path, folder, tx));
+        }
+        let root = self.root.clone();
+        std::thread::spawn(move || {
+            for (path, folder, tx) in jobs {
+                let result = file_asset(&path, folder, origin).and_then(|asset| {
+                    let hash = asset.item().map(|i| i.content_hash);
+                    if present
+                        .iter()
+                        .any(|(h, f)| Some(*h) == hash && *f == asset.folder)
+                    {
+                        return Ok(None);
+                    }
+                    match &root {
+                        Some(root) => store_asset(root, asset).map(Some),
+                        None => Ok(Some(asset)),
+                    }
+                });
+                let _ = tx.send(result);
+            }
+        });
+        Ok(())
     }
 
     /// Collects the finished copies; returns the errors.
@@ -204,7 +267,8 @@ impl Library {
                 Ok(result) => {
                     let pending = self.pending.remove(i);
                     match result {
-                        Ok(asset) => self.insert_asset(asset),
+                        Ok(Some(asset)) => self.insert_asset(asset),
+                        Ok(None) => {}
                         Err(e) => errors.push(format!("{}: {e}", pending.name)),
                     }
                 }
@@ -435,6 +499,30 @@ impl Library {
 
 /// Copies each file into `media/`. A missing file fails the whole asset:
 /// stored, it would only come back offline.
+/// An asset of the media file at `path`, not copied yet.
+fn file_asset(
+    path: &Path,
+    folder: Option<String>,
+    origin: ClipboardOrigin,
+) -> Result<Asset, String> {
+    let meta = vv_media::probe_media(path).map_err(|e| e.to_string())?;
+    let mut project = Project::default();
+    let id = project.media_pool.insert(MediaItem {
+        path: path.to_path_buf(),
+        meta,
+        // `0` only if the file vanished meanwhile: the copy then fails anyway.
+        content_hash: vv_media::content_fingerprint(path).unwrap_or(0),
+        compound: None,
+        folder: None,
+    });
+    Ok(Asset {
+        id: new_id(),
+        name: vv_session::file_label(path),
+        folder,
+        payload: ClipboardPayload::new(origin, &project, &[id], &[]),
+    })
+}
+
 fn store_asset(root: &Path, mut asset: Asset) -> Result<Asset, String> {
     let media_dir = root.join("media");
     for item in asset.payload.files_mut() {

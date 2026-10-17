@@ -505,7 +505,7 @@ impl VenturiApp {
     pub(crate) fn show_media_pool(
         &mut self,
         ui: &mut egui::Ui,
-        preview_action: &mut Option<MediaId>,
+        preview_action: &mut Option<Browsed>,
     ) {
         let area = ui.available_rect_before_wrap();
         self.library_ui.area = Some(area);
@@ -514,13 +514,13 @@ impl VenturiApp {
             self.show_library_copy_progress(ui);
             match self.library_ui.tab {
                 library_ui::PoolTab::Project => self.show_project_pool(ui, preview_action),
-                library_ui::PoolTab::Library => self.show_library(ui),
+                library_ui::PoolTab::Library => self.show_library(ui, preview_action),
             }
         });
         ui.allocate_rect(area, egui::Sense::hover());
     }
 
-    fn show_project_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
+    fn show_project_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<Browsed>) {
         if let Some(worker) = &self.proxy_worker {
             let progress = worker.progress();
             let paused = worker.is_paused();
@@ -625,7 +625,7 @@ impl VenturiApp {
                 // "Preview" makes no sense for it.
                 PoolEvent::Open(id) => {
                     if !self.open_pool_compound(id) {
-                        *preview_action = Some(id);
+                        *preview_action = Some(Browsed::Media(id));
                     }
                 }
                 PoolEvent::DragStarted(media) => {

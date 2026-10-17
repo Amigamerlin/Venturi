@@ -211,7 +211,7 @@ fn an_agent_import_does_not_move_the_users_view() {
 
     assert_eq!(result.value["media"][0]["name"], "hidden.mp4");
     assert_eq!(app.timeline_id, None, "no timeline created for the agent");
-    assert_eq!(app.browsing_media, None);
+    assert_eq!(app.browsing, None);
     assert!(app.media_pool_state.selected.is_empty());
     assert_eq!(app.import_warnings, ["the user's"]);
 }

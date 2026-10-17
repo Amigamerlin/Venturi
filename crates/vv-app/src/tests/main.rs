@@ -1206,10 +1206,10 @@ fn deleting_a_media_being_previewed_stops_the_preview() {
         vv_core::Rational::new(25, 1),
         100,
     );
-    app.browsing_media = Some(media_id);
+    app.browsing = Some(Browsed::Media(media_id));
     app.media_pool_state.selected = BTreeSet::from([media_id]);
     app.delete_selected_media();
-    assert_eq!(app.browsing_media, None);
+    assert_eq!(app.browsing, None);
 }
 
 #[test]
@@ -4039,7 +4039,7 @@ fn browse_fixture(name: &str) -> (VenturiApp, MediaId) {
     let mut app = VenturiApp::default();
     let media_id = app.add_media_to_pool(path).unwrap();
     app.preview_media(media_id);
-    app.browsing_media = Some(media_id);
+    app.browsing = Some(Browsed::Media(media_id));
     (app, media_id)
 }
 
@@ -4047,7 +4047,7 @@ fn browse_fixture(name: &str) -> (VenturiApp, MediaId) {
 fn space_plays_the_media_pool_preview_instead_of_leaving_it() {
     let (mut app, media_id) = browse_fixture("space.mp4");
     app.toggle_playback();
-    assert_eq!(app.browsing_media, Some(media_id));
+    assert_eq!(app.browsing, Some(Browsed::Media(media_id)));
     assert!(app.is_timeline_playing());
 
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -4969,7 +4969,7 @@ fn undoing_an_import_removes_its_media_and_the_timeline_it_created() {
     assert!(app.session.project.timelines.is_empty());
     assert_eq!(app.timeline_id, None);
     assert!(app.media_pool_state.selected.is_empty());
-    assert_eq!(app.browsing_media, None);
+    assert_eq!(app.browsing, None);
 
     app.redo();
     assert_eq!(
@@ -5344,4 +5344,38 @@ fn a_text_edit_leaves_the_animated_text_of_other_titles_to_keyframes() {
         .upsert(5, "Later".into(), vv_core::Interpolation::Hold);
     assert_eq!(apply_title_edit(&animated, &before, &after), animated);
     assert_eq!(apply_title_edit(&before, &before, &after), after);
+}
+
+#[test]
+fn a_library_asset_previews_without_joining_the_project_until_dragged() {
+    let (source, media_id) = browse_fixture("library-asset.mp4");
+    let path = source.session.project.media_pool[media_id].path.clone();
+    let mut app = VenturiApp::default();
+    let origin = app.clipboard_origin();
+    app.library
+        .import_tree(vv_session::MediaTree::scan(&[path]), None, origin)
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while app.library.pending().next().is_some() {
+        let errors = app.library.poll();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let asset = Browsed::Asset(app.library.assets[0].id.clone());
+
+    app.preview(&asset);
+    app.browsing = Some(asset.clone());
+    assert!(app.preview_meta.as_ref().is_some_and(|m| m.has_video));
+    assert!(app.browsing_item().is_some());
+    assert!(app.session.project.media_pool.is_empty());
+
+    // What the viewer's drag does: imported once, the same media after.
+    let Browsed::Asset(id) = asset else {
+        unreachable!()
+    };
+    let first = app.import_library_asset(&id);
+    assert_eq!(first.len(), 1);
+    assert_eq!(app.import_library_asset(&id), first);
+    assert_eq!(app.session.project.media_pool.len(), 1);
 }

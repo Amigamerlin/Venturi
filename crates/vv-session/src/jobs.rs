@@ -15,6 +15,7 @@ use vv_core::{
 use crate::Session;
 use crate::export::{ExportError, ExportProgress, ExportSettings};
 use crate::import_worker::ImportWorker;
+use crate::media_tree::MediaTree;
 use crate::relink_job::{self, RelinkOutcome, RelinkProgress, RelinkRequest};
 
 pub type JobId = u64;
@@ -106,7 +107,7 @@ pub enum RelinkEnd {
 pub(crate) struct Jobs {
     next_id: JobId,
     events: Vec<SessionEvent>,
-    queued_imports: VecDeque<(JobId, Vec<PathBuf>)>,
+    queued_imports: VecDeque<(JobId, Vec<(PathBuf, Option<FolderId>)>)>,
     import: Option<RunningImport>,
     /// The undo step of the last import, while it can still grow.
     import_step: Option<(JobId, JoinableStep)>,
@@ -121,6 +122,7 @@ pub(crate) struct Jobs {
 struct RunningImport {
     job: JobId,
     worker: ImportWorker,
+    folders: HashMap<PathBuf, FolderId>,
     imported: Vec<MediaId>,
     errors: Vec<String>,
 }
@@ -208,12 +210,17 @@ impl Session {
 
     /// Adds an already probed media to the pool, as its own undo step.
     pub fn add_media(&mut self, path: PathBuf, meta: MediaMeta) -> MediaId {
-        let (media_id, add) = self.media_entity(path, meta);
+        let (media_id, add) = self.media_entity(path, meta, None);
         self.history.do_command(&mut self.project, Box::new(add));
         media_id
     }
 
-    fn media_entity(&mut self, path: PathBuf, meta: MediaMeta) -> (MediaId, AddEntities) {
+    fn media_entity(
+        &mut self,
+        path: PathBuf,
+        meta: MediaMeta,
+        folder: Option<FolderId>,
+    ) -> (MediaId, AddEntities) {
         // `0` only if the file vanished in the meantime: at worst a proxy is
         // regenerated.
         let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
@@ -225,7 +232,7 @@ impl Session {
                 meta,
                 content_hash,
                 compound: None,
-                folder: None,
+                folder,
             },
         );
         (media_id, add)
@@ -251,7 +258,40 @@ impl Session {
     /// imports started before it.
     pub fn import_media(&mut self, paths: Vec<PathBuf>) -> JobId {
         let job = self.jobs.alloc();
-        self.jobs.queued_imports.push_back((job, paths));
+        let files = paths.into_iter().map(|path| (path, None)).collect();
+        self.jobs.queued_imports.push_back((job, files));
+        self.start_next_import();
+        job
+    }
+
+    /// Imports the media of `tree` into `parent`, its folders becoming pool
+    /// folders. A folder with the same name and place as one already in the
+    /// pool is merged into it.
+    pub fn import_media_tree(&mut self, tree: MediaTree, parent: Option<FolderId>) -> JobId {
+        let job = self.jobs.alloc();
+        let mut add = AddEntities::new(CommandLabel::ImportMedia);
+        let mut ids: Vec<FolderId> = Vec::with_capacity(tree.folders.len());
+        for (name, inside) in tree.folders {
+            let parent = inside.map(|i| ids[i]).or(parent);
+            let existing = self
+                .project
+                .folders
+                .iter()
+                .find(|(_, f)| f.parent == parent && f.name == name)
+                .map(|(id, _)| id);
+            let id = existing
+                .unwrap_or_else(|| add.folder(&mut self.project, MediaFolder { name, parent }));
+            ids.push(id);
+        }
+        if !add.is_empty() {
+            self.join_import(job, Box::new(add));
+        }
+        let files = tree
+            .files
+            .into_iter()
+            .map(|(path, inside)| (path, inside.map(|i| ids[i]).or(parent)))
+            .collect();
+        self.jobs.queued_imports.push_back((job, files));
         self.start_next_import();
         job
     }
@@ -270,7 +310,7 @@ impl Session {
 
     fn start_next_import(&mut self) {
         while self.jobs.import.is_none() {
-            let Some((job, paths)) = self.jobs.queued_imports.pop_front() else {
+            let Some((job, files)) = self.jobs.queued_imports.pop_front() else {
                 return;
             };
             let mut seen: HashSet<PathBuf> = self
@@ -280,10 +320,19 @@ impl Session {
                 .filter(|item| item.compound.is_none())
                 .map(|item| canonical_path(&item.path))
                 .collect();
-            let paths: Vec<PathBuf> = paths
+            let (paths, folders): (Vec<PathBuf>, HashMap<PathBuf, FolderId>) = files
                 .into_iter()
-                .filter(|path| seen.insert(canonical_path(path)))
-                .collect();
+                .filter(|(path, _)| seen.insert(canonical_path(path)))
+                .fold(
+                    Default::default(),
+                    |(mut paths, mut folders), (path, folder)| {
+                        if let Some(folder) = folder {
+                            folders.insert(path.clone(), folder);
+                        }
+                        paths.push(path);
+                        (paths, folders)
+                    },
+                );
             if paths.is_empty() {
                 self.jobs.events.push(SessionEvent::ImportFinished {
                     job,
@@ -296,6 +345,7 @@ impl Session {
             self.jobs.import = Some(RunningImport {
                 job,
                 worker: ImportWorker::spawn(paths, self.waker.clone()),
+                folders,
                 imported: Vec::new(),
                 errors: Vec::new(),
             });
@@ -309,7 +359,8 @@ impl Session {
         for (path, result) in running.worker.drain_ready() {
             match result {
                 Ok(meta) => {
-                    let (media_id, add) = self.media_entity(path, meta);
+                    let folder = running.folders.get(&path).copied();
+                    let (media_id, add) = self.media_entity(path, meta, folder);
                     self.join_import(running.job, Box::new(add));
                     running.imported.push(media_id);
                     self.jobs.events.push(SessionEvent::MediaAdded {

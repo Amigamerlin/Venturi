@@ -25,8 +25,8 @@ library.empty_hint:
   it: "Vuota. Tasto destro su un elemento del pool del progetto e scegli \"Aggiungi alla libreria\"."
 
 library.item_hint:
-  en: "Drag onto the timeline or double click to add it to the project"
-  it: "Trascina sulla timeline o doppio clic per aggiungerlo al progetto"
+  en: "Double click: preview · drag onto the timeline to add it to the project"
+  it: "Doppio clic: anteprima · trascina sulla timeline per aggiungerlo al progetto"
 
 library.copying:
   en: "Copying %{name}…"

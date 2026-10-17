@@ -340,6 +340,20 @@ pub fn is_image_path(path: &Path) -> bool {
         })
 }
 
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v"];
+pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"];
+
+/// Whether the extension is one of the media Venturi imports.
+pub fn is_media_path(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    [VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, IMAGE_EXTENSIONS]
+        .concat()
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(ext))
+}
+
 /// `probe_image` or `probe`, by extension.
 pub fn probe_media(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     if is_image_path(path) {

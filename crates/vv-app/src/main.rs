@@ -250,6 +250,14 @@ enum ViewerFrameKind {
     Offline,
 }
 
+/// What the viewer browses instead of the timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Browsed {
+    Media(MediaId),
+    /// A library asset, by id: it joins the project only when dragged out.
+    Asset(String),
+}
+
 struct VenturiApp {
     session: vv_session::Session,
     timeline_id: Option<TimelineId>,
@@ -356,9 +364,9 @@ struct VenturiApp {
     /// from the one moved by the user.
     last_synced_playhead: FrameIdx,
 
-    /// Media previewed from the pool: the viewer shows it instead of the timeline,
-    /// until the timeline is interacted with.
-    browsing_media: Option<MediaId>,
+    /// Media previewed from the pool or the library: the viewer shows it
+    /// instead of the timeline, until the timeline is interacted with.
+    browsing: Option<Browsed>,
     browse_playhead: FrameIdx,
     /// In/out of the preview: the portion dragged from the viewer onto the timeline.
     browse_marks: transport::MarkRange,
@@ -532,7 +540,7 @@ impl Default for VenturiApp {
             mask_focus: None,
             mask_overlay: Default::default(),
             last_synced_playhead: 0,
-            browsing_media: None,
+            browsing: None,
             browse_playhead: 0,
             browse_marks: transport::MarkRange::default(),
             browse_audio_streams: 0,
@@ -663,11 +671,27 @@ impl VenturiApp {
         }
     }
 
-    /// "Raw" preview of a media from the media pool, not tied to the
-    /// timeline: it shows the first frame from a dedicated decode-ahead.
     fn preview_media(&mut self, media_id: MediaId) {
+        self.preview(&Browsed::Media(media_id));
+    }
+
+    /// The pool item or the library asset's media.
+    fn browsed_item(&self, browsed: &Browsed) -> Option<&vv_core::MediaItem> {
+        match browsed {
+            Browsed::Media(id) => self.session.project.media_pool.get(*id),
+            Browsed::Asset(id) => self.library.assets.iter().find(|a| a.id == *id)?.item(),
+        }
+    }
+
+    fn browsing_item(&self) -> Option<&vv_core::MediaItem> {
+        self.browsed_item(self.browsing.as_ref()?)
+    }
+
+    /// "Raw" preview of a media, not tied to the timeline: it shows the
+    /// first frame from a dedicated decode-ahead.
+    fn preview(&mut self, browsed: &Browsed) {
         self.browsing_render_ahead = None;
-        let Some(item) = self.session.project.media_pool.get(media_id) else {
+        let Some(item) = self.browsed_item(browsed).cloned() else {
             return;
         };
         let (path, meta) = (item.path.clone(), item.meta.clone());
@@ -690,17 +714,17 @@ impl VenturiApp {
             self.preview_error = Some(e.to_string());
             return;
         }
-        self.browsing_render_ahead = Some(self.spawn_browsing_render_ahead(media_id));
+        self.browsing_render_ahead = Some(self.spawn_browsing_render_ahead(item));
     }
 
     /// A timeline at the media fps with only it on top: the timeline frames
     /// coincide with the source ones.
     fn spawn_browsing_render_ahead(
         &self,
-        media_id: MediaId,
+        item: vv_core::MediaItem,
     ) -> (render_ahead::RenderAhead, MediaId) {
         self.spawn_media_render_ahead(
-            media_id,
+            item,
             self.settings.cache_budget_bytes,
             self.settings.lookahead_secs,
             self.settings.behind_secs,
@@ -709,12 +733,11 @@ impl VenturiApp {
 
     fn spawn_media_render_ahead(
         &self,
-        media_id: MediaId,
+        item: vv_core::MediaItem,
         cache_budget_bytes: usize,
         lookahead_secs: f64,
         behind_secs: f64,
     ) -> (render_ahead::RenderAhead, MediaId) {
-        let item = self.session.project.media_pool[media_id].clone();
         let meta = item.meta.clone();
         let mut project = vv_core::Project::default();
         let preview_media = project.media_pool.insert(item);
@@ -799,7 +822,7 @@ impl VenturiApp {
     /// Aligns the viewer clip to the playhead and, if the user moved it
     /// (`force_seek` even during playback), the audio clock.
     fn ensure_active_clip_matches_playhead(&mut self, force_seek: bool) {
-        if self.browsing_media.is_some() {
+        if self.browsing.is_some() {
             return;
         }
         let Some(timeline_id) = self.timeline_id else {
@@ -835,15 +858,17 @@ impl VenturiApp {
 
     fn sync_timeline_audio(&mut self) {
         let fps = self.browse_fps();
+        let browsed = self
+            .browsing_item()
+            .map(|item| (item.path.clone(), item.meta.clone()));
         let Some(audio) = &mut self.timeline_audio else {
             return;
         };
         audio.set_budget_bytes(self.settings.audio_budget_bytes);
-        if let Some(media_id) = self.browsing_media {
-            if let Some(item) = self.session.project.media_pool.get(media_id) {
-                let duration_secs =
-                    item.meta.duration_frames as f64 / item.meta.fps.as_f64().max(1e-9);
-                audio.sync_media(&item.path, self.browse_audio_streams, fps, duration_secs);
+        if self.browsing.is_some() {
+            if let Some((path, meta)) = browsed {
+                let duration_secs = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
+                audio.sync_media(&path, self.browse_audio_streams, fps, duration_secs);
             }
         } else if let Some(timeline_id) = self.timeline_id {
             audio.sync(
@@ -855,11 +880,11 @@ impl VenturiApp {
     }
 
     fn stop_browsing(&mut self) {
-        if self.browsing_media.is_some() && self.is_timeline_playing() {
+        if self.browsing.is_some() && self.is_timeline_playing() {
             self.timeline_audio().pause();
             self.reset_playback_speed_to_normal();
         }
-        self.browsing_media = None;
+        self.browsing = None;
         self.browsing_render_ahead = None;
         self.preview_meta = None;
         // The clock stayed at the preview position: force the seek to the
@@ -911,7 +936,7 @@ impl VenturiApp {
     }
 
     fn drive_browse_playback(&mut self) {
-        if self.browsing_media.is_none() || !self.is_timeline_playing() {
+        if self.browsing.is_none() || !self.is_timeline_playing() {
             return;
         }
         let fps = self.browse_fps();
@@ -927,7 +952,7 @@ impl VenturiApp {
 
     /// I/O keys: on the preview if active, otherwise on the timeline.
     fn mark_at_playhead(&mut self, is_in: bool) {
-        let (marks, frame, total) = if self.browsing_media.is_some() {
+        let (marks, frame, total) = if self.browsing.is_some() {
             let total = self.browse_total_frames();
             (&mut self.browse_marks, self.browse_playhead, total)
         } else if let Some(timeline_id) = self.timeline_id {
@@ -982,7 +1007,7 @@ impl VenturiApp {
     }
 
     fn play_scrub_audio(&mut self) {
-        if !self.scrub_audio || self.browsing_media.is_some() {
+        if !self.scrub_audio || self.browsing.is_some() {
             return;
         }
         let Some(timeline_id) = self.timeline_id else {
@@ -1001,7 +1026,7 @@ impl VenturiApp {
     /// gaps included (they play silence), stopping only past the end of the
     /// content.
     fn toggle_playback(&mut self) {
-        if self.browsing_media.is_some() {
+        if self.browsing.is_some() {
             self.toggle_browse_playback();
             return;
         }
@@ -1058,7 +1083,7 @@ impl VenturiApp {
     /// "a" key: when stopped like the space bar (1x), during playback it
     /// accelerates 2x -> 4x -> 8x. Only the space bar pauses.
     fn handle_fast_playback_key(&mut self) {
-        if self.browsing_media.is_some() {
+        if self.browsing.is_some() {
             if !self.is_timeline_playing() {
                 self.toggle_browse_playback();
             }
@@ -2086,7 +2111,7 @@ impl VenturiApp {
             // Only the frame under each end matters: a small slice of the budget.
             let spawn = || {
                 self.spawn_media_render_ahead(
-                    preview.media_id,
+                    self.session.project.media_pool[preview.media_id].clone(),
                     self.settings.cache_budget_bytes / 8,
                     0.0,
                     0.0,
@@ -2376,7 +2401,7 @@ impl VenturiApp {
     /// `(total, playhead, (in, out), playing)` of the playback bar.
     fn transport_state(&self) -> (FrameIdx, FrameIdx, (FrameIdx, FrameIdx), bool) {
         let playing = self.is_timeline_playing();
-        if self.browsing_media.is_some() {
+        if self.browsing.is_some() {
             let total = self.browse_total_frames();
             (
                 total,
@@ -2541,7 +2566,7 @@ impl VenturiApp {
         pending: &mut Vec<BoxedCommand>,
     ) {
         let visible = self.show_transform_overlay
-            && self.browsing_media.is_none()
+            && self.browsing.is_none()
             && !self.is_timeline_playing()
             && matches!(self.last_viewer_frame_kind, Some(ViewerFrameKind::Video));
         let Some((timeline_id, target)) = self.timeline_id.zip(video_targets.first().copied())
@@ -2725,9 +2750,7 @@ impl VenturiApp {
             .copied()
             .map(|id| Box::new(vv_core::RemoveMedia::new(id)) as Box<dyn vv_core::Command>)
             .collect();
-        if self
-            .browsing_media
-            .is_some_and(|id| self.media_pool_state.selected.contains(&id))
+        if matches!(&self.browsing, Some(Browsed::Media(id)) if self.media_pool_state.selected.contains(id))
         {
             self.stop_browsing();
         }
@@ -2763,10 +2786,7 @@ impl VenturiApp {
     /// the project, e.g. by undoing the import or the timeline that
     /// created them.
     fn forget_removed_entities(&mut self) {
-        if self
-            .browsing_media
-            .is_some_and(|id| !self.session.project.media_pool.contains_key(id))
-        {
+        if self.browsing.is_some() && self.browsing_item().is_none() {
             self.stop_browsing();
         }
         self.leave_removed_timelines();
@@ -2800,7 +2820,7 @@ impl VenturiApp {
     /// The active clip points at a media no longer in the media pool, or
     /// whose file is missing.
     fn active_clip_media_offline(&self) -> bool {
-        if self.browsing_media.is_some() {
+        if self.browsing.is_some() {
             return false;
         }
         let (Some(timeline_id), Some((track_index, clip_id))) =
@@ -3852,14 +3872,14 @@ fn frame_stride(shown_frames_only: bool, playing: bool, speed: f64) -> FrameIdx 
 }
 
 impl eframe::App for VenturiApp {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         unstick_wheel_modifiers(raw_input);
         self.paste_key_watch.feed(raw_input);
         #[cfg(target_os = "macos")]
         fix_iso_key(raw_input, &mut self.iso_key_down);
         #[cfg(target_os = "linux")]
         if let Some(dnd) = &self.wayland_dnd {
-            dnd.feed(raw_input);
+            dnd.feed(raw_input, ctx.zoom_factor());
         }
     }
 
@@ -4249,14 +4269,14 @@ impl VenturiApp {
         // Interacting with the timeline (selecting a clip or moving the
         // playhead) takes control of the viewer back from the "raw"
         // media pool preview, if active.
-        if self.browsing_media.is_some()
+        if self.browsing.is_some()
             && (self.timeline_state.selected != selected_before_timeline_ui
                 || user_scrubbed_playhead)
         {
             self.stop_browsing();
         }
 
-        if self.browsing_media.is_none() {
+        if self.browsing.is_none() {
             self.ensure_active_clip_matches_playhead(user_scrubbed_playhead);
             if user_scrubbed_playhead {
                 self.play_scrub_audio();
@@ -4361,12 +4381,12 @@ impl VenturiApp {
             }
         }
 
-        if let Some(id) = preview_action {
-            self.preview_media(id);
+        if let Some(browsed) = preview_action {
+            self.preview(&browsed);
             // Pool preview: no active clip, and the playhead must not
             // take it away on the next frame.
             self.active_clip = None;
-            self.browsing_media = Some(id);
+            self.browsing = Some(browsed);
         }
         if let Some(frame) = pending_playhead {
             self.timeline_state.playhead = frame.max(0);
@@ -4431,7 +4451,7 @@ impl VenturiApp {
             let layers = if let Some(split) = slip_split {
                 self.viewer_keyframe = false;
                 split
-            } else if media_offline || self.browsing_media.is_some() {
+            } else if media_offline || self.browsing.is_some() {
                 self.viewer_keyframe = false;
                 None
             } else {
@@ -4449,7 +4469,7 @@ impl VenturiApp {
 
             if media_offline {
                 self.last_viewer_frame_kind = Some(ViewerFrameKind::Offline);
-            } else if self.browsing_media.is_some() {
+            } else if self.browsing.is_some() {
                 if self.preview_meta.as_ref().is_some_and(|m| !m.has_video) {
                     self.last_viewer_frame_kind = None;
                 } else if let Some(frame) = self.browsing_video_frame() {
@@ -4511,12 +4531,12 @@ impl VenturiApp {
                             t!("viewer.player_error", error = err),
                         );
                     } else {
-                        let audio_only = self.browsing_media.is_some()
+                        let audio_only = self.browsing.is_some()
                             && self.preview_meta.as_ref().is_some_and(|m| !m.has_video);
                         let label = ui.centered_and_justified(|ui| {
                             ui.label(if audio_only {
                                 t!("viewer.audio_only")
-                            } else if self.browsing_media.is_some() || self.active_clip.is_some() {
+                            } else if self.browsing.is_some() || self.active_clip.is_some() {
                                 t!("viewer.decoding")
                             } else {
                                 t!("viewer.empty_hint")
@@ -4539,7 +4559,7 @@ impl VenturiApp {
                 self.show_viewer_overlay(ui, rect, area, &video_targets, &mut overlay_effects);
             }
 
-            if let Some(media_id) = self.browsing_media {
+            if let Some(browsed) = self.browsing.clone() {
                 let rect = rect.intersect(area);
                 let (source_in, source_out) = self.browse_marks.resolve(self.browse_total_frames());
                 let drag_id = ui.id().with("viewer_media_drag");
@@ -4555,16 +4575,28 @@ impl VenturiApp {
                     drags.extend(show_stream_drag_handles(ui, rect));
                 }
                 for (resp, streams) in drags {
-                    resp.dnd_set_drag_payload(timeline_ui::MediaDragSet::one(
-                        timeline_ui::MediaDrag {
-                            media_id,
-                            source_in,
-                            source_out,
-                            streams,
-                        },
-                    ));
+                    // A library asset joins the project only once it is dragged.
+                    let media_id = match &browsed {
+                        Browsed::Media(id) => Some(*id),
+                        Browsed::Asset(id) if resp.drag_started() => {
+                            self.import_library_asset(id).first().copied()
+                        }
+                        Browsed::Asset(_) => None,
+                    };
+                    match media_id {
+                        Some(media_id) => resp.dnd_set_drag_payload(
+                            timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag {
+                                media_id,
+                                source_in,
+                                source_out,
+                                streams,
+                            }),
+                        ),
+                        None if resp.hovered() => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+                        None => {}
+                    }
                     if resp.dragged()
-                        && let Some(item) = self.session.project.media_pool.get(media_id)
+                        && let Some(item) = self.browsed_item(&browsed)
                     {
                         let name = file_label(&item.path);
                         let ghost = match streams {
@@ -4594,7 +4626,7 @@ impl VenturiApp {
             self.toggle_playback();
         }
         if let Some(frame) = transport_action.seek {
-            if self.browsing_media.is_some() {
+            if self.browsing.is_some() {
                 self.seek_browse(frame);
             } else {
                 self.timeline_state.playhead = frame;
