@@ -198,6 +198,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                 menus.background_menu(ui, &mut folder_actions);
             });
             let mut item_rects: Vec<(I, egui::Rect)> = Vec::new();
+            let mut file_drop_rows: Vec<(egui::Rect, Option<F>)> = Vec::new();
             // The items leave a strip of background on the sides (and
             // `BOTTOM_PAD` below): with a full pool there would be no
             // free spot left to right click on.
@@ -209,7 +210,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                             PoolRow::Folder { id, depth } => {
                                 let folder = folders.iter().find(|f| f.id == id);
                                 if let Some(folder) = folder {
-                                    indented(ui, depth, |ui| {
+                                    let rect = indented(ui, depth, |ui| {
                                         folder_row(
                                             ui,
                                             state,
@@ -220,6 +221,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                                             &mut events,
                                         )
                                     });
+                                    file_drop_rows.push((rect, Some(id)));
                                 }
                             }
                             PoolRow::Item { item: entry, depth } => {
@@ -235,12 +237,22 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                                     &mut menu_choices,
                                     &mut events,
                                 );
+                                file_drop_rows.push((rect, entry.folder.clone()));
                                 item_rects.push((entry.id, rect));
                             }
                         }
                     }
                 });
             ui.add_space(BOTTOM_PAD);
+            state.file_drop_folder = file_drop_target(ui, &file_drop_rows);
+            if let Some(folder) = &state.file_drop_folder
+                && let Some((rect, _)) = file_drop_rows
+                    .iter()
+                    .find(|(_, f)| f.as_ref() == Some(folder))
+            {
+                ui.painter()
+                    .rect_filled(*rect, 3.0, crate::theme::ACCENT_TRANSLUCENT);
+            }
             accept_drop(&bg, state, None, &folder_list, &mut events);
             if let Some((id, name, clicked_at)) = state.rename_pending.clone() {
                 let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
@@ -317,6 +329,26 @@ fn carries_own_items<I: PoolId, F>(ctx: &egui::Context, state: &PoolState<I, F>)
             || egui::DragAndDrop::has_payload_of_type::<timeline_ui::MediaDragSet>(ctx))
 }
 
+/// The folder of the row under the pointer while files are dragged in from
+/// the file manager: a folder row, or an item in it. `rows` comes in panel
+/// order, the folder's own row first.
+fn file_drop_target<F: Clone>(ui: &egui::Ui, rows: &[(egui::Rect, Option<F>)]) -> Option<F> {
+    let pointer = ui.input(|i| {
+        (!i.raw.hovered_files.is_empty())
+            .then(|| i.pointer.latest_pos())
+            .flatten()
+    })?;
+    if !ui.clip_rect().contains(pointer) {
+        return None;
+    }
+    // The gaps between rows count as the row above, or the folder would
+    // flicker off between its items.
+    let gap = ui.spacing().item_spacing.y;
+    rows.iter()
+        .find(|(rect, _)| rect.expand(gap / 2.0).y_range().contains(pointer.y))
+        .and_then(|(_, folder)| folder.clone())
+}
+
 /// Drops onto the pool: its own items or a folder dragged into `folder`.
 /// The payload type is checked first: `dnd_release_payload` takes the
 /// payload even when its type does not match.
@@ -349,6 +381,7 @@ fn accept_drop<I: PoolId, F: PoolId, A>(
     }
 }
 
+/// Returns the rect of the row.
 fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
     ui: &mut egui::Ui,
     state: &mut PoolState<I, F>,
@@ -357,7 +390,7 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
     menus: &M,
     actions: &mut Vec<M::Action>,
     events: &mut Vec<PoolEvent<I, F, M::Action>>,
-) {
+) -> egui::Rect {
     let id = &folder.id;
     let expanded = state.expanded.contains(id);
     let rect = ui
@@ -476,6 +509,7 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             ui.close();
         }
     });
+    rect
 }
 
 /// Returns the rect of the row.

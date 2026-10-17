@@ -70,6 +70,10 @@ pub struct PoolState<I, F> {
     /// Items dragged out of this pool: a drop on one of its folders moves
     /// them there.
     pub dragging: Vec<I>,
+    /// Folder under the pointer while files are dragged in from the file
+    /// manager, as of the last frame: the drop is read before the pool is
+    /// drawn again.
+    pub file_drop_folder: Option<F>,
     /// Set by dragging the header's divider; `None`: all the room the
     /// duration leaves.
     pub name_col_w: Option<f32>,
@@ -96,6 +100,7 @@ impl<I, F> Default for PoolState<I, F> {
             scroll_area: None,
             offline: HashMap::new(),
             dragging: Vec::new(),
+            file_drop_folder: None,
             name_col_w: None,
             name_col_right: f32::INFINITY,
         }

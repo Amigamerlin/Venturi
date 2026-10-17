@@ -353,7 +353,8 @@ impl VenturiApp {
     }
 
     /// Files dropped by the file manager onto the window: the media go
-    /// into the library if dropped on its tab, into the project anywhere else.
+    /// into the library if dropped on its tab, into the project anywhere
+    /// else; into the folder they were dropped on, if any.
     pub(crate) fn poll_dropped_files(&mut self, ctx: &egui::Context) {
         let (paths, pointer): (Vec<PathBuf>, _) = ctx.input(|i| {
             let paths = i
@@ -366,19 +367,29 @@ impl VenturiApp {
         });
         // Drawn again this frame if the pool is still shown.
         let pool_area = self.library_ui.area.take();
-        let on_library = self.library_ui.tab == library_ui::PoolTab::Library
-            && pool_area
-                .zip(pointer)
-                .is_some_and(|(area, p)| area.contains(p));
-        if on_library {
-            self.open_paths_in_library(paths);
-        } else {
-            self.open_paths(paths);
+        if paths.is_empty() {
+            return;
+        }
+        let on_pool = pool_area
+            .zip(pointer)
+            .is_some_and(|(area, p)| area.contains(p));
+        match self.library_ui.tab {
+            library_ui::PoolTab::Library if on_pool => {
+                let folder = self.library_ui.pool.file_drop_folder.clone();
+                self.library_ui.pool.expanded.extend(folder.clone());
+                self.open_paths_in_library(paths, folder);
+            }
+            library_ui::PoolTab::Project if on_pool => {
+                let folder = self.media_pool_state.file_drop_folder;
+                self.media_pool_state.expanded.extend(folder);
+                self.open_paths_into(paths, folder);
+            }
+            _ => self.open_paths(paths),
         }
     }
 
-    /// Like `open_paths`, but the media go into the library.
-    fn open_paths_in_library(&mut self, paths: Vec<PathBuf>) {
+    /// Like `open_paths`, but the media go into the library's `folder`.
+    fn open_paths_in_library(&mut self, paths: Vec<PathBuf>, folder: Option<String>) {
         let (media, other): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| {
             !p.extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("vvproj") || e.eq_ignore_ascii_case("otio"))
@@ -389,7 +400,7 @@ impl VenturiApp {
         }
         let tree = vv_session::MediaTree::scan(&media);
         let origin = self.clipboard_origin();
-        if let Err(e) = self.library.import_tree(tree, None, origin) {
+        if let Err(e) = self.library.import_tree(tree, folder, origin) {
             self.project_error = Some(t!("library.save_failed", error = e).into_owned());
         }
     }
@@ -397,6 +408,11 @@ impl VenturiApp {
     /// Dropped or passed on the command line: a project is opened and an
     /// `.otio` imported as from the menus, the rest goes into the pool.
     pub(crate) fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        self.open_paths_into(paths, None);
+    }
+
+    /// Like `open_paths`, but the media go into the pool's `folder`.
+    fn open_paths_into(&mut self, paths: Vec<PathBuf>, folder: Option<FolderId>) {
         let has_extension =
             |p: &Path, ext: &str| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
         if let Some(project) = paths.iter().find(|p| has_extension(p, "vvproj")) {
@@ -412,7 +428,7 @@ impl VenturiApp {
         }
         if !media.is_empty() {
             self.session
-                .import_media_tree(vv_session::MediaTree::scan(&media), None);
+                .import_media_tree(vv_session::MediaTree::scan(&media), folder);
         }
     }
 
