@@ -2228,11 +2228,11 @@ fn title_edit_only_carries_the_changed_fields_to_other_clips() {
         ..before.clone()
     };
     let other = vv_core::TitleParams {
-        content: "Altro".into(),
+        content: vv_core::Keyframed::constant("Altro".into()),
         ..before.clone()
     };
     let merged = apply_title_edit(&other, &before, &after);
-    assert_eq!(merged.content, "Altro");
+    assert_eq!(merged.content.default, "Altro");
     assert_eq!(merged.size, 40.0);
 
     // Inside the background, only the touched field.
@@ -5329,4 +5329,19 @@ fn window_frame_bytes_follows_the_preview_resolution() {
         app.window_frame_bytes(root, 0, 100),
         vv_media::yuv420_frame_bytes(960, 540)
     );
+}
+
+#[test]
+fn a_text_edit_leaves_the_animated_text_of_other_titles_to_keyframes() {
+    let before = vv_core::TitleParams::default();
+    let after = vv_core::TitleParams {
+        content: vv_core::Keyframed::constant("New".into()),
+        ..before.clone()
+    };
+    let mut animated = before.clone();
+    animated
+        .content
+        .upsert(5, "Later".into(), vv_core::Interpolation::Hold);
+    assert_eq!(apply_title_edit(&animated, &before, &after), animated);
+    assert_eq!(apply_title_edit(&before, &before, &after), after);
 }

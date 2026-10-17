@@ -6016,8 +6016,11 @@ fn clip_label_and_color(
             clip.effects
                 .title
                 .as_ref()
-                .and_then(|t| t.content.lines().next())
-                .map_or_else(|| t!("generator.text").into_owned(), str::to_string),
+                .and_then(|t| {
+                    let text = t.content.value_at(clip.source_in());
+                    text.lines().next().map(str::to_string)
+                })
+                .unwrap_or_else(|| t!("generator.text").into_owned()),
             clip_box_color(palette_color(vv_core::ClipColor::Magenta), clip),
         ),
         vv_core::ClipSource::Adjustment => (

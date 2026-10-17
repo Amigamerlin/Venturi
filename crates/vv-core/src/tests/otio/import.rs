@@ -200,7 +200,7 @@ fn reads_back_the_generators_without_our_metadata() {
     }));
     let mut text = Clip::from_source_range(ClipId(2), ClipSource::Text, 0, 60, 0, Rational::one());
     let title = crate::model::TitleParams {
-        content: "Two\nlines & <>".into(),
+        content: crate::Keyframed::constant("Two\nlines & <>".into()),
         font_family: "Open Sans".into(),
         font_weight: 700,
         italic: true,
@@ -675,7 +675,10 @@ fn missing_references_become_disabled_placeholder_titles() {
     assert_eq!(clips.len(), 1);
     assert!(matches!(clips[0].source, ClipSource::Text));
     assert!(clips[0].disabled);
-    assert_eq!(clips[0].effects.title.as_ref().unwrap().content, "Text+");
+    assert_eq!(
+        clips[0].effects.title.as_ref().unwrap().content.default,
+        "Text+"
+    );
     assert_eq!(clips[0].timeline_len, 24);
 }
 

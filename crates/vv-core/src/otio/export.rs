@@ -173,7 +173,13 @@ fn clip_to_otio(
             ("Solid Color".to_owned(), generator::solid_color(color))
         }
         ClipSource::Text => {
-            let title = clip.effects.title.clone().unwrap_or_default();
+            // Resolve's title has no text keyframes: the first text stands for all.
+            let title = clip
+                .effects
+                .title
+                .as_ref()
+                .map(|t| t.at(clip.source_in()))
+                .unwrap_or_default();
             let shadow = clip
                 .effects
                 .filters

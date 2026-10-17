@@ -2262,7 +2262,7 @@ impl Command for SetClipColor {
 }
 
 /// Animatable parameter of `UpsertKeyframe`/`RemoveKeyframe`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum KeyframeValue {
     TransformParam(TransformParam, f32),
     Gain(f32),
@@ -2277,6 +2277,8 @@ pub enum KeyframeValue {
     Grade(GradeParam, f32),
     /// Of the clip's mask at that index.
     Mask(usize, MaskParam, f32),
+    /// Of a text clip.
+    Text(String),
 }
 
 /// Inserts or replaces a keyframe of an animatable parameter.
@@ -2330,7 +2332,7 @@ impl Command for UpsertKeyframe {
         self.previous = take_keyframe(&mut clip.effects, target, self.frame);
         put_keyframe(
             &mut clip.effects,
-            self.value,
+            self.value.clone(),
             self.frame,
             self.interpolation,
         );
@@ -2342,8 +2344,8 @@ impl Command for UpsertKeyframe {
             return;
         };
         take_keyframe(&mut clip.effects, self.value.target(), self.frame);
-        if let Some((value, interpolation)) = self.previous {
-            put_keyframe(&mut clip.effects, value, self.frame, interpolation);
+        if let Some((value, interpolation)) = &self.previous {
+            put_keyframe(&mut clip.effects, value.clone(), self.frame, *interpolation);
         }
     }
 }
@@ -2360,11 +2362,12 @@ pub enum KeyframeTarget {
     FilterGrow(FilterKind),
     Grade(GradeParam),
     Mask(usize, MaskParam),
+    Text,
 }
 
 impl KeyframeValue {
-    pub fn target(self) -> KeyframeTarget {
-        match self {
+    pub fn target(&self) -> KeyframeTarget {
+        match *self {
             Self::TransformParam(param, _) => KeyframeTarget::TransformParam(param),
             Self::Gain(_) => KeyframeTarget::Gain,
             Self::Color(_) => KeyframeTarget::Color,
@@ -2375,6 +2378,7 @@ impl KeyframeValue {
             Self::FilterGrow(kind, _) => KeyframeTarget::FilterGrow(kind),
             Self::Grade(param, _) => KeyframeTarget::Grade(param),
             Self::Mask(index, param, _) => KeyframeTarget::Mask(index, param),
+            Self::Text(_) => KeyframeTarget::Text,
         }
     }
 }
@@ -2441,6 +2445,11 @@ fn take_keyframe(
         KeyframeTarget::Mask(index, param) => mask_track_mut(effects, index, param)
             .and_then(|k| k.remove_at(frame))
             .map(|(v, i)| (KeyframeValue::Mask(index, param, v), i)),
+        KeyframeTarget::Text => effects
+            .title
+            .as_mut()
+            .and_then(|t| t.content.remove_at(frame))
+            .map(|(v, i)| (KeyframeValue::Text(v), i)),
     }
 }
 
@@ -2498,6 +2507,11 @@ fn put_keyframe(
                 track.upsert(frame, v, interpolation);
             }
         }
+        KeyframeValue::Text(v) => {
+            if let Some(title) = &mut effects.title {
+                title.content.upsert(frame, v, interpolation);
+            }
+        }
     }
 }
 
@@ -2535,6 +2549,10 @@ fn set_keyframe_interpolation(
         }
         KeyframeTarget::Mask(index, param) => mask_track_mut(effects, index, param)
             .and_then(|k| k.set_interpolation(frame, interpolation)),
+        KeyframeTarget::Text => effects
+            .title
+            .as_mut()
+            .and_then(|t| t.content.set_interpolation(frame, interpolation)),
     }
 }
 
@@ -2594,12 +2612,12 @@ impl Command for MoveKeyframes {
             })
             .collect();
         let mut overwritten = Vec::new();
-        for &(target, frame, value, interp) in &moved {
+        for (target, frame, value, interp) in &moved {
             let destination = frame + self.delta;
-            if let Some((v, i)) = take_keyframe(&mut clip.effects, target, destination) {
+            if let Some((v, i)) = take_keyframe(&mut clip.effects, *target, destination) {
                 overwritten.push((destination, v, i));
             }
-            put_keyframe(&mut clip.effects, value, destination, interp);
+            put_keyframe(&mut clip.effects, value.clone(), destination, *interp);
         }
         self.moved = moved;
         self.overwritten = overwritten;
@@ -2613,11 +2631,11 @@ impl Command for MoveKeyframes {
         for &(target, frame, _, _) in &self.moved {
             take_keyframe(&mut clip.effects, target, frame + self.delta);
         }
-        for &(frame, value, interp) in &self.overwritten {
-            put_keyframe(&mut clip.effects, value, frame, interp);
+        for (frame, value, interp) in &self.overwritten {
+            put_keyframe(&mut clip.effects, value.clone(), *frame, *interp);
         }
-        for &(_, frame, value, interp) in &self.moved {
-            put_keyframe(&mut clip.effects, value, frame, interp);
+        for (_, frame, value, interp) in &self.moved {
+            put_keyframe(&mut clip.effects, value.clone(), *frame, *interp);
         }
     }
 }
@@ -2727,7 +2745,7 @@ impl Command for RemoveKeyframe {
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some((value, interp)) = self.removed else {
+        let Some((value, interp)) = self.removed.clone() else {
             return;
         };
         let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)

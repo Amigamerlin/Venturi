@@ -98,7 +98,7 @@ fn load_project_from_missing_file_returns_an_error() {
 #[test]
 fn title_params_survive_save_and_load() {
     let title = TitleParams {
-        content: "Riga 1\nRiga 2".into(),
+        content: crate::Keyframed::constant("Riga 1\nRiga 2".into()),
         anchor: (HAnchor::Left, VAnchor::Bottom),
         case: FontCase::Upper,
         ..Default::default()
@@ -282,4 +282,22 @@ fn the_old_title_shadow_loads_as_a_drop_shadow_filter() {
     });
     let from_json: EffectStack = serde_json::from_value(json).unwrap();
     assert_eq!(from_json.filters, [expected]);
+}
+
+#[test]
+fn a_title_saved_with_plain_text_loads_without_text_keyframes() {
+    let mut title = TitleParams::default();
+    let text = ron::to_string(&title).unwrap();
+    let plain = text.replace(&ron::to_string(&title.content).unwrap(), r#""Old text""#);
+    assert_ne!(plain, text, "the content was found and replaced");
+    let back: TitleParams = ron::from_str(&plain).unwrap();
+    assert_eq!(back.content, Keyframed::constant("Old text".to_string()));
+
+    title
+        .content
+        .upsert(10, "Second".into(), Interpolation::Hold);
+    let json = serde_json::to_string(&title).unwrap();
+    assert_eq!(serde_json::from_str::<TitleParams>(&json).unwrap(), title);
+    let text = ron::to_string(&title).unwrap();
+    assert_eq!(ron::from_str::<TitleParams>(&text).unwrap(), title);
 }

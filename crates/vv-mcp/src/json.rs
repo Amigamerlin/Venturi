@@ -203,7 +203,7 @@ pub(crate) fn clip_json(
         ClipSource::SolidColor => json!({ "type": "solid_color" }),
         ClipSource::Text => json!({
             "type": "title",
-            "text": clip.effects.title.as_ref().map(|t| t.content.clone()),
+            "text": clip.effects.title.as_ref().map(|t| t.content.value_at(clip.source_in())),
         }),
         ClipSource::Adjustment => json!({ "type": "adjustment" }),
     };

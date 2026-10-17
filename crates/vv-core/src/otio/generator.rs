@@ -59,7 +59,12 @@ fn rich_text(title: &TitleParams, frame: (f32, f32)) -> Value {
         0,
         true,
         json!([
-            parameter("rich text", json!(title.content), json!("Title"), "String"),
+            parameter(
+                "rich text",
+                json!(title.content.default),
+                json!("Title"),
+                "String"
+            ),
             json!({ "Parameter ID": "title blob", "Title HTML": html(title) }),
             parameter(
                 "anchor",
@@ -581,7 +586,7 @@ fn read_html(html: &str, title: &mut TitleParams) {
         })
         .collect();
     if !lines.is_empty() {
-        title.content = lines.join("\n");
+        title.content = Keyframed::constant(lines.join("\n"));
     }
     if let Some(align) = paragraphs.first().and_then(|p| attribute(p, "align")) {
         title.align = match align.as_str() {

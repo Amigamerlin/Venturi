@@ -198,7 +198,9 @@ struct ClipPanelInfo {
     gain_next: Option<FrameIdx>,
     color_kf_here: bool,
     color: vv_core::Rgba,
+    /// Taken `at` the panel's frame.
     title: Option<vv_core::TitleParams>,
+    text_key: properties_panel::RowKeyframe,
     /// Empty until a filter is dragged onto the clip from the Effects
     /// panel; then one per filter, in order of application.
     filters: Vec<FilterPanelInfo>,

@@ -689,7 +689,7 @@ fn exposure_scales_the_color_by_stops_in_linear_light() {
 fn a_text_layer_paints_its_color_only_where_the_glyphs_are() {
     let compositor = Compositor::new_headless();
     let title = vv_core::TitleParams {
-        content: "II".into(),
+        content: vv_core::Keyframed::constant("II".into()),
         color: RED,
         size: 60.0,
         ..Default::default()
@@ -710,7 +710,7 @@ fn a_text_layer_paints_its_color_only_where_the_glyphs_are() {
 fn a_text_shadow_darkens_the_layer_below() {
     let compositor = Compositor::new_headless();
     let title = vv_core::TitleParams {
-        content: "II".into(),
+        content: vv_core::Keyframed::constant("II".into()),
         size: 60.0,
         ..Default::default()
     };
@@ -740,7 +740,7 @@ fn a_text_shadow_darkens_the_layer_below() {
 fn a_multiplied_title_blends_its_background_and_text_as_one_image() {
     let compositor = Compositor::new_headless();
     let title = vv_core::TitleParams {
-        content: "II".into(),
+        content: vv_core::Keyframed::constant("II".into()),
         color: WHITE,
         size: 60.0,
         background: vv_core::TitleBackground {

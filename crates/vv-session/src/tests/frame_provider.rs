@@ -746,3 +746,41 @@ fn without_the_gpu_a_matte_leaves_the_track_below_uncut() {
     assert!(matches!(layers[1].content, OwnedContent::Solid(c) if c == RED));
     assert_eq!(layers[1].blend, vv_core::BlendMode::Screen);
 }
+
+#[test]
+fn a_title_layer_shows_the_text_of_its_frame() {
+    let mut clip = solid_clip(1, 0, 20, [1.0, 1.0]);
+    clip.source = ClipSource::Text;
+    let mut title = TitleParams::default();
+    title
+        .content
+        .upsert(10, "Later".into(), vv_core::Interpolation::Hold);
+    clip.effects.title = Some(title);
+    let text_at = |frame| {
+        let layer = clip_layer(
+            &Project::default(),
+            &clip,
+            frame,
+            (4, 4),
+            &mut NoMediaProvider,
+        )
+        .unwrap()
+        .unwrap();
+        match layer.content {
+            OwnedContent::Text(title) => title.display_text(),
+            _ => panic!("not a title"),
+        }
+    };
+    assert_eq!(text_at(9), "Later", "before the first keyframe, its text");
+    assert_eq!(text_at(15), "Later");
+    let mut two = clip.clone();
+    two.effects.title.as_mut().unwrap().content.upsert(
+        0,
+        "First".into(),
+        vv_core::Interpolation::Hold,
+    );
+    let first = clip_layer(&Project::default(), &two, 5, (4, 4), &mut NoMediaProvider)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(first.content, OwnedContent::Text(t) if t.display_text() == "First"));
+}

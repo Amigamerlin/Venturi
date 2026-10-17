@@ -868,7 +868,8 @@ pub enum FontCase {
 /// serde attributes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleParams {
-    pub content: String,
+    #[serde(deserialize_with = "text_or_keyframed")]
+    pub content: Keyframed<String>,
     /// Empty = system sans-serif.
     pub font_family: String,
     /// 100-900, as in CSS.
@@ -931,11 +932,28 @@ impl StoredTitleShadow {
     }
 }
 
+/// The text of a title: older files have a plain string, without keyframes.
+fn text_or_keyframed<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Keyframed<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Plain(String),
+        Keyframed(Keyframed<String>),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Plain(text) => Keyframed::constant(text),
+        Stored::Keyframed(k) => k,
+    })
+}
+
 /// `TitleParams` as saved, with the old shadow (`serde(flatten)` would
 /// want RON's map syntax).
 #[derive(Deserialize)]
 struct StoredTitle {
-    content: String,
+    #[serde(deserialize_with = "text_or_keyframed")]
+    content: Keyframed<String>,
     font_family: String,
     font_weight: u16,
     italic: bool,
@@ -1016,7 +1034,7 @@ impl Default for TitleBackground {
 impl Default for TitleParams {
     fn default() -> Self {
         Self {
-            content: "Title".into(),
+            content: Keyframed::constant("Title".into()),
             font_family: String::new(),
             font_weight: 400,
             italic: false,
@@ -1036,16 +1054,26 @@ impl Default for TitleParams {
 }
 
 impl TitleParams {
-    /// The text to draw, with `case` already applied.
+    /// The title as shown at source frame `frame`: its text no longer animated.
+    pub fn at(&self, frame: FrameIdx) -> Self {
+        Self {
+            content: Keyframed::constant(self.content.value_at(frame)),
+            ..self.clone()
+        }
+    }
+
+    /// The text to draw, with `case` already applied. Of a title taken `at`
+    /// a frame: with text keyframes, it is the text where none applies.
     pub fn display_text(&self) -> String {
+        let content = &self.content.default;
         match self.case {
-            FontCase::Mixed => self.content.clone(),
-            FontCase::Upper => self.content.to_uppercase(),
-            FontCase::Lower => self.content.to_lowercase(),
+            FontCase::Mixed => content.clone(),
+            FontCase::Upper => content.to_uppercase(),
+            FontCase::Lower => content.to_lowercase(),
             FontCase::Title => {
-                let mut out = String::with_capacity(self.content.len());
+                let mut out = String::with_capacity(content.len());
                 let mut word_start = true;
-                for c in self.content.chars() {
+                for c in content.chars() {
                     if word_start {
                         out.extend(c.to_uppercase());
                     } else {
@@ -1167,6 +1195,13 @@ impl BlurDirection {
 
     pub fn vertical(self) -> bool {
         self != Self::Horizontal
+    }
+}
+
+/// Text has no values in between: a keyframe holds until the next one.
+impl Lerp for String {
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        if t >= 1.0 { b.clone() } else { a.clone() }
     }
 }
 
@@ -1635,6 +1670,9 @@ impl EffectStack {
         for m in &mut self.masks {
             m.path.drop_before(start);
         }
+        if let Some(title) = &mut self.title {
+            title.content.drop_before(start);
+        }
     }
 
     /// See `Keyframed::drop_from`, on every animatable parameter.
@@ -1649,6 +1687,9 @@ impl EffectStack {
         for m in &mut self.masks {
             m.path.drop_from(end);
         }
+        if let Some(title) = &mut self.title {
+            title.content.drop_from(end);
+        }
     }
 
     /// See `Keyframed::shift`, on every animatable parameter.
@@ -1662,6 +1703,9 @@ impl EffectStack {
         }
         for m in &mut self.masks {
             m.path.shift(delta);
+        }
+        if let Some(title) = &mut self.title {
+            title.content.shift(delta);
         }
     }
 
@@ -1691,6 +1735,9 @@ impl EffectStack {
         }
         for m in &mut self.masks {
             m.path.rescale_times(from, to);
+        }
+        if let Some(title) = &mut self.title {
+            title.content.rescale_times(from, to);
         }
     }
 

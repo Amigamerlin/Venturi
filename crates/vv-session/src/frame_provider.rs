@@ -482,7 +482,7 @@ fn build_layer(
                 .as_ref()
                 .map_or(Rgba::BLACK, |k| k.value_at(source_frame)),
         ),
-        ClipSource::Text => OwnedContent::Text(clip.effects.title.clone()?),
+        ClipSource::Text => OwnedContent::Text(clip.effects.title.as_ref()?.at(source_frame)),
         ClipSource::Adjustment => OwnedContent::Adjustment,
         ClipSource::Media(_) => {
             let source_size = clip_source_size(project, clip, timeline_size);

@@ -258,7 +258,7 @@ pub(crate) fn grade_commands(
         }
         let mut keyframes = Vec::new();
         for (edit, target) in &section.keyframes {
-            match *edit {
+            match edit.clone() {
                 KeyframeEdit::Set(KeyframeValue::Grade(param, v)) if !animated(grade, param) => {
                     grade.track_mut(param).default = v;
                 }

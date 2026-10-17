@@ -673,7 +673,7 @@ pub(crate) fn add_title(session: &mut Session, args: AddTitleArgs) -> ToolResult
                 .clip(track, id)
                 .expect("just inserted");
             let mut title = clip.effects.title.clone().unwrap_or_default();
-            title.content = args.text;
+            title.content = vv_core::Keyframed::constant(args.text);
             if let Some(size) = args.size {
                 title.size = size;
             }

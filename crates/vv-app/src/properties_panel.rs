@@ -198,26 +198,39 @@ pub(crate) fn text_align_button(
     response
 }
 
-/// Text section of a text clip, which folds as a whole: edits `title` in
-/// place, `true` if anything changed.
+/// Text section of a text clip, which folds as a whole: edits in place
+/// `title`, taken `at` the panel's frame. `true` if anything changed, and
+/// the row of the text, which is animatable.
 pub(crate) fn title_editor(
     ui: &mut egui::Ui,
     title: &mut vv_core::TitleParams,
+    text_key: RowKeyframe,
     timeline_size: (u32, u32),
     fonts: &mut FontCatalog,
-) -> bool {
+) -> (bool, RowResponse) {
     use vv_core::{FontCase, HAnchor, TextAlign, VAnchor};
     let defaults = vv_core::TitleParams::default();
     let before = title.clone();
     let (frame_w, frame_h) = (timeline_size.0 as f32, timeline_size.1 as f32);
 
+    let mut text_row = RowResponse::default();
     let (open, _) = section_header(ui, &t!("props.text"), false);
     if open {
-        ui.add(
-            egui::TextEdit::multiline(&mut title.content)
-                .desired_rows(4)
-                .desired_width(f32::INFINITY),
-        );
+        // No label, unlike `param_row`: the section is already named, and
+        // the box keeps the full width.
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            let prev = keyframe_arrow(ui, true, text_key.prev, &t!("props.prev_keyframe"));
+            text_row.toggled_keyframe = keyframe_button(ui, text_key.on_keyframe).clicked();
+            let next = keyframe_arrow(ui, false, text_key.next, &t!("props.next_keyframe"));
+            text_row.goto = prev.or(next);
+            text_row.changed = ui
+                .add(
+                    egui::TextEdit::multiline(&mut title.content.default)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY),
+                )
+                .changed();
+        });
         ui.add_space(4.0);
 
         let row = param_row(ui, &t!("props.font"), None, |ui| {
@@ -497,7 +510,7 @@ pub(crate) fn title_editor(
         }
     }
 
-    *title != before
+    (*title != before, text_row)
 }
 
 /// Plain title of a group of rows inside a section: it does not fold.
@@ -596,8 +609,11 @@ pub(crate) fn apply_title_edit(
         center,
         opacity
     );
+    // An animated text changes by keyframe, not here.
+    if before.content != after.content && target.content.is_constant() {
+        out.content = after.content.clone();
+    }
     copy_changed!(
-        content,
         font_family,
         font_weight,
         italic,
@@ -629,6 +645,12 @@ pub(crate) struct RowKeyframe {
 }
 
 impl RowKeyframe {
+    pub(crate) const NONE: Self = Self {
+        on_keyframe: false,
+        prev: None,
+        next: None,
+    };
+
     /// The state of `track` at `frame`; the arrows only lead to keyframes
     /// for which `reachable` holds.
     pub(crate) fn of<T: Clone>(
@@ -662,7 +684,7 @@ impl RowKeyframe {
 
 /// A keyframed row edited in the panel, before knowing whether the target
 /// clip animates it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum KeyframeEdit {
     /// New value: the default of a track without keyframes, otherwise a
     /// keyframe at the current frame.
@@ -1312,6 +1334,22 @@ pub(crate) fn upsert_color_keyframe(
     upsert_keyframe(clip, frame, vv_core::KeyframeValue::Color(value))
 }
 
+/// Hold: a text has no values in between.
+pub(crate) fn upsert_text_keyframe(
+    (tl, track, clip): ClipRef,
+    frame: FrameIdx,
+    text: String,
+) -> BoxedCommand {
+    Box::new(vv_core::UpsertKeyframe::new(
+        tl,
+        track,
+        clip,
+        frame,
+        vv_core::KeyframeValue::Text(text),
+        vv_core::Interpolation::Hold,
+    ))
+}
+
 pub(crate) fn remove_keyframe(
     (tl, track, clip): ClipRef,
     frame: FrameIdx,
@@ -1460,7 +1498,10 @@ impl VenturiApp {
                 .as_ref()
                 .map(|k| k.value_at(frame))
                 .unwrap_or(vv_core::edit::DEFAULT_SOLID_COLOR),
-            title: clip.effects.title.clone(),
+            title: clip.effects.title.as_ref().map(|t| t.at(frame)),
+            text_key: clip.effects.title.as_ref().map_or(RowKeyframe::NONE, |t| {
+                RowKeyframe::of(&t.content, frame, in_clip)
+            }),
             filters: clip
                 .effects
                 .filters
@@ -1728,7 +1769,8 @@ impl VenturiApp {
                                     if is_text {
                                             let before = info.title.clone().unwrap_or_default();
                                             let mut title = before.clone();
-                                            if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
+                                            let (changed, text_row) = title_editor(ui, &mut title, info.text_key, timeline_size, &mut self.fonts);
+                                            if changed || text_row.toggled_keyframe {
                                                 let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                 for t in targets.iter().filter(|t| t.is_text) {
                                                     let Some(current) = tl
@@ -1738,8 +1780,33 @@ impl VenturiApp {
                                                     else {
                                                         continue;
                                                     };
-                                                    pending_effects.push(set_title((t.timeline, t.track_index, t.clip_id), apply_title_edit(current, &before, &title)));
+                                                    let clip_ref = (t.timeline, t.track_index, t.clip_id);
+                                                    // Before the keyframes: it replaces the whole title.
+                                                    let edited = apply_title_edit(current, &before, &title);
+                                                    if edited != *current {
+                                                        pending_effects.push(set_title(clip_ref, edited));
+                                                    }
+                                                    let text = &title.content.default;
+                                                    if text_row.toggled_keyframe {
+                                                        if current.content.keyframe_at(t.source_frame).is_some() {
+                                                            pending_effects.push(remove_keyframe(clip_ref, t.source_frame, vv_core::KeyframeTarget::Text));
+                                                        } else {
+                                                            let text = current.content.value_at(t.source_frame);
+                                                            pending_effects.push(upsert_text_keyframe(clip_ref, t.source_frame, text));
+                                                        }
+                                                    } else if before.content != title.content && !current.content.is_constant() {
+                                                        pending_effects.push(upsert_text_keyframe(clip_ref, t.source_frame, text.clone()));
+                                                    }
                                                 }
+                                            }
+                                            if let Some(source_frame) = text_row.goto {
+                                                pending_playhead = self
+                                                    .timeline_id
+                                                    .and_then(|tid| {
+                                                        self.session.project.timelines[tid]
+                                                            .clip(primary.track_index, primary.clip_id)
+                                                    })
+                                                    .map(|c| c.timeline_frame_at(source_frame));
                                             }
                                             // A shortcut to the filter, edited in its section below.
                                             ui.add_space(8.0);
@@ -2287,11 +2354,12 @@ impl VenturiApp {
                                                             let mut value = value;
                                                             let row = param_row(ui, &label, Some(key), |ui| slider_field(ui, &mut value, 0.0..=max, 0.5, 1));
                                                             let set = set(kind, value);
+                                                            let target = set.target();
                                                             if row.changed {
-                                                                keyframes.push((KeyframeEdit::Set(set), set.target()));
+                                                                keyframes.push((KeyframeEdit::Set(set), target));
                                                             }
                                                             if row.toggled_keyframe {
-                                                                keyframes.push((KeyframeEdit::Toggle(key.on_keyframe), set.target()));
+                                                                keyframes.push((KeyframeEdit::Toggle(key.on_keyframe), target));
                                                             }
                                                             *reset |= row.reset;
                                                             goto = goto.or(row.goto);
@@ -2375,7 +2443,7 @@ impl VenturiApp {
                                                         let mut pending_keyframes = Vec::new();
                                                         for (edit, target) in &keyframes {
                                                             let own = &mut new_filters[pos];
-                                                            match *edit {
+                                                            match edit.clone() {
                                                                 // Without keyframes the value is the track's default.
                                                                 KeyframeEdit::Set(vv_core::KeyframeValue::FilterRadius(_, v)) if own.radius.is_constant() => {
                                                                     own.radius.default = v;

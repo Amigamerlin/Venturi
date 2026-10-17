@@ -102,7 +102,7 @@ fn edits(edits: &[(KeyframeEdit, GradeParam)]) -> GradeSectionResponse {
     GradeSectionResponse {
         keyframes: edits
             .iter()
-            .map(|(edit, param)| (*edit, KeyframeTarget::Grade(*param)))
+            .map(|(edit, param)| (edit.clone(), KeyframeTarget::Grade(*param)))
             .collect(),
         ..Default::default()
     }

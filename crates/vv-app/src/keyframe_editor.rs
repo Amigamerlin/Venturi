@@ -161,6 +161,13 @@ fn rows(effects: &EffectStack) -> Vec<KeyframeTarget> {
             }
         }
     }
+    if effects
+        .title
+        .as_ref()
+        .is_some_and(|t| !t.content.is_constant())
+    {
+        rows.push(KeyframeTarget::Text);
+    }
     rows
 }
 
@@ -230,11 +237,16 @@ fn frames_of(effects: &EffectStack, target: KeyframeTarget) -> Vec<FrameIdx> {
         KeyframeTarget::Mask(index, param) => mask_track(effects, index, param)
             .map(|k| k.keyframes().iter().map(|k| k.0).collect())
             .unwrap_or_default(),
+        KeyframeTarget::Text => effects
+            .title
+            .as_ref()
+            .map(|t| t.content.keyframes().iter().map(|k| k.0).collect())
+            .unwrap_or_default(),
     }
 }
 
-/// Value and interpolation of a scalar keyframe; `None` for the color and
-/// the blur direction, which have no curve to draw.
+/// Value and interpolation of a scalar keyframe; `None` for the color, the
+/// blur direction and the text, which have no curve to draw.
 fn scalar_at(
     effects: &EffectStack,
     target: KeyframeTarget,
@@ -251,7 +263,7 @@ fn scalar_at(
         KeyframeTarget::FilterGrow(kind) => filter(effects, kind)?.grow.keyframe_at(frame),
         KeyframeTarget::Grade(param) => grade_track(effects, param)?.keyframe_at(frame),
         KeyframeTarget::Mask(index, param) => mask_track(effects, index, param)?.keyframe_at(frame),
-        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => None,
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) | KeyframeTarget::Text => None,
     }
 }
 
@@ -281,7 +293,9 @@ fn scalar_keyframes(
         KeyframeTarget::Mask(index, param) => mask_track(effects, index, param)
             .map(|k| k.keyframes().to_vec())
             .unwrap_or_default(),
-        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => Vec::new(),
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) | KeyframeTarget::Text => {
+            Vec::new()
+        }
     }
 }
 
@@ -316,13 +330,14 @@ fn scalar_value_at(effects: &EffectStack, target: KeyframeTarget, frame: FrameId
         KeyframeTarget::Mask(index, param) => {
             Some(mask_track(effects, index, param)?.value_at(frame))
         }
-        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => None,
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) | KeyframeTarget::Text => None,
     }
 }
 
 fn target_label(target: KeyframeTarget) -> String {
     use TransformParam as P;
     match target {
+        KeyframeTarget::Text => t!("props.text").to_string(),
         KeyframeTarget::TransformParam(p) => match p {
             P::ZoomX => format!("{} X", t!("props.zoom")),
             P::ZoomY => format!("{} Y", t!("props.zoom")),
@@ -1071,7 +1086,7 @@ fn keyframe_value(target: KeyframeTarget, value: f32) -> vv_core::KeyframeValue 
         KeyframeTarget::Grade(param) => vv_core::KeyframeValue::Grade(param, value),
         KeyframeTarget::Mask(index, param) => vv_core::KeyframeValue::Mask(index, param, value),
         // Without a curve one does not get here: they are edited from the Properties panel.
-        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => {
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) | KeyframeTarget::Text => {
             vv_core::KeyframeValue::Gain(value)
         }
     }

@@ -2490,3 +2490,83 @@ fn shifting_the_effects_moves_the_color_correction_keyframes_too() {
         Some((0.5, Interpolation::Linear))
     );
 }
+
+fn insert_title_clip(project: &mut Project, timeline: TimelineId, history: &mut History) -> ClipId {
+    let mut clip = make_clip(project, 0, 20);
+    clip.source = ClipSource::Text;
+    clip.effects.title = Some(TitleParams::default());
+    let id = clip.id;
+    history.do_command(
+        project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip,
+        }),
+    );
+    id
+}
+
+fn title(project: &Project) -> TitleParams {
+    let timeline = project.timelines.iter().next().unwrap().0;
+    project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .title
+        .clone()
+        .unwrap()
+}
+
+fn upsert_text(timeline: TimelineId, id: ClipId, frame: FrameIdx, text: &str) -> Box<dyn Command> {
+    Box::new(command::UpsertKeyframe::new(
+        timeline,
+        0,
+        id,
+        frame,
+        command::KeyframeValue::Text(text.into()),
+        Interpolation::Hold,
+    ))
+}
+
+#[test]
+fn text_keyframes_change_the_title_from_one_to_the_next_and_undo() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let id = insert_title_clip(&mut project, timeline, &mut history);
+    history.do_command(&mut project, upsert_text(timeline, id, 0, "One"));
+    history.do_command(&mut project, upsert_text(timeline, id, 10, "Two"));
+
+    assert_eq!(title(&project).at(9).display_text(), "One");
+    assert_eq!(title(&project).at(10).display_text(), "Two");
+    assert_eq!(title(&project).at(19).display_text(), "Two");
+
+    history.undo(&mut project);
+    assert_eq!(title(&project).at(19).display_text(), "One");
+    history.undo(&mut project);
+    assert!(title(&project).content.is_constant());
+}
+
+#[test]
+fn splitting_a_title_keeps_the_text_of_each_half() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let id = insert_title_clip(&mut project, timeline, &mut history);
+    history.do_command(&mut project, upsert_text(timeline, id, 0, "One"));
+    history.do_command(&mut project, upsert_text(timeline, id, 10, "Two"));
+    history.do_command(
+        &mut project,
+        Box::new(command::SplitClip::new(timeline, 0, id, 15)),
+    );
+
+    let clips = &project.timelines[timeline].tracks[0].clips;
+    let text = |clip: &Clip, frame| {
+        clip.effects
+            .title
+            .as_ref()
+            .unwrap()
+            .at(frame)
+            .display_text()
+    };
+    assert_eq!(text(&clips[0], 5), "One");
+    assert_eq!(text(&clips[1], clips[1].source_in()), "Two");
+    assert_eq!(text(&clips[1], clips[1].source_out() - 1), "Two");
+}

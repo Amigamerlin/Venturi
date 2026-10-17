@@ -549,7 +549,7 @@ impl Importer<'_> {
                     clip: name.to_owned(),
                 });
                 effects.title = Some(TitleParams {
-                    content: name.to_owned(),
+                    content: Keyframed::constant(name.to_owned()),
                     ..TitleParams::default()
                 });
                 (ClipSource::Text, Rational::one(), 0, None)
