@@ -1621,6 +1621,42 @@ impl Compositor {
             rec.scratch.push(Some(alone));
             return;
         }
+        // Background and text are distinct passes: blended or faded one by
+        // one, the background would show through the text.
+        if let LayerContent::Text(title) = content
+            && title.background.enabled
+            && (blend != BlendMode::Normal || *opacity < 1.0)
+        {
+            let alone = self.scratch_texture(output.width, output.height);
+            let alone_view = alone.create_view(&wgpu::TextureViewDescriptor::default());
+            self.compose_layer(
+                rec,
+                &alone,
+                &alone_view,
+                &Layer {
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    ..*layer
+                },
+                output,
+                TRANSPARENT,
+                &mut true,
+            );
+            let composed = Layer {
+                blend,
+                opacity: *opacity,
+                ..Layer::new(
+                    LayerContent::Texture {
+                        texture: &alone,
+                        source_size: output.timeline_size,
+                    },
+                    Transform::default(),
+                )
+            };
+            self.compose_layer(rec, target, target_view, &composed, output, clear, first);
+            rec.scratch.push(Some(alone));
+            return;
+        }
         if let Some((_, trailing)) = chain.blurs.last() {
             if *first {
                 self.pass(

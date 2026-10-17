@@ -736,6 +736,42 @@ fn a_text_shadow_darkens_the_layer_below() {
     );
 }
 
+#[test]
+fn a_multiplied_title_blends_its_background_and_text_as_one_image() {
+    let compositor = Compositor::new_headless();
+    let title = vv_core::TitleParams {
+        content: "II".into(),
+        color: WHITE,
+        size: 60.0,
+        background: vv_core::TitleBackground {
+            enabled: true,
+            color: vv_core::Rgba::BLACK,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
+            opacity: 100.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let out = compositor.render_layers(
+        &[
+            Layer::new(LayerContent::Solid(RED), Transform::default()),
+            Layer {
+                blend: BlendMode::Multiply,
+                ..Layer::new(LayerContent::Text(&title), Transform::default())
+            },
+        ],
+        OutputFrame::exact(160, 90),
+    );
+    let pixels = out.as_chunks::<4>().0;
+    assert_eq!(pixels[0], [0, 0, 0, 255], "outside the text: black");
+    assert!(
+        pixels.iter().any(|px| px == &[255, 0, 0, 255]),
+        "the layer below shows through the text"
+    );
+}
+
 const BLUE: vv_core::Rgba = vv_core::Rgba {
     r: 0.0,
     g: 0.0,
