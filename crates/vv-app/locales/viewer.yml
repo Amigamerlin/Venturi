@@ -50,9 +50,9 @@ viewer.player_error:
   en: "Player error: %{error}"
   it: "Errore player: %{error}"
 
-viewer.audio_only:
-  en: "🔊  Audio only"
-  it: "🔊  Solo audio"
+viewer.waveform_hint:
+  en: "Click: move the playhead · drag onto the timeline to add the part between in and out"
+  it: "Clic: sposta la testina · trascina sulla timeline per aggiungere la porzione tra in e out"
 
 viewer.decoding:
   en: "Decoding..."

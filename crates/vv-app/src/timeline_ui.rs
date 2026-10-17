@@ -6229,7 +6229,7 @@ fn paint_silence_preview(
 /// Waveform of an audio clip, one line per visible column. The bin of
 /// each column comes from the absolute time in the audio: splitting the clip does not
 /// move the waveform.
-fn draw_clip_waveform(
+pub(crate) fn draw_clip_waveform(
     painter: &egui::Painter,
     clip_rect: egui::Rect,
     peaks: &[f32],

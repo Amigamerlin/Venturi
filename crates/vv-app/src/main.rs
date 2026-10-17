@@ -46,6 +46,7 @@ mod timeline_audio;
 mod timeline_ui;
 mod transport;
 mod viewer_overlay;
+mod viewer_waveform;
 mod viewer_zoom;
 mod voiceover;
 mod waveform_worker;
@@ -706,6 +707,18 @@ impl VenturiApp {
         self.browse_playhead = 0;
         self.browse_marks = transport::MarkRange::default();
         if !has_video {
+            // A library asset may have none yet; one already on disk is skipped.
+            if item.meta.has_audio && item.compound.is_none() {
+                let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64().max(1e-9);
+                self.waveform_worker
+                    .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
+                    .enqueue(
+                        path,
+                        item.content_hash,
+                        item.meta.audio_stream_count(),
+                        vv_media::recommended_num_peaks(secs),
+                    );
+            }
             return;
         }
         // The buffer opens the file on its own and skips the ones that do not
@@ -890,6 +903,11 @@ impl VenturiApp {
         // The clock stayed at the preview position: force the seek to the
         // timeline playhead.
         self.last_synced_playhead = FrameIdx::MIN;
+    }
+
+    /// The viewer shows the waveform of the browsed media.
+    fn browsing_audio_only(&self) -> bool {
+        self.browsing.is_some() && self.preview_meta.as_ref().is_some_and(|m| !m.has_video)
     }
 
     fn browse_total_frames(&self) -> FrameIdx {
@@ -1233,10 +1251,14 @@ impl VenturiApp {
                 }
             }
         }
+        for key in self.browsed_waveform_keys() {
+            self.load_waveform(key);
+        }
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         let mut compounds: Vec<vv_core::MediaId> = Vec::new();
+        let mut files: Vec<(u64, usize)> = Vec::new();
         for (_, track) in
             self.session.project.timelines[timeline_id].tracks_of_kind(TrackKind::Audio)
         {
@@ -1258,18 +1280,41 @@ impl VenturiApp {
                     compounds.push(*media_id);
                     continue;
                 }
-                match vv_media::waveform::load_waveform(key.0, key.1) {
-                    Some(waveform) => {
-                        self.waveform_cache.insert(key, waveform);
-                    }
-                    None => {
-                        self.waveform_missing.insert(key);
-                    }
-                }
+                files.push(key);
             }
+        }
+        for key in files {
+            self.load_waveform(key);
         }
         for media_id in compounds {
             self.ensure_compound_waveform(media_id, 0);
+        }
+    }
+
+    /// One waveform per audio stream of the media browsed in the viewer.
+    fn browsed_waveform_keys(&self) -> Vec<(u64, usize)> {
+        self.browsing_item()
+            .filter(|item| item.meta.has_audio && item.compound.is_none())
+            .map(|item| {
+                (0..item.meta.audio_stream_count())
+                    .map(|stream| (item.content_hash, stream))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Reads waveform `key` from its cache file, or notes it missing.
+    fn load_waveform(&mut self, key: (u64, usize)) {
+        if self.waveform_cache.contains_key(&key) || self.waveform_missing.contains(&key) {
+            return;
+        }
+        match vv_media::waveform::load_waveform(key.0, key.1) {
+            Some(waveform) => {
+                self.waveform_cache.insert(key, waveform);
+            }
+            None => {
+                self.waveform_missing.insert(key);
+            }
         }
     }
 
@@ -4530,22 +4575,39 @@ impl VenturiApp {
                             egui::Color32::RED,
                             t!("viewer.player_error", error = err),
                         );
+                    } else if self.browsing_audio_only() {
+                        let (rect, _) =
+                            ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                        let total = self.browse_total_frames();
+                        let keys = self.browsed_waveform_keys();
+                        // Loaded here too: the timeline loads them before the
+                        // double click that opened this media.
+                        for &key in &keys {
+                            self.load_waveform(key);
+                        }
+                        if keys.iter().any(|k| !self.waveform_cache.contains_key(k)) {
+                            // The worker wakes no one when it is done.
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(200));
+                        }
+                        let preview = viewer_waveform::AudioPreview {
+                            waveforms: keys.iter().map(|k| self.waveform_cache.get(k)).collect(),
+                            total_frames: total,
+                            fps: self.browse_fps(),
+                            playhead: self.browse_playhead,
+                            marks: self.browse_marks.resolve(total),
+                        };
+                        viewer_waveform::paint(ui, rect, &preview);
+                        // Dragged onto the timeline like a frame, clicked to seek.
+                        viewer_rect = Some(rect);
                     } else {
-                        let audio_only = self.browsing.is_some()
-                            && self.preview_meta.as_ref().is_some_and(|m| !m.has_video);
-                        let label = ui.centered_and_justified(|ui| {
-                            ui.label(if audio_only {
-                                t!("viewer.audio_only")
-                            } else if self.browsing.is_some() || self.active_clip.is_some() {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(if self.browsing.is_some() || self.active_clip.is_some() {
                                 t!("viewer.decoding")
                             } else {
                                 t!("viewer.empty_hint")
                             })
                         });
-                        // It can be dragged onto the timeline even without an image.
-                        if audio_only {
-                            viewer_rect = Some(label.inner.rect);
-                        }
                     }
                 }
             }
@@ -4563,9 +4625,25 @@ impl VenturiApp {
                 let rect = rect.intersect(area);
                 let (source_in, source_out) = self.browse_marks.resolve(self.browse_total_frames());
                 let drag_id = ui.id().with("viewer_media_drag");
-                let resp = ui
-                    .interact(rect, drag_id, egui::Sense::drag())
-                    .on_hover_text(t!("viewer.drag_in_out"));
+                let audio_only = self.browsing_audio_only();
+                let sense = if audio_only {
+                    egui::Sense::click_and_drag()
+                } else {
+                    egui::Sense::drag()
+                };
+                let hint = if audio_only {
+                    t!("viewer.waveform_hint")
+                } else {
+                    t!("viewer.drag_in_out")
+                };
+                let resp = ui.interact(rect, drag_id, sense).on_hover_text(hint);
+                if audio_only
+                    && resp.clicked()
+                    && let Some(pos) = resp.interact_pointer_pos()
+                {
+                    let total = self.browse_total_frames();
+                    self.seek_browse(viewer_waveform::frame_at(rect, pos.x, total));
+                }
                 let mut drags = vec![(resp, timeline_ui::DragStreams::All)];
                 if self
                     .preview_meta
