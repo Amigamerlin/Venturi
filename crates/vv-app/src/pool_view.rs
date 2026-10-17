@@ -4,7 +4,7 @@
 //! returned [`PoolEvent`]s.
 
 use super::*;
-use media_pool::{FolderDrag, PoolId, PoolRow, PoolState, Rename, RenameTarget};
+use media_pool::{FolderDrag, PoolId, PoolLayout, PoolRow, PoolState, Rename, RenameTarget};
 
 pub(crate) const DURATION_COL_W: f32 = 64.0;
 const MIN_NAME_COL_W: f32 = 80.0;
@@ -21,6 +21,12 @@ pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 
 /// Horizontal step per folder level.
 const FOLDER_INDENT: f32 = 14.0;
+
+const DETAILS_THUMB: egui::Vec2 = egui::vec2(64.0, 36.0);
+/// Grid tiles grow from this width to fill the row.
+const MIN_GRID_TILE_W: f32 = 80.0;
+/// Margin of a grid tile around its content, where the selection shows.
+const GRID_TILE_MARGIN: i8 = 4;
 
 pub(crate) enum Thumb {
     Texture(egui::TextureHandle),
@@ -104,6 +110,7 @@ pub(crate) struct PoolView<'a, I, F, M> {
     pub entries: Vec<PoolEntry<I, F>>,
     pub menus: &'a M,
     pub kinetic_scroll: bool,
+    pub layout: &'a mut PoolLayout,
     pub item_hint: std::borrow::Cow<'a, str>,
     /// Shown instead of the items when there are none.
     pub empty_hint: Option<std::borrow::Cow<'a, str>>,
@@ -118,17 +125,31 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
     if !egui::DragAndDrop::has_any_payload(ui.ctx()) {
         state.dragging.clear();
     }
-    let search_changed = search_field(ui, &mut state.search, std::any::type_name::<I>());
-    pool_header(ui, state);
-    kinetic_pool_scroll(ui.ctx(), state, view.kinetic_scroll);
     let PoolView {
         folders,
         mut entries,
         menus,
+        kinetic_scroll,
+        layout,
         item_hint,
         empty_hint,
-        ..
     } = view;
+    let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let search_changed = ui
+        .allocate_ui_with_layout(
+            row,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                for option in [PoolLayout::Grid, PoolLayout::List, PoolLayout::Details] {
+                    layout_button(ui, layout, option);
+                }
+                search_field(ui, &mut state.search, std::any::type_name::<I>())
+            },
+        )
+        .inner;
+    let layout = *layout;
+    pool_header(ui, state);
+    kinetic_pool_scroll(ui.ctx(), state, kinetic_scroll);
     let query = state.search.trim().to_string();
     if !query.is_empty() {
         entries.retain(|e| media_pool::matches_search(&e.name, &query));
@@ -149,6 +170,29 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
         .iter()
         .map(|f| (f.id.clone(), f.name.as_str(), f.parent.clone()))
         .collect();
+    let grid = layout == PoolLayout::Grid;
+    if state
+        .grid_folder
+        .as_ref()
+        .is_some_and(|f| !folders.iter().any(|folder| folder.id == *f))
+    {
+        state.grid_folder = None;
+    }
+    if grid
+        && let Some(reveal) = &state.reveal
+        && let Some(entry) = entries.iter().find(|e| e.id == *reveal)
+    {
+        state.grid_folder = entry
+            .folder
+            .clone()
+            .filter(|f| folders.iter().any(|folder| folder.id == *f));
+    }
+    // Where a drop on the background goes, and a new folder from its menu.
+    let base = if grid && query.is_empty() {
+        state.grid_folder.clone()
+    } else {
+        None
+    };
     let items: Vec<(PoolEntry<I, F>, Option<F>)> = entries
         .into_iter()
         .map(|e| {
@@ -157,11 +201,18 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
         })
         .collect();
     let empty = items.is_empty() && folders.is_empty();
-    let rows = if query.is_empty() {
-        media_pool::tree_rows(&folder_list, items, &state.expanded)
-    } else {
-        media_pool::search_rows(&folder_list, items)
+    let rows = match (grid, query.is_empty()) {
+        (true, true) => media_pool::grid_rows(&folder_list, items, base.as_ref()),
+        (true, false) => media_pool::search_rows(&folder_list, items)
+            .into_iter()
+            .filter(|row| matches!(row, PoolRow::Item { .. }))
+            .collect(),
+        (false, true) => media_pool::tree_rows(&folder_list, items, &state.expanded),
+        (false, false) => media_pool::search_rows(&folder_list, items),
     };
+    if let Some(current) = &base {
+        breadcrumb(ui, state, &folder_list, current, &mut events);
+    }
     let order: Vec<I> = rows
         .iter()
         .filter_map(|row| match row {
@@ -192,7 +243,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             );
             bg.context_menu(|ui| {
                 if ui.button(t!("pool.new_folder")).clicked() {
-                    events.push(PoolEvent::NewFolder(None));
+                    events.push(PoolEvent::NewFolder(base.clone()));
                     ui.close();
                 }
                 menus.background_menu(ui, &mut folder_actions);
@@ -205,6 +256,56 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             egui::Frame::NONE
                 .inner_margin(egui::Margin::symmetric(SIDE_PAD, 0))
                 .show(ui, |ui| {
+                    if grid {
+                        let gap = ui.spacing().item_spacing.x;
+                        let width = ui.available_width();
+                        let columns = (((width + gap) / (MIN_GRID_TILE_W + gap)) as usize).max(1);
+                        let tile_w = (width - gap * (columns - 1) as f32) / columns as f32;
+                        let thumb_w = (tile_w - 2.0 * f32::from(GRID_TILE_MARGIN)).max(1.0);
+                        state.grid_thumb = egui::vec2(thumb_w, thumb_w * 9.0 / 16.0);
+                        for chunk in rows.chunks(columns) {
+                            ui.horizontal(|ui| {
+                                for row in chunk {
+                                    match row {
+                                        PoolRow::Folder { id, .. } => {
+                                            let Some(folder) = folders.iter().find(|f| f.id == *id)
+                                            else {
+                                                continue;
+                                            };
+                                            let rect = folder_tile(
+                                                ui,
+                                                state,
+                                                folder,
+                                                &folder_list,
+                                                menus,
+                                                &mut folder_actions,
+                                                &mut events,
+                                            );
+                                            file_drop_rows.push((rect, Some(id.clone())));
+                                        }
+                                        PoolRow::Item { item: entry, .. } => {
+                                            let rect = item_row(
+                                                ui,
+                                                state,
+                                                entry,
+                                                0,
+                                                layout,
+                                                &order,
+                                                &folder_list,
+                                                &item_hint,
+                                                menus,
+                                                &mut menu_choices,
+                                                &mut events,
+                                            );
+                                            file_drop_rows.push((rect, entry.folder.clone()));
+                                            item_rects.push((entry.id.clone(), rect));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        return;
+                    }
                     for row in rows {
                         match row {
                             PoolRow::Folder { id, depth } => {
@@ -230,6 +331,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                                     state,
                                     &entry,
                                     depth,
+                                    layout,
                                     &order,
                                     &folder_list,
                                     &item_hint,
@@ -244,7 +346,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                     }
                 });
             ui.add_space(BOTTOM_PAD);
-            state.file_drop_folder = file_drop_target(ui, &file_drop_rows);
+            state.file_drop_folder = file_drop_target(ui, &file_drop_rows, grid, base.clone());
             if let Some(folder) = &state.file_drop_folder
                 && let Some((rect, _)) = file_drop_rows
                     .iter()
@@ -253,7 +355,7 @@ pub(crate) fn show_pool<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
                 ui.painter()
                     .rect_filled(*rect, 3.0, crate::theme::ACCENT_TRANSLUCENT);
             }
-            accept_drop(&bg, state, None, &folder_list, &mut events);
+            accept_drop(&bg, state, base.as_ref(), &folder_list, &mut events);
             if let Some((id, name, clicked_at)) = state.rename_pending.clone() {
                 let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
                 let elapsed = ui.input(|i| i.time) - clicked_at;
@@ -332,7 +434,12 @@ fn carries_own_items<I: PoolId, F>(ctx: &egui::Context, state: &PoolState<I, F>)
 /// The folder of the row under the pointer while files are dragged in from
 /// the file manager: a folder row, or an item in it. `rows` comes in panel
 /// order, the folder's own row first.
-fn file_drop_target<F: Clone>(ui: &egui::Ui, rows: &[(egui::Rect, Option<F>)]) -> Option<F> {
+fn file_drop_target<F: Clone>(
+    ui: &egui::Ui,
+    rows: &[(egui::Rect, Option<F>)],
+    grid: bool,
+    base: Option<F>,
+) -> Option<F> {
     let pointer = ui.input(|i| {
         (!i.raw.hovered_files.is_empty())
             .then(|| i.pointer.latest_pos())
@@ -344,9 +451,17 @@ fn file_drop_target<F: Clone>(ui: &egui::Ui, rows: &[(egui::Rect, Option<F>)]) -
     // The gaps between rows count as the row above, or the folder would
     // flicker off between its items.
     let gap = ui.spacing().item_spacing.y;
-    rows.iter()
-        .find(|(rect, _)| rect.expand(gap / 2.0).y_range().contains(pointer.y))
-        .and_then(|(_, folder)| folder.clone())
+    match rows.iter().find(|(rect, _)| {
+        let rect = rect.expand(gap / 2.0);
+        if grid {
+            rect.contains(pointer)
+        } else {
+            rect.y_range().contains(pointer.y)
+        }
+    }) {
+        Some((_, folder)) => folder.clone(),
+        None => base,
+    }
 }
 
 /// Drops onto the pool: its own items or a folder dragged into `folder`.
@@ -433,17 +548,14 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
         color,
         egui::Stroke::NONE,
     ));
-    let icon = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 18.0, rect.center().y - 5.0),
-        egui::vec2(15.0, 11.0),
+    paint_folder_icon(
+        ui.painter(),
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y - 5.0),
+            egui::vec2(15.0, 11.0),
+        ),
+        visuals.weak_text_color(),
     );
-    let icon_color = visuals.weak_text_color();
-    ui.painter().rect_filled(
-        egui::Rect::from_min_size(icon.left_top() - egui::vec2(0.0, 2.0), egui::vec2(6.0, 3.0)),
-        1.0,
-        icon_color,
-    );
-    ui.painter().rect_filled(icon, 1.5, icon_color);
     let text_rect = rect.with_min_x(rect.left() + 38.0);
     match renaming {
         Some(rename) => {
@@ -491,11 +603,30 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             state.expanded.insert(id.clone());
         }
     }
+    folder_drag_and_menu(ui, state, &resp, folder, folders, menus, actions, events);
+    rect
+}
+
+/// What a folder row and a folder tile share: dragging it, dropping on it,
+/// its context menu.
+#[allow(clippy::too_many_arguments)]
+fn folder_drag_and_menu<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
+    ui: &egui::Ui,
+    state: &mut PoolState<I, F>,
+    resp: &egui::Response,
+    folder: &PoolFolder<F>,
+    folders: &[(F, &str, Option<F>)],
+    menus: &M,
+    actions: &mut Vec<M::Action>,
+    events: &mut Vec<PoolEvent<I, F, M::Action>>,
+) {
+    let id = &folder.id;
+    let target = RenameTarget::Folder(id.clone());
     resp.dnd_set_drag_payload(FolderDrag(id.clone()));
     if resp.dragged() {
         media_pool_ui::show_drag_ghost(ui, resp.id, &folder.name);
     }
-    accept_drop(&resp, state, Some(id), folders, events);
+    accept_drop(resp, state, Some(id), folders, events);
     resp.context_menu(|ui| {
         if ui.button(t!("pool.new_folder")).clicked() {
             events.push(PoolEvent::NewFolder(Some(id.clone())));
@@ -516,7 +647,210 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
             ui.close();
         }
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn folder_tile<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
+    ui: &mut egui::Ui,
+    state: &mut PoolState<I, F>,
+    folder: &PoolFolder<F>,
+    folders: &[(F, &str, Option<F>)],
+    menus: &M,
+    actions: &mut Vec<M::Action>,
+    events: &mut Vec<PoolEvent<I, F, M::Action>>,
+) -> egui::Rect {
+    let id = &folder.id;
+    let target = RenameTarget::Folder(id.clone());
+    let renaming = state.renaming.as_mut().filter(|r| r.target == target);
+    let is_renaming = renaming.is_some();
+    let mut rename_done = None;
+    let thumb_size = state.grid_thumb;
+    let rect = egui::Frame::NONE
+        .inner_margin(GRID_TILE_MARGIN)
+        .show(ui, |ui| {
+            ui.set_width(thumb_size.x);
+            ui.vertical(|ui| {
+                let (thumb, _) = ui.allocate_exact_size(thumb_size, egui::Sense::hover());
+                paint_folder_icon(
+                    ui.painter(),
+                    egui::Rect::from_center_size(
+                        thumb.center() + egui::vec2(0.0, thumb.height() * 0.05),
+                        egui::vec2(0.9, 0.64) * thumb.height(),
+                    ),
+                    ui.visuals().weak_text_color(),
+                );
+                match renaming {
+                    Some(rename) => rename_done = rename_field(ui, rename),
+                    None => {
+                        ui.add(egui::Label::new(&folder.name).truncate());
+                    }
+                }
+            });
+        })
+        .response
+        .rect;
+    if let Some(new_name) = rename_done {
+        state.renaming = None;
+        if let Some(name) = new_name
+            && name != folder.name
+        {
+            events.push(PoolEvent::RenameFolder(id.clone(), name));
+        }
+    }
+    let sense = if is_renaming {
+        egui::Sense::hover()
+    } else {
+        egui::Sense::click_and_drag()
+    };
+    let resp = ui
+        .interact(rect, ui.id().with(("media_pool_folder", id)), sense)
+        .on_hover_text(t!("pool.folder_open_hint"));
+    let drop_hover = (carries_own_items(ui.ctx(), state) && resp.contains_pointer())
+        || resp
+            .dnd_hover_payload::<FolderDrag<F>>()
+            .is_some_and(|d| d.0 != *id);
+    if drop_hover {
+        ui.painter()
+            .rect_filled(rect, 4.0, crate::theme::ACCENT_TRANSLUCENT);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, egui::Color32::from_white_alpha(8));
+    }
+    if state.selected_folder.as_ref() == Some(id) {
+        paint_selected(ui, rect, 4.0);
+    }
+    if resp.double_clicked() {
+        state.grid_folder = Some(id.clone());
+        state.clear();
+        state.rename_pending = None;
+    } else if resp.clicked() {
+        state.select_folder(id.clone());
+        state.rename_pending = None;
+    }
+    folder_drag_and_menu(ui, state, &resp, folder, folders, menus, actions, events);
     rect
+}
+
+/// Path from the root to the folder the grid shows: a click goes back to a
+/// level, and items or folders dropped on it move there.
+fn breadcrumb<I: PoolId, F: PoolId, A>(
+    ui: &mut egui::Ui,
+    state: &mut PoolState<I, F>,
+    folders: &[(F, &str, Option<F>)],
+    current: &F,
+    events: &mut Vec<PoolEvent<I, F, A>>,
+) {
+    let path = media_pool::folder_path(folders, current);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let levels = std::iter::once((None, t!("pool.grid_root").into_owned())).chain(
+            path.iter().map(|f| {
+                let name = folders
+                    .iter()
+                    .find(|(id, ..)| id == f)
+                    .map_or_else(String::new, |(_, name, _)| name.to_string());
+                (Some(f.clone()), name)
+            }),
+        );
+        for (i, (folder, name)) in levels.enumerate() {
+            if i > 0 {
+                ui.weak("›");
+            }
+            let last = folder.as_ref() == Some(current);
+            let text = if last {
+                egui::RichText::new(name).strong()
+            } else {
+                egui::RichText::new(name)
+            };
+            let resp = ui.add(egui::Button::new(text).frame(false));
+            if !last && resp.clicked() {
+                state.grid_folder = folder.clone();
+            }
+            if !last
+                && (carries_own_items(ui.ctx(), state)
+                    || egui::DragAndDrop::has_payload_of_type::<FolderDrag<F>>(ui.ctx()))
+                && resp.contains_pointer()
+            {
+                ui.painter()
+                    .rect_filled(resp.rect, 3.0, crate::theme::ACCENT_TRANSLUCENT);
+            }
+            accept_drop(&resp, state, folder.as_ref(), folders, events);
+        }
+    });
+}
+
+fn paint_folder_icon(painter: &egui::Painter, body: egui::Rect, color: egui::Color32) {
+    let tab = egui::vec2(body.width() * 0.4, body.height() * 0.27);
+    painter.rect_filled(
+        egui::Rect::from_min_size(body.left_top() - egui::vec2(0.0, tab.y * 0.67), tab),
+        1.0,
+        color,
+    );
+    painter.rect_filled(body, body.height() * 0.14, color);
+}
+
+/// Small glyph of what an item is, for the list that has no thumbnails.
+fn paint_kind_icon<I, F>(ui: &mut egui::Ui, entry: &PoolEntry<I, F>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
+    let visuals = ui.visuals();
+    let color = visuals.weak_text_color();
+    let painter = ui.painter();
+    let meta = &entry.meta;
+    match entry.thumb {
+        Thumb::Offline => paint_offline_thumbnail(painter, rect),
+        Thumb::Timeline => paint_film_icon(painter, rect, color, visuals.panel_fill),
+        _ if !meta.has_video => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "🔊",
+                egui::FontId::proportional(11.0),
+                color,
+            );
+        }
+        _ if meta.is_image() => {
+            let frame = rect.shrink2(egui::vec2(1.0, 1.0));
+            painter.rect_stroke(
+                frame,
+                1.0,
+                egui::Stroke::new(1.2, color),
+                egui::StrokeKind::Inside,
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    frame.left_bottom() + egui::vec2(2.0, -2.0),
+                    egui::pos2(frame.left() + 6.0, frame.top() + 4.5),
+                    egui::pos2(frame.left() + 10.0, frame.bottom() - 2.0),
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+            painter.circle_filled(
+                egui::pos2(frame.right() - 3.5, frame.top() + 3.5),
+                1.5,
+                color,
+            );
+        }
+        _ => {
+            let frame = rect.shrink2(egui::vec2(1.0, 1.0));
+            painter.rect_stroke(
+                frame,
+                2.0,
+                egui::Stroke::new(1.2, color),
+                egui::StrokeKind::Inside,
+            );
+            let c = frame.center();
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(c.x - 2.0, c.y - 3.0),
+                    egui::pos2(c.x + 3.0, c.y),
+                    egui::pos2(c.x - 2.0, c.y + 3.0),
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
 }
 
 /// Returns the rect of the row.
@@ -526,6 +860,7 @@ fn item_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
     state: &mut PoolState<I, F>,
     entry: &PoolEntry<I, F>,
     depth: usize,
+    layout: PoolLayout,
     order: &[I],
     folders: &[(F, &str, Option<F>)],
     hint: &str,
@@ -535,64 +870,76 @@ fn item_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
 ) -> egui::Rect {
     let id = &entry.id;
     let meta = &entry.meta;
+    let name_col_right = state.name_col_right;
+    let grid_thumb = state.grid_thumb;
     let target = RenameTarget::Item(id.clone());
     let renaming = state.renaming.as_mut().filter(|r| r.target == target);
     let is_renaming = renaming.is_some();
     let mut rename_done = None;
     let mut label_rect = egui::Rect::NOTHING;
-    let group_resp = indented(ui, depth, |ui| {
-        ui.group(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                paint_thumb(ui, &entry.thumb, meta);
-                // Cut at the name column, not widening the row: the header
-                // decides how wide it is.
-                let name_right = state
-                    .name_col_right
-                    .min(ui.max_rect().right() - DURATION_COL_W);
-                let badge = if entry.proxy.is_some() {
-                    PROXY_BADGE_W
-                } else {
-                    0.0
-                };
-                let name_w =
-                    (name_right - badge - ui.cursor().min.x - ui.spacing().item_spacing.x).max(0.0);
-                ui.vertical(|ui| {
-                    ui.set_width(name_w);
-                    match renaming {
-                        Some(rename) => rename_done = rename_field(ui, rename),
-                        None => label_rect = ui.add(egui::Label::new(&entry.name).truncate()).rect,
-                    }
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(meta_line(entry)).small()).truncate(),
-                    );
-                });
-                let row = egui::vec2(
-                    (name_right + DURATION_COL_W - ui.cursor().min.x).max(0.0),
-                    ui.spacing().interact_size.y,
-                );
-                ui.allocate_ui_with_layout(
-                    row,
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        // An image has no real duration.
-                        let duration_label = if meta.is_image() {
-                            "—".to_string()
-                        } else {
-                            format_duration(meta.duration_frames, meta.fps.as_f64())
-                        };
-                        ui.add_sized(
-                            egui::vec2(DURATION_COL_W, ui.available_height()),
-                            egui::Label::new(egui::RichText::new(duration_label).monospace()),
+    let name = |ui: &mut egui::Ui| match renaming {
+        Some(rename) => rename_done = rename_field(ui, rename),
+        None => label_rect = ui.add(egui::Label::new(&entry.name).truncate()).rect,
+    };
+    let rect = match layout {
+        PoolLayout::Details => indented(ui, depth, |ui| {
+            ui.group(|ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    paint_thumb(ui, &entry.thumb, meta, DETAILS_THUMB);
+                    let name_right = name_col_right.min(ui.max_rect().right() - DURATION_COL_W);
+                    let name_w = name_width(ui, entry, name_right);
+                    ui.vertical(|ui| {
+                        ui.set_width(name_w);
+                        name(ui);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(meta_line(entry)).small())
+                                .truncate(),
                         );
-                        proxy_badge(ui, entry.proxy);
-                    },
-                );
-            });
-        })
-        .response
-    });
-    let rect = group_resp.rect;
+                    });
+                    duration_column(ui, entry, name_right);
+                });
+            })
+            .response
+            .rect
+        }),
+        PoolLayout::List => indented(ui, depth, |ui| {
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(4, 1))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        paint_kind_icon(ui, entry);
+                        let name_right = name_col_right.min(ui.max_rect().right() - DURATION_COL_W);
+                        let name_w = name_width(ui, entry, name_right);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(name_w, ui.spacing().interact_size.y),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_width(name_w);
+                                name(ui);
+                            },
+                        );
+                        duration_column(ui, entry, name_right);
+                    });
+                })
+                .response
+                .rect
+        }),
+        PoolLayout::Grid => {
+            egui::Frame::NONE
+                .inner_margin(GRID_TILE_MARGIN)
+                .show(ui, |ui| {
+                    ui.set_width(grid_thumb.x);
+                    ui.vertical(|ui| {
+                        paint_thumb(ui, &entry.thumb, meta, grid_thumb);
+                        name(ui);
+                    });
+                })
+                .response
+                .rect
+        }
+    };
     if entry.proxy == Some(proxy_worker::ProxyState::Ready) {
         let rect = rect.shrink(1.0);
         ui.painter().rect_filled(
@@ -674,6 +1021,98 @@ fn item_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
     rect
 }
 
+/// Width left to the name before `name_right`, the proxy badge excluded.
+fn name_width<I, F>(ui: &egui::Ui, entry: &PoolEntry<I, F>, name_right: f32) -> f32 {
+    let badge = if entry.proxy.is_some() {
+        PROXY_BADGE_W
+    } else {
+        0.0
+    };
+    (name_right - badge - ui.cursor().min.x - ui.spacing().item_spacing.x).max(0.0)
+}
+
+/// The duration under its header column, the proxy badge before it.
+fn duration_column<I, F>(ui: &mut egui::Ui, entry: &PoolEntry<I, F>, name_right: f32) {
+    let row = egui::vec2(
+        (name_right + DURATION_COL_W - ui.cursor().min.x).max(0.0),
+        ui.spacing().interact_size.y,
+    );
+    ui.allocate_ui_with_layout(
+        row,
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.add_sized(
+                egui::vec2(DURATION_COL_W, ui.available_height()),
+                egui::Label::new(egui::RichText::new(duration_text(&entry.meta)).monospace()),
+            );
+            proxy_badge(ui, entry.proxy);
+        },
+    );
+}
+
+fn duration_text(meta: &vv_core::MediaMeta) -> String {
+    // An image has no real duration.
+    if meta.is_image() {
+        "—".to_string()
+    } else {
+        format_duration(meta.duration_frames, meta.fps.as_f64())
+    }
+}
+
+fn layout_button(ui: &mut egui::Ui, current: &mut PoolLayout, layout: PoolLayout) {
+    let hint = match layout {
+        PoolLayout::Details => t!("pool.layout_details"),
+        PoolLayout::List => t!("pool.layout_list"),
+        PoolLayout::Grid => t!("pool.layout_grid"),
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+    let resp = resp.on_hover_text(hint);
+    if resp.clicked() {
+        *current = layout;
+    }
+    let visuals = ui.visuals();
+    let active = *current == layout;
+    if active || resp.hovered() {
+        let fill = if active {
+            visuals.widgets.active.weak_bg_fill
+        } else {
+            visuals.widgets.hovered.weak_bg_fill
+        };
+        ui.painter().rect_filled(rect, 3.0, fill);
+    }
+    let color = if active {
+        visuals.strong_text_color()
+    } else {
+        visuals.weak_text_color()
+    };
+    let painter = ui.painter();
+    let c = rect.center();
+    let bar = |x0: f32, x1: f32, y: f32, h: f32| {
+        egui::Rect::from_min_max(
+            egui::pos2(c.x + x0, c.y + y),
+            egui::pos2(c.x + x1, c.y + y + h),
+        )
+    };
+    match layout {
+        PoolLayout::Details => {
+            for y in [-6.0, 1.0] {
+                painter.rect_filled(bar(-6.0, -1.0, y, 5.0), 1.0, color);
+                painter.rect_filled(bar(1.0, 6.0, y + 1.5, 2.0), 0.0, color);
+            }
+        }
+        PoolLayout::List => {
+            for y in [-6.0, -2.5, 1.0, 4.5] {
+                painter.rect_filled(bar(-6.0, 6.0, y, 1.5), 0.0, color);
+            }
+        }
+        PoolLayout::Grid => {
+            for (x, y) in [(-6.0, -6.0), (1.0, -6.0), (-6.0, 1.0), (1.0, 1.0)] {
+                painter.rect_filled(bar(x, x + 5.0, y, 5.0), 1.0, color);
+            }
+        }
+    }
+}
+
 fn paint_selected(ui: &egui::Ui, rect: egui::Rect, rounding: f32) {
     ui.painter().rect_stroke(
         rect,
@@ -685,8 +1124,12 @@ fn paint_selected(ui: &egui::Ui, rect: egui::Rect, rounding: f32) {
         .rect_filled(rect, rounding, egui::Color32::from_white_alpha(18));
 }
 
-fn paint_thumb(ui: &mut egui::Ui, thumb: &Thumb, meta: &vv_core::MediaMeta) {
-    let thumb_size = egui::vec2(64.0, 36.0);
+fn paint_thumb(
+    ui: &mut egui::Ui,
+    thumb: &Thumb,
+    meta: &vv_core::MediaMeta,
+    thumb_size: egui::Vec2,
+) {
     let (rect, _) = ui.allocate_exact_size(thumb_size, egui::Sense::hover());
     if let Thumb::Texture(texture) = thumb {
         let tex_size = texture.size_vec2();
@@ -715,7 +1158,7 @@ fn paint_thumb(ui: &mut egui::Ui, thumb: &Thumb, meta: &vv_core::MediaMeta) {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "🔊",
-                egui::FontId::proportional(18.0),
+                egui::FontId::proportional(thumb_size.y / 2.0),
                 ui.visuals().weak_text_color(),
             );
         }
@@ -1026,22 +1469,24 @@ fn paint_film_icon(
     color: egui::Color32,
     hole_color: egui::Color32,
 ) {
-    let film = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 28.0));
-    painter.rect_filled(film, 2.0, color);
-    const HOLES: usize = 6;
-    let step = film.width() / HOLES as f32;
-    for i in 0..HOLES {
+    // Drawn for a 64x36 thumbnail, scaled to `rect`.
+    let s = rect.height() / 36.0;
+    let film = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 28.0) * s);
+    painter.rect_filled(film, 2.0 * s, color);
+    let holes = if s < 0.5 { 4 } else { 6 };
+    let step = film.width() / holes as f32;
+    for i in 0..holes {
         let x = film.left() + step * (i as f32 + 0.5);
-        for y in [film.top() + 3.5, film.bottom() - 3.5] {
+        for y in [film.top() + 3.5 * s, film.bottom() - 3.5 * s] {
             painter.rect_filled(
-                egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(4.0, 3.0)),
+                egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(4.0, 3.0) * s),
                 0.5,
                 hole_color,
             );
         }
     }
-    let frames = film.shrink2(egui::vec2(3.0, 8.0));
-    let gap = 3.0;
+    let frames = film.shrink2(egui::vec2(3.0, 8.0) * s);
+    let gap = 3.0 * s;
     let frame_w = (frames.width() - gap) / 2.0;
     for i in 0..2 {
         let left = frames.left() + i as f32 * (frame_w + gap);
@@ -1059,8 +1504,10 @@ fn paint_film_icon(
 /// Thumbnail of a media whose file is missing.
 fn paint_offline_thumbnail(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_filled(rect, 2.0, egui::Color32::BLACK);
+    // Drawn for a 64x36 thumbnail, scaled to `rect`.
+    let s = rect.height() / 36.0;
     let c = rect.center();
-    let (half_w, h) = (12.0, 21.0);
+    let (half_w, h) = (12.0 * s, 21.0 * s);
     let (top, bottom) = (c.y - h / 2.0, c.y + h / 2.0);
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -1073,13 +1520,17 @@ fn paint_offline_thumbnail(painter: &egui::Painter, rect: egui::Rect) {
     ));
     painter.rect_filled(
         egui::Rect::from_min_max(
-            egui::pos2(c.x - 1.25, top + 7.0),
-            egui::pos2(c.x + 1.25, bottom - 6.0),
+            egui::pos2(c.x - 1.25 * s, top + 7.0 * s),
+            egui::pos2(c.x + 1.25 * s, bottom - 6.0 * s),
         ),
         1.0,
         egui::Color32::BLACK,
     );
-    painter.circle_filled(egui::pos2(c.x, bottom - 3.0), 1.4, egui::Color32::BLACK);
+    painter.circle_filled(
+        egui::pos2(c.x, bottom - 3.0 * s),
+        1.4 * s,
+        egui::Color32::BLACK,
+    );
 }
 
 /// Touchpad swipe on the pool, applied before its ScrollArea's `show` like

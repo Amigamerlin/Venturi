@@ -554,6 +554,8 @@ pub struct PanelLayout {
     pub media_pool_fraction: f32,
     pub inspector_width: f32,
     pub timeline_height: f32,
+    pub media_pool_layout: crate::media_pool::PoolLayout,
+    pub library_layout: crate::media_pool::PoolLayout,
 }
 
 impl Default for PanelLayout {
@@ -573,6 +575,8 @@ impl Default for PanelLayout {
             media_pool_fraction: 0.5,
             inspector_width: 300.0,
             timeline_height: 240.0,
+            media_pool_layout: Default::default(),
+            library_layout: Default::default(),
         }
     }
 }
@@ -797,6 +801,10 @@ struct PanelLayoutFile {
     inspector_width: Option<f32>,
     #[serde(default)]
     timeline_height: Option<f32>,
+    #[serde(default)]
+    media_pool_layout: Option<crate::media_pool::PoolLayout>,
+    #[serde(default)]
+    library_layout: Option<crate::media_pool::PoolLayout>,
 }
 
 impl Settings {
@@ -911,6 +919,8 @@ impl Settings {
                 .panels
                 .timeline_height
                 .unwrap_or(defaults.timeline_height),
+            media_pool_layout: file.panels.media_pool_layout.unwrap_or_default(),
+            library_layout: file.panels.library_layout.unwrap_or_default(),
         };
         for (id, shortcuts) in file.shortcuts {
             let Some(action) = Action::from_id(&id) else {
@@ -968,6 +978,8 @@ impl Settings {
                 media_pool_fraction: Some(self.panels.media_pool_fraction),
                 inspector_width: Some(self.panels.inspector_width),
                 timeline_height: Some(self.panels.timeline_height),
+                media_pool_layout: Some(self.panels.media_pool_layout),
+                library_layout: Some(self.panels.library_layout),
             },
             compressor_presets: preset_values(&self.compressor_presets),
             eq_presets: preset_values(&self.eq_presets),

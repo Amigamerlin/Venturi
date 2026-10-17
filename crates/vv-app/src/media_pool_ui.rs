@@ -598,6 +598,7 @@ impl VenturiApp {
                 entries,
                 menus: &ProjectMenus,
                 kinetic_scroll: self.settings.kinetic_scroll_media_pool,
+                layout: &mut self.settings.panels.media_pool_layout,
                 item_hint: t!("pool.item_hint"),
                 empty_hint: None,
             },

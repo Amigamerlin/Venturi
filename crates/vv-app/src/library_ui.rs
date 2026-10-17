@@ -434,6 +434,7 @@ impl VenturiApp {
                 entries,
                 menus: &LibraryMenus,
                 kinetic_scroll: self.settings.kinetic_scroll_media_pool,
+                layout: &mut self.settings.panels.library_layout,
                 item_hint: t!("library.item_hint"),
                 empty_hint: Some(t!("library.empty_hint")),
             },

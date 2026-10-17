@@ -10,6 +10,17 @@ use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use vv_core::{FolderId, MediaId};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolLayout {
+    /// Thumbnail, name and details.
+    #[default]
+    Details,
+    /// One line per item, no thumbnail.
+    List,
+    Grid,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SortKey {
     Name,
@@ -74,6 +85,10 @@ pub struct PoolState<I, F> {
     /// manager, as of the last frame: the drop is read before the pool is
     /// drawn again.
     pub file_drop_folder: Option<F>,
+    /// The folder the grid shows; `None`: the root.
+    pub grid_folder: Option<F>,
+    /// Thumbnail size of the grid tiles, as the grid last laid them out.
+    pub grid_thumb: egui::Vec2,
     /// Set by dragging the header's divider; `None`: all the room the
     /// duration leaves.
     pub name_col_w: Option<f32>,
@@ -101,6 +116,8 @@ impl<I, F> Default for PoolState<I, F> {
             offline: HashMap::new(),
             dragging: Vec::new(),
             file_drop_folder: None,
+            grid_folder: None,
+            grid_thumb: egui::Vec2::ZERO,
             name_col_w: None,
             name_col_right: f32::INFINITY,
         }
@@ -322,6 +339,59 @@ pub fn tree_rows<T, F: PoolId>(
     expanded: &HashSet<F>,
 ) -> Vec<PoolRow<T, F>> {
     build_rows(folders, items, expanded, None)
+}
+
+/// The rows of the grid: the folders and then the items right inside
+/// `current`, none of them nested.
+pub fn grid_rows<T, F: PoolId>(
+    folders: &[(F, &str, Option<F>)],
+    items: Vec<(T, Option<F>)>,
+    current: Option<&F>,
+) -> Vec<PoolRow<T, F>> {
+    let mut level: Vec<_> = folders
+        .iter()
+        .filter(|(_, _, parent)| parent.as_ref() == current)
+        .collect();
+    level.sort_by(|a, b| natural_cmp(a.1, b.1));
+    let exists = |folder: &Option<F>| {
+        folder
+            .as_ref()
+            .is_some_and(|f| folders.iter().any(|(id, ..)| id == f))
+    };
+    level
+        .into_iter()
+        .map(|(id, ..)| PoolRow::Folder {
+            id: id.clone(),
+            depth: 0,
+        })
+        .chain(
+            items
+                .into_iter()
+                .filter(|(_, folder)| match exists(folder) {
+                    true => folder.as_ref() == current,
+                    false => current.is_none(),
+                })
+                .map(|(item, _)| PoolRow::Item { item, depth: 0 }),
+        )
+        .collect()
+}
+
+/// The folders from the root down to `folder`, itself included.
+pub fn folder_path<F: PoolId>(folders: &[(F, &str, Option<F>)], folder: &F) -> Vec<F> {
+    let mut path = vec![folder.clone()];
+    while let Some(parent) = folders
+        .iter()
+        .find(|(id, ..)| id == path.last().unwrap())
+        .and_then(|(_, _, parent)| parent.clone())
+    {
+        // A parent cycle in a corrupted file must not loop forever.
+        if path.contains(&parent) {
+            break;
+        }
+        path.push(parent);
+    }
+    path.reverse();
+    path
 }
 
 /// The rows while searching: `items` are the matches, and only the folders

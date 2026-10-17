@@ -339,3 +339,35 @@ fn a_folder_cannot_move_into_itself_or_its_descendants() {
     assert!(can_move_folder(&folders, &a, Some(&"c".to_string())));
     assert!(can_move_folder(&folders, &"b".to_string(), None));
 }
+
+#[test]
+fn grid_rows_show_one_level_folders_first() {
+    let folders = [
+        ("b", "B", None),
+        ("a", "A", None),
+        ("sub", "Sub", Some("a")),
+    ];
+    let items = vec![
+        ("root", None),
+        ("in a", Some("a")),
+        ("in sub", Some("sub")),
+        ("lost", Some("gone")),
+    ];
+    let names = |rows: Vec<PoolRow<&str, &str>>| -> Vec<String> {
+        rows.into_iter()
+            .map(|row| match row {
+                PoolRow::Folder { id, .. } => format!("[{id}]"),
+                PoolRow::Item { item, .. } => item.to_string(),
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(grid_rows(&folders, items.clone(), None)),
+        ["[a]", "[b]", "root", "lost"]
+    );
+    assert_eq!(
+        names(grid_rows(&folders, items, Some(&"a"))),
+        ["[sub]", "in a"]
+    );
+    assert_eq!(folder_path(&folders, &"sub"), ["a", "sub"]);
+}

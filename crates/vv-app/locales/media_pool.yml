@@ -237,3 +237,23 @@ pool.search_clear:
 pool.search_no_results:
   en: "No matching items"
   it: "Nessun elemento corrispondente"
+
+pool.layout_details:
+  en: "Thumbnails and details"
+  it: "Miniature e dettagli"
+
+pool.layout_list:
+  en: "List"
+  it: "Elenco"
+
+pool.layout_grid:
+  en: "Grid"
+  it: "Griglia"
+
+pool.grid_root:
+  en: "Root"
+  it: "Radice"
+
+pool.folder_open_hint:
+  en: "Double click a folder to open it"
+  it: "Doppio click su una cartella per aprirla"

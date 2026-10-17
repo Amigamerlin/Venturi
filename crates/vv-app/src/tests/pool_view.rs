@@ -33,6 +33,12 @@ struct Pool {
     ctx: egui::Context,
     state: PoolState<String, String>,
     items: Vec<(String, Option<String>)>,
+    /// Folder ids with their parent; the name is the id.
+    folders: Vec<(String, Option<String>)>,
+    layout: PoolLayout,
+    /// Width the pool took in the last frame.
+    used_width: f32,
+    time: f64,
 }
 
 impl Pool {
@@ -41,6 +47,10 @@ impl Pool {
             ctx: egui::Context::default(),
             state: PoolState::default(),
             items: vec![("in".into(), Some("f".into())), ("out".into(), None)],
+            folders: vec![("f".into(), None)],
+            layout: PoolLayout::Details,
+            used_width: 0.0,
+            time: 0.0,
         }
     }
 
@@ -51,6 +61,7 @@ impl Pool {
                 egui::vec2(300.0, 600.0),
             )),
             events,
+            time: Some(self.time),
             hovered_files: if files {
                 vec![egui::HoveredFile::default()]
             } else {
@@ -83,6 +94,7 @@ impl Pool {
                 })
                 .collect(),
         );
+        self.time += 1.0 / 60.0;
         let mut events = Vec::new();
         self.ctx
             .run_ui(input, |ui| {
@@ -90,18 +102,24 @@ impl Pool {
                     ui,
                     &mut self.state,
                     PoolView {
-                        folders: vec![PoolFolder {
-                            id: "f".into(),
-                            name: "f".into(),
-                            parent: None,
-                        }],
+                        folders: self
+                            .folders
+                            .iter()
+                            .map(|(id, parent)| PoolFolder {
+                                id: id.clone(),
+                                name: id.clone(),
+                                parent: parent.clone(),
+                            })
+                            .collect(),
                         entries: entries.take().unwrap_or_default(),
                         menus: &NoMenus,
                         kinetic_scroll: false,
+                        layout: &mut self.layout,
                         item_hint: "".into(),
                         empty_hint: None,
                     },
                 );
+                self.used_width = ui.min_rect().width();
             })
             .textures_delta
             .clear();
@@ -132,11 +150,18 @@ impl Pool {
         );
     }
 
+    /// The item a click at `pos` selects.
+    fn item_at(&mut self, pos: egui::Pos2) -> Option<String> {
+        self.state.clear();
+        self.click(pos);
+        self.state.single_selected().cloned()
+    }
+
     /// The top of the folder's row, found by hovering files over it.
     fn folder_top(&mut self) -> f32 {
         (0..600)
             .map(|y| y as f32)
-            .find(|&y| self.hover_files(egui::pos2(150.0, y)).is_some())
+            .find(|&y| self.hover_files(egui::pos2(40.0, y)).is_some())
             .expect("the folder row is shown")
     }
 }
@@ -211,4 +236,108 @@ fn items_moved_into_a_closed_folder_open_it_and_stay_selected() {
     assert_eq!(pool.items[1], ("out".into(), Some("f".into())));
     assert!(pool.state.expanded.contains("f"));
     assert!(pool.state.selected.contains("out"));
+}
+
+fn root_items(layout: PoolLayout) -> Pool {
+    let mut pool = Pool::new();
+    pool.items = vec![("a".into(), None), ("b".into(), None)];
+    pool.folders.clear();
+    pool.layout = layout;
+    pool
+}
+
+#[test]
+fn the_grid_puts_items_side_by_side() {
+    for (layout, side_by_side) in [
+        (PoolLayout::Grid, true),
+        (PoolLayout::List, false),
+        (PoolLayout::Details, false),
+    ] {
+        let mut pool = root_items(layout);
+        let first = (0..600)
+            .step_by(4)
+            .map(|y| egui::pos2(40.0, y as f32))
+            .find(|&pos| pool.item_at(pos).as_deref() == Some("a"))
+            .expect("the first item is shown");
+        // In the second column.
+        let beside = egui::pos2(150.0, first.y);
+        assert_eq!(
+            pool.item_at(beside).as_deref() == Some("b"),
+            side_by_side,
+            "{layout:?}"
+        );
+    }
+}
+
+#[test]
+fn the_list_takes_less_room_per_item_than_the_details() {
+    let height = |layout| {
+        let mut pool = root_items(layout);
+        (0..600)
+            .filter(|&y| pool.item_at(egui::pos2(150.0, y as f32)).as_deref() == Some("a"))
+            .count()
+    };
+    let (list, details) = (height(PoolLayout::List), height(PoolLayout::Details));
+    assert!(
+        list > 10 && list < details,
+        "list {list}, details {details}"
+    );
+}
+
+#[test]
+fn the_layout_buttons_switch_the_layout() {
+    let mut pool = Pool::new();
+    // Right to left: grid, list, details, then the search field.
+    pool.click(egui::pos2(290.0, 10.0));
+    assert_eq!(pool.layout, PoolLayout::Grid);
+    pool.click(egui::pos2(268.0, 10.0));
+    assert_eq!(pool.layout, PoolLayout::List);
+}
+
+#[test]
+fn the_pool_never_asks_for_more_width_than_it_has() {
+    for layout in [PoolLayout::Details, PoolLayout::List, PoolLayout::Grid] {
+        let mut pool = root_items(layout);
+        pool.items = (0..12).map(|i| (format!("item {i}"), None)).collect();
+        pool.frame(Vec::new(), false);
+        pool.frame(Vec::new(), false);
+        assert!(pool.used_width <= 300.0, "{layout:?}: {}", pool.used_width);
+    }
+}
+
+#[test]
+fn grid_folders_are_tiles_opened_by_a_double_click() {
+    let mut pool = Pool::new();
+    pool.layout = PoolLayout::Grid;
+    pool.folders.push(("sub".into(), Some("f".into())));
+    let top = pool.folder_top();
+    // The folder tile comes first, the root item beside it.
+    let folder = egui::pos2(40.0, top + 30.0);
+    assert_eq!(
+        pool.item_at(egui::pos2(150.0, folder.y)).as_deref(),
+        Some("out")
+    );
+
+    pool.click(folder);
+    assert_eq!(pool.state.selected_folder.as_deref(), Some("f"));
+    // Far enough from the clicks above not to make a triple click.
+    for _ in 0..60 {
+        pool.frame(vec![egui::Event::PointerMoved(folder)], false);
+    }
+    for _ in 0..2 {
+        pool.frame(vec![button(folder, true)], false);
+        pool.frame(vec![button(folder, false)], false);
+    }
+    pool.frame(Vec::new(), false);
+    assert_eq!(pool.state.grid_folder.as_deref(), Some("f"));
+
+    // Inside: the subfolder, then the item; dropped files land in `f`.
+    assert_eq!(
+        pool.item_at(egui::pos2(150.0, folder.y)).as_deref(),
+        Some("in")
+    );
+    assert_eq!(
+        pool.hover_files(egui::pos2(150.0, 500.0)).as_deref(),
+        Some("f")
+    );
 }
