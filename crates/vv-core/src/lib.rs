@@ -21,7 +21,8 @@ pub use command::{
     SetTrackFlag, SlipClip, SpeedFit, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, compound_clip_commands, cut_overlaps, insert_overwriting, make_room_for_ranges,
     plan_compound_clip, reset_clip_gain, set_clip_blend_mode, set_clip_filters, set_clip_flip,
-    set_clip_gain, set_clip_masks, set_clip_title, set_clip_transform_param, set_clip_transition,
+    set_clip_gain, set_clip_masks, set_clip_matte, set_clip_title, set_clip_transform_param,
+    set_clip_transition,
 };
 pub use grade::*;
 pub use mask::*;

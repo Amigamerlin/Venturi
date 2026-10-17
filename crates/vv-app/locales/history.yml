@@ -204,6 +204,10 @@ history.blend_mode:
   en: "Blend mode"
   it: "Metodo di fusione"
 
+history.matte:
+  en: "Track matte"
+  it: "Mascherino"
+
 history.move_keyframes:
   en: "Move keyframes"
   it: "Sposta keyframe"

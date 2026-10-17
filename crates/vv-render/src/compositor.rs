@@ -642,6 +642,7 @@ struct WorkPipelines {
     /// The two passes of `Compositor::grown`.
     grow_rows: wgpu::RenderPipeline,
     grow: wgpu::RenderPipeline,
+    matte: wgpu::RenderPipeline,
 }
 
 impl WorkPipelines {
@@ -775,6 +776,23 @@ impl WorkPipelines {
             wgpu::BlendState::REPLACE,
         );
 
+        // Multiplies the target, color and alpha, by the coverage the shader writes.
+        let by_coverage = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::SrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let matte = fullscreen_pipeline(
+            "vv-render matte pipeline",
+            &module("vv-render matte shader", include_str!("shaders/matte.wgsl")),
+            "fs_main",
+            format,
+            wgpu::BlendState {
+                color: by_coverage,
+                alpha: by_coverage,
+            },
+        );
+
         Self {
             format,
             normal,
@@ -783,6 +801,7 @@ impl WorkPipelines {
             shadow,
             grow_rows,
             grow,
+            matte,
         }
     }
 }
@@ -1407,6 +1426,64 @@ impl Compositor {
                 progress,
             );
         give_back(&mut self.scratch.lock().unwrap(), [a, b]);
+        PooledTexture {
+            texture: Some(out),
+            pool: Arc::clone(&self.scratch),
+        }
+    }
+
+    /// `fill` composed alone and cut out by `matte`, composed alone too.
+    /// Owned like `render_layers_to_owned_texture_transparent`, to be used as a
+    /// `LayerContent::Texture`.
+    pub fn render_matted_to_owned_texture(
+        &self,
+        fill: &[Layer],
+        matte: &[Layer],
+        mode: vv_core::MatteMode,
+        output: OutputFrame,
+    ) -> PooledTexture {
+        use vv_core::MatteMode as M;
+        let out = self.compose(fill, output, TRANSPARENT);
+        let matte_texture = self.compose(matte, output, TRANSPARENT);
+        let luma = matches!(mode, M::Luma | M::LumaInverted);
+        let inverted = matches!(mode, M::AlphaInverted | M::LumaInverted);
+        let flag = |b: bool| if b { 1.0f32 } else { 0.0 };
+        let uniform: [f32; 4] = [flag(luma), flag(inverted), 0.0, 0.0];
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vv-render matte uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let matte_view = matte_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vv-render matte bind group"),
+            layout: &self.work.matte.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&matte_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vv-render matte encoder"),
+            });
+        self.pass(
+            &mut encoder,
+            &out.create_view(&wgpu::TextureViewDescriptor::default()),
+            wgpu::LoadOp::Load,
+            Some((&bind_group, &self.work.matte)),
+        );
+        self.queue.submit(Some(encoder.finish()));
+        give_back(&mut self.scratch.lock().unwrap(), [matte_texture]);
         PooledTexture {
             texture: Some(out),
             pool: Arc::clone(&self.scratch),

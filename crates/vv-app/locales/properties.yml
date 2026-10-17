@@ -517,6 +517,30 @@ blend.divide:
   en: "Divide"
   it: "Dividi"
 
+props.matte:
+  en: "Track matte"
+  it: "Mascherino"
+
+matte.none:
+  en: "None"
+  it: "Nessuno"
+
+matte.alpha:
+  en: "Alpha"
+  it: "Alfa"
+
+matte.alpha_inverted:
+  en: "Alpha inverted"
+  it: "Alfa invertito"
+
+matte.luma:
+  en: "Luma"
+  it: "Luminanza"
+
+matte.luma_inverted:
+  en: "Luma inverted"
+  it: "Luminanza invertita"
+
 props.reset_hint:
   en: "Double-click or right-click to reset"
   it: "Doppio click o tasto destro per reimpostare"

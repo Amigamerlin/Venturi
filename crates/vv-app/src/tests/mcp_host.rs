@@ -57,6 +57,7 @@ fn opacity(timeline_id: TimelineId, clip: ClipId, value: f32) -> ToolCall {
         fade_in: None,
         fade_out: None,
         fill_color: None,
+        matte: None,
     })
 }
 

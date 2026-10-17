@@ -12,6 +12,7 @@ pub(crate) enum Attribute {
     Fades,
     Speed,
     BlendMode,
+    Matte,
     Opacity,
     Position,
     Rotation,
@@ -76,7 +77,7 @@ impl Section {
 }
 
 impl Attribute {
-    pub(crate) const ALL: [Attribute; 15] = [
+    pub(crate) const ALL: [Attribute; 16] = [
         Attribute::Zoom,
         Attribute::Position,
         Attribute::Rotation,
@@ -85,6 +86,7 @@ impl Attribute {
         Attribute::Crop,
         Attribute::CropSoftness,
         Attribute::BlendMode,
+        Attribute::Matte,
         Attribute::Opacity,
         Attribute::Filters,
         Attribute::Masks,
@@ -102,7 +104,7 @@ impl Attribute {
             | Attribute::AnchorPoint
             | Attribute::Flip => Section::Transform,
             Attribute::Crop | Attribute::CropSoftness => Section::Crop,
-            Attribute::BlendMode | Attribute::Opacity => Section::Blending,
+            Attribute::BlendMode | Attribute::Matte | Attribute::Opacity => Section::Blending,
             Attribute::Filters => Section::Filters,
             Attribute::Masks => Section::Masks,
             Attribute::Transitions => Section::Transitions,
@@ -116,6 +118,7 @@ impl Attribute {
             Attribute::Fades => t!("paste_attr.fades"),
             Attribute::Speed => t!("paste_attr.speed"),
             Attribute::BlendMode => t!("props.composite_mode"),
+            Attribute::Matte => t!("props.matte"),
             Attribute::Opacity => t!("props.opacity"),
             Attribute::Position => t!("props.position"),
             Attribute::Rotation => t!("props.rotation"),
@@ -553,6 +556,7 @@ fn merge(
                 attributes.fade_out = duration(source.fade_out).clamp(0, len);
             }
             Attribute::BlendMode => attributes.effects.blend_mode = source.effects.blend_mode,
+            Attribute::Matte => attributes.effects.matte = source.effects.matte,
             Attribute::Flip => attributes.effects.transform.flip = source.effects.transform.flip,
             Attribute::Filters => {
                 let size = (sx * sy).sqrt();

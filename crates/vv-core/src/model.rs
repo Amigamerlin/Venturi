@@ -1514,6 +1514,25 @@ impl BlendMode {
     ];
 }
 
+/// How a clip used as a track matte cuts out the layer below it: by its
+/// alpha or its luminance, optionally inverted. The matte itself is never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatteMode {
+    Alpha,
+    AlphaInverted,
+    Luma,
+    LumaInverted,
+}
+
+impl MatteMode {
+    pub const ALL: [Self; 4] = [
+        Self::Alpha,
+        Self::AlphaInverted,
+        Self::Luma,
+        Self::LumaInverted,
+    ];
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "StoredEffectStack")]
 pub struct EffectStack {
@@ -1535,6 +1554,9 @@ pub struct EffectStack {
     pub blend_mode: BlendMode,
     #[serde(default)]
     pub masks: Vec<crate::mask::ClipMask>,
+    /// Set: the clip is a track matte for the layer below.
+    #[serde(default)]
+    pub matte: Option<MatteMode>,
 }
 
 /// `EffectStack` as saved, older files included.
@@ -1555,6 +1577,8 @@ struct StoredEffectStack {
     blend_mode: BlendMode,
     #[serde(default)]
     masks: Vec<crate::mask::ClipMask>,
+    #[serde(default)]
+    matte: Option<MatteMode>,
 }
 
 impl From<StoredEffectStack> for EffectStack {
@@ -1576,6 +1600,7 @@ impl From<StoredEffectStack> for EffectStack {
             transition_out: stored.transition_out,
             blend_mode: stored.blend_mode,
             masks: stored.masks,
+            matte: stored.matte,
         }
     }
 }
@@ -1592,6 +1617,7 @@ impl Default for EffectStack {
             transition_out: None,
             blend_mode: BlendMode::default(),
             masks: Vec::new(),
+            matte: None,
         }
     }
 }
@@ -1694,6 +1720,7 @@ impl EffectStack {
             && self.gain_db.default == 0.0
             && self.color.is_none()
             && self.blend_mode == BlendMode::Normal
+            && self.matte.is_none()
     }
 }
 

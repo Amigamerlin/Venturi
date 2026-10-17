@@ -330,6 +330,7 @@ fn set_clip_properties_checks_ranges_and_applies_everything() {
         fade_in,
         fade_out: None,
         fill_color: Some([0.0, 0.0, 1.0, 1.0]),
+        matte: Some(MatteArg::Luma),
     };
     assert_eq!(
         error(
@@ -362,6 +363,7 @@ fn set_clip_properties_checks_ranges_and_applies_everything() {
     assert_eq!(detail["disabled"], true);
     assert_eq!(detail["fade_in"], 10);
     assert_eq!(detail["effects"]["color"]["default"]["b"], 1.0);
+    assert_eq!(detail["effects"]["matte"], "Luma");
 }
 
 #[test]

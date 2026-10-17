@@ -48,6 +48,19 @@ pub trait FrameProvider {
     ) -> Option<vv_render::PooledTexture> {
         None
     }
+
+    /// `fill` cut out by `matte` (see `stack_layers`), as a GPU texture of
+    /// `timeline_size`. `None` from the default implementation: the caller
+    /// shows `fill` as it is.
+    fn matte_texture(
+        &mut self,
+        _fill: &[OwnedLayer],
+        _matte: &[OwnedLayer],
+        _mode: vv_core::MatteMode,
+        _timeline_size: (u32, u32),
+    ) -> Option<vv_render::PooledTexture> {
+        None
+    }
 }
 
 /// The nested timeline of `clip`, if it is a compound clip.
@@ -275,6 +288,23 @@ impl FrameProvider for GpuCompounds<'_> {
             vv_render::OutputFrame::exact(width, height).reduced(self.preview_divisor),
         ))
     }
+
+    fn matte_texture(
+        &mut self,
+        fill: &[OwnedLayer],
+        matte: &[OwnedLayer],
+        mode: vv_core::MatteMode,
+        (width, height): (u32, u32),
+    ) -> Option<vv_render::PooledTexture> {
+        let fill: Vec<_> = fill.iter().map(OwnedLayer::as_render).collect();
+        let matte: Vec<_> = matte.iter().map(OwnedLayer::as_render).collect();
+        Some(self.compositor.render_matted_to_owned_texture(
+            &fill,
+            &matte,
+            mode,
+            vv_render::OutputFrame::exact(width, height).reduced(self.preview_divisor),
+        ))
+    }
 }
 
 /// The layers of `nested` at `local_frame`, or `None` if a clip covering that
@@ -287,7 +317,7 @@ fn nested_layers(
     local_frame: FrameIdx,
     provider: &mut dyn FrameProvider,
 ) -> Result<Option<Vec<OwnedLayer>>, ExportError> {
-    let mut layers = Vec::new();
+    let mut groups = Vec::new();
     for (track_index, clip) in nested.active_video_clips_at(local_frame) {
         let clip_layers = track_layers_at(
             project,
@@ -301,9 +331,56 @@ fn nested_layers(
         if clip_layers.is_empty() {
             return Ok(None);
         }
-        layers.extend(clip_layers);
+        groups.push((clip.effects.matte, clip_layers));
     }
-    Ok(Some(layers))
+    Ok(Some(stack_layers(groups, provider, nested.resolution)))
+}
+
+/// The stack from the layers of each track, bottom to top, each with the
+/// matte mode of its clip: a matte is not shown, it cuts out the track
+/// below it instead. A matte with nothing below is dropped.
+pub fn stack_layers(
+    groups: impl IntoIterator<Item = (Option<vv_core::MatteMode>, Vec<OwnedLayer>)>,
+    provider: &mut dyn FrameProvider,
+    timeline_size: (u32, u32),
+) -> Vec<OwnedLayer> {
+    let mut stack: Vec<Vec<OwnedLayer>> = Vec::new();
+    for (matte, layers) in groups {
+        let Some(mode) = matte else {
+            stack.push(layers);
+            continue;
+        };
+        let Some(mut fill) = stack.pop() else {
+            continue;
+        };
+        let Some(blend) = fill.last().map(|l| l.blend) else {
+            continue;
+        };
+        // Composed alone, the fill blends onto the stack only once it is cut out.
+        let blends: Vec<_> = fill
+            .iter_mut()
+            .map(|l| std::mem::take(&mut l.blend))
+            .collect();
+        let Some(texture) = provider.matte_texture(&fill, &layers, mode, timeline_size) else {
+            for (layer, blend) in fill.iter_mut().zip(blends) {
+                layer.blend = blend;
+            }
+            stack.push(fill);
+            continue;
+        };
+        stack.push(vec![OwnedLayer {
+            content: OwnedContent::Texture {
+                texture,
+                source_size: timeline_size,
+            },
+            transform: Transform::default(),
+            opacity: 1.0,
+            filters: Vec::new(),
+            blend,
+            masks: Vec::new(),
+        }]);
+    }
+    stack.into_iter().flatten().collect()
 }
 
 /// The layer of `clip` at timeline frame `frame`, shared by preview

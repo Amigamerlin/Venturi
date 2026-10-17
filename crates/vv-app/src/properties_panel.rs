@@ -1202,6 +1202,24 @@ pub(crate) fn blend_mode_label(mode: vv_core::BlendMode) -> Cow<'static, str> {
     }
 }
 
+pub(crate) fn matte_label(mode: Option<vv_core::MatteMode>) -> Cow<'static, str> {
+    use vv_core::MatteMode as M;
+    match mode {
+        None => t!("matte.none"),
+        Some(M::Alpha) => t!("matte.alpha"),
+        Some(M::AlphaInverted) => t!("matte.alpha_inverted"),
+        Some(M::Luma) => t!("matte.luma"),
+        Some(M::LumaInverted) => t!("matte.luma_inverted"),
+    }
+}
+
+pub(crate) fn set_matte(
+    (tl, track, clip): ClipRef,
+    value: Option<vv_core::MatteMode>,
+) -> BoxedCommand {
+    Box::new(vv_core::set_clip_matte(tl, track, clip, value))
+}
+
 pub(crate) fn set_blend_mode(
     (tl, track, clip): ClipRef,
     value: vv_core::BlendMode,
@@ -1466,6 +1484,7 @@ impl VenturiApp {
                 })
                 .collect(),
             blend_mode: clip.effects.blend_mode,
+            matte: clip.effects.matte,
         })
     }
 
@@ -1996,11 +2015,15 @@ impl VenturiApp {
                                             ui.add_space(6.0);
                                             let mut blend_mode = info.blend_mode;
                                             let mut blend_changed = false;
+                                            let mut matte = info.matte;
+                                            let mut matte_changed = false;
                                             let (open, reset) = section_header(ui, &t!("props.composite"), true);
                                             if reset {
                                                 reset_groups.push((vec![P::Opacity], false));
                                                 blend_mode = vv_core::BlendMode::Normal;
                                                 blend_changed = true;
+                                                matte = None;
+                                                matte_changed = true;
                                             }
                                             if open {
 
@@ -2027,6 +2050,32 @@ impl VenturiApp {
                                             if blend_changed {
                                                 for t in targets {
                                                     pending_effects.push(set_blend_mode((t.timeline, t.track_index, t.clip_id), blend_mode));
+                                                }
+                                            }
+
+                                            let row = param_row(ui, &t!("props.matte"), None, |ui| {
+                                                let items: Vec<_> = std::iter::once(None)
+                                                    .chain(vv_core::MatteMode::ALL.map(Some))
+                                                    .map(|mode| (mode, matte_label(mode).to_string(), true))
+                                                    .collect();
+                                                preview_combo(
+                                                    ui,
+                                                    "clip_matte",
+                                                    &mut matte,
+                                                    &items,
+                                                    Some(ui.available_width()),
+                                                    None,
+                                                    None,
+                                                )
+                                            });
+                                            matte_changed |= row.changed;
+                                            if row.reset {
+                                                matte = None;
+                                                matte_changed = true;
+                                            }
+                                            if matte_changed {
+                                                for t in targets {
+                                                    pending_effects.push(set_matte((t.timeline, t.track_index, t.clip_id), matte));
                                                 }
                                             }
 

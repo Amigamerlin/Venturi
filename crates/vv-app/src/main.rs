@@ -203,6 +203,7 @@ struct ClipPanelInfo {
     /// panel; then one per filter, in order of application.
     filters: Vec<FilterPanelInfo>,
     blend_mode: vv_core::BlendMode,
+    matte: Option<vv_core::MatteMode>,
 }
 
 /// A filter of `ClipPanelInfo`, its parameters evaluated at the panel's frame.
@@ -1995,7 +1996,7 @@ impl VenturiApp {
         render_ahead.take_served_keyframe();
         let playhead = self.timeline_state.playhead;
         let clips = timeline.active_video_clips_at(playhead);
-        let mut layers = Vec::with_capacity(clips.len());
+        let mut groups = Vec::with_capacity(clips.len());
         for &(track_index, clip) in &clips {
             if isolation.is_some_and(|i| !i.shows(track_index)) {
                 continue;
@@ -2039,9 +2040,15 @@ impl VenturiApp {
                     return None;
                 }
             }
-            layers.extend(track_layers);
+            groups.push((clip.effects.matte, track_layers));
         }
-        Some(layers)
+        let mut provider = frame_provider::GpuCompounds::new(render_ahead, &self.compositor)
+            .with_preview_divisor(self.settings.preview_resolution.divisor());
+        Some(frame_provider::stack_layers(
+            groups,
+            &mut provider,
+            timeline.resolution,
+        ))
     }
 
     #[cfg(test)]

@@ -579,6 +579,12 @@ pub(crate) fn set_clip_properties(
             if let Some(color) = color {
                 do_command(s, Box::new(SetClipColor::new(timeline, track, id, color)));
             }
+            if let Some(matte) = args.matte {
+                do_command(
+                    s,
+                    Box::new(vv_core::set_clip_matte(timeline, track, id, matte.mode())),
+                );
+            }
         }
         if let Some(disabled) = args.disabled {
             do_command(

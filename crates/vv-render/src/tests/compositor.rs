@@ -2639,3 +2639,74 @@ fn a_smooth_cut_halfway_shows_the_motion_halfway() {
         "morph error {morph_error}, dissolve error {dissolve_error}"
     );
 }
+
+/// RGBA of the center and of the corner of a 16x16 frame: blue below,
+/// red cut out by `matte` above.
+fn matted_red_over_blue(matte: &[Layer], mode: vv_core::MatteMode) -> ([u8; 4], [u8; 4]) {
+    let compositor = Compositor::new_headless();
+    let output = OutputFrame::exact(16, 16);
+    let red = [Layer::new(LayerContent::Solid(RED), Transform::default())];
+    let matted = compositor.render_matted_to_owned_texture(&red, matte, mode, output);
+    let out = compositor.render_layers(
+        &[
+            Layer::new(LayerContent::Solid(BLUE), Transform::default()),
+            Layer::new(
+                LayerContent::Texture {
+                    texture: &matted,
+                    source_size: (16, 16),
+                },
+                Transform::default(),
+            ),
+        ],
+        output,
+    );
+    let pixels = out.as_chunks::<4>().0;
+    (pixels[8 * 16 + 8], pixels[0])
+}
+
+#[test]
+fn an_alpha_matte_shows_the_layer_only_where_the_matte_is() {
+    let half = Transform {
+        zoom: [0.5, 0.5],
+        ..Transform::default()
+    };
+    // Black: the alpha matte ignores the color.
+    let matte = [Layer::new(LayerContent::Solid(vv_core::Rgba::BLACK), half)];
+    let (center, corner) = matted_red_over_blue(&matte, vv_core::MatteMode::Alpha);
+    assert_close_rgba(center, [255, 0, 0, 255]);
+    assert_close_rgba(corner, [0, 0, 255, 255]);
+    let (center, corner) = matted_red_over_blue(&matte, vv_core::MatteMode::AlphaInverted);
+    assert_close_rgba(center, [0, 0, 255, 255]);
+    assert_close_rgba(corner, [255, 0, 0, 255]);
+}
+
+#[test]
+fn a_luma_matte_shows_the_layer_by_the_brightness_of_the_matte() {
+    let solid = |color| [Layer::new(LayerContent::Solid(color), Transform::default())];
+    let (white, _) = matted_red_over_blue(&solid(WHITE), vv_core::MatteMode::Luma);
+    assert_close_rgba(white, [255, 0, 0, 255]);
+    let (black, _) = matted_red_over_blue(&solid(vv_core::Rgba::BLACK), vv_core::MatteMode::Luma);
+    assert_close_rgba(black, [0, 0, 255, 255]);
+    let (inverted, _) = matted_red_over_blue(
+        &solid(vv_core::Rgba::BLACK),
+        vv_core::MatteMode::LumaInverted,
+    );
+    assert_close_rgba(inverted, [255, 0, 0, 255]);
+    let gray = vv_core::Rgba {
+        r: 0.5,
+        g: 0.5,
+        b: 0.5,
+        a: 1.0,
+    };
+    let (half, _) = matted_red_over_blue(&solid(gray), vv_core::MatteMode::Luma);
+    assert!(
+        (40..215).contains(&half[0]) && (40..215).contains(&half[2]),
+        "gray mixes the two: {half:?}"
+    );
+}
+
+#[test]
+fn an_empty_matte_hides_the_layer() {
+    let (center, _) = matted_red_over_blue(&[], vv_core::MatteMode::Alpha);
+    assert_close_rgba(center, [0, 0, 255, 255]);
+}

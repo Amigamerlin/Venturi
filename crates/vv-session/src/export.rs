@@ -16,7 +16,7 @@ use vv_audio::mixer::{PROJECT_SAMPLE_RATE, timeline_frame_to_sample};
 use crate::audio_render::{LevelCache, render_offline};
 
 use crate::frame_provider::{
-    FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at,
+    FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, stack_layers, track_layers_at,
 };
 
 pub(crate) const PROJECT_CHANNELS: u16 = 2;
@@ -530,9 +530,9 @@ fn decode_video_frame(
 ) -> Result<Vec<OwnedLayer>, ExportError> {
     let clips = timeline.active_video_clips_at(frame);
     let mut gpu = GpuCompounds::new(provider, compositor);
-    let mut layers = Vec::with_capacity(clips.len());
+    let mut groups = Vec::with_capacity(clips.len());
     for (track_index, clip) in clips {
-        layers.extend(track_layers_at(
+        let layers = track_layers_at(
             project,
             timeline,
             track_index,
@@ -540,8 +540,10 @@ fn decode_video_frame(
             frame,
             resolution,
             &mut gpu,
-        )?);
+        )?;
+        groups.push((clip.effects.matte, layers));
     }
+    let layers = stack_layers(groups, &mut gpu, resolution);
     provider.sweep();
     Ok(layers)
 }

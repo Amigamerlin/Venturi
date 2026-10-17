@@ -67,6 +67,7 @@ pub enum CommandLabel {
     Filters,
     Masks,
     BlendMode,
+    Matte,
     Transition,
     MakeCompoundClip,
     MoveKeyframes,
@@ -2013,6 +2014,23 @@ pub fn set_clip_blend_mode(
         CommandLabel::BlendMode,
         value,
         |c| &mut c.effects.blend_mode,
+    )
+}
+
+/// Makes the clip a track matte for the layer below (`None`: an ordinary clip).
+pub fn set_clip_matte(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    value: Option<crate::model::MatteMode>,
+) -> SetClipValue<Option<crate::model::MatteMode>> {
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Matte,
+        value,
+        |c| &mut c.effects.matte,
     )
 }
 

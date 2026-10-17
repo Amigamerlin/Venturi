@@ -774,6 +774,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::Filters => t!("history.filters"),
         L::Masks => t!("history.masks"),
         L::BlendMode => t!("history.blend_mode"),
+        L::Matte => t!("history.matte"),
         L::Transition => t!("history.transition"),
         L::MakeCompoundClip => t!("history.make_compound_clip"),
         L::MoveKeyframes => t!("history.move_keyframes"),

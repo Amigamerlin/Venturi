@@ -181,7 +181,7 @@ impl VenturiServer {
     }
 
     #[tool(
-        description = "Sets static values on clips: opacity, position, scale, rotation, gain, fades, enabled state, fill of solid color clips. Parameters with keyframes keep following them (reported as warnings)."
+        description = "Sets static values on clips: opacity, position, scale, rotation, gain, fades, enabled state, fill of solid color clips, track matte. Parameters with keyframes keep following them (reported as warnings)."
     )]
     async fn set_clip_properties(
         &self,

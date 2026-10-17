@@ -352,6 +352,34 @@ pub struct SetClipPropertiesArgs {
     /// color on the timeline: that is `set_clip_color`.
     #[serde(default)]
     pub fill_color: Option<[f32; 4]>,
+    /// Makes the clips track mattes: hidden, they cut out the layer below
+    /// them (e.g. a title over a video, "luma": the video shows only through
+    /// the letters). "none" makes them ordinary clips again.
+    #[serde(default)]
+    pub matte: Option<MatteArg>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MatteArg {
+    None,
+    Alpha,
+    AlphaInverted,
+    Luma,
+    LumaInverted,
+}
+
+impl MatteArg {
+    pub fn mode(self) -> Option<vv_core::MatteMode> {
+        use vv_core::MatteMode as M;
+        match self {
+            Self::None => None,
+            Self::Alpha => Some(M::Alpha),
+            Self::AlphaInverted => Some(M::AlphaInverted),
+            Self::Luma => Some(M::Luma),
+            Self::LumaInverted => Some(M::LumaInverted),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]

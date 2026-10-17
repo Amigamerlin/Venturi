@@ -248,6 +248,9 @@ fn effect_names(clip: &Clip) -> Vec<&'static str> {
     if effects.blend_mode != Default::default() {
         names.push("blend_mode");
     }
+    if effects.matte.is_some() {
+        names.push("matte");
+    }
     names
 }
 

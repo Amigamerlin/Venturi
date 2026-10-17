@@ -646,3 +646,103 @@ fn a_nan_parameter_never_renders_the_same() {
     let layer = || video_layer(frame.clone(), f32::NAN);
     assert!(!renders_same(&[layer()], &[layer()]));
 }
+
+fn colored_solid(id: u64, color: Rgba) -> Clip {
+    let mut clip = solid_clip(id, 0, 10, [1.0, 1.0]);
+    clip.effects.color = Some(vv_core::Keyframed::constant(color));
+    clip
+}
+
+fn stack_at_0(timeline: &Timeline, provider: &mut dyn FrameProvider) -> Vec<OwnedLayer> {
+    let project = Project::default();
+    let mut groups = Vec::new();
+    for (track_index, clip) in timeline.active_video_clips_at(0) {
+        let layers = track_layers_at(
+            &project,
+            timeline,
+            track_index,
+            clip,
+            0,
+            timeline.resolution,
+            provider,
+        )
+        .unwrap();
+        groups.push((clip.effects.matte, layers));
+    }
+    stack_layers(groups, provider, timeline.resolution)
+}
+
+const RED: Rgba = Rgba {
+    r: 1.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+const BLUE: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 1.0,
+    a: 1.0,
+};
+
+/// Blue, red, and above them a black matte covering the left half.
+fn matted_timeline(matte_mode: vv_core::MatteMode) -> Timeline {
+    let mut matte = colored_solid(3, Rgba::BLACK);
+    matte.effects.transform = TransformTracks::constant(Transform {
+        crop: [0.0, 0.0, 2.0, 0.0],
+        ..Default::default()
+    });
+    matte.effects.matte = Some(matte_mode);
+    Timeline {
+        name: "Matte".into(),
+        fps: Rational::new(25, 1),
+        resolution: (4, 4),
+        tracks: vec![
+            video_track(vec![colored_solid(1, BLUE)]),
+            video_track(vec![colored_solid(2, RED)]),
+            video_track(vec![matte]),
+        ],
+        markers: Vec::new(),
+        master: Default::default(),
+    }
+}
+
+#[test]
+fn a_matte_cuts_out_the_track_below_and_is_not_shown() {
+    let compositor = vv_render::Compositor::new_headless();
+    let mut inner = NoMediaProvider;
+    let mut provider = GpuCompounds::new(&mut inner, &compositor);
+    let layers = stack_at_0(&matted_timeline(vv_core::MatteMode::Alpha), &mut provider);
+    assert_eq!(layers.len(), 2, "the blue and the cut out red");
+
+    let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+    let out = compositor
+        .render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(4, 4));
+    let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+    assert_eq!(px(0, 1), &[255, 0, 0, 255], "left: inside the matte, red");
+    assert_eq!(
+        px(3, 1),
+        &[0, 0, 255, 255],
+        "right: outside, the blue below"
+    );
+}
+
+#[test]
+fn a_matte_with_nothing_below_shows_nothing() {
+    let mut timeline = matted_timeline(vv_core::MatteMode::Alpha);
+    timeline.tracks.drain(..2);
+    let compositor = vv_render::Compositor::new_headless();
+    let mut inner = NoMediaProvider;
+    let mut provider = GpuCompounds::new(&mut inner, &compositor);
+    assert!(stack_at_0(&timeline, &mut provider).is_empty());
+}
+
+#[test]
+fn without_the_gpu_a_matte_leaves_the_track_below_uncut() {
+    let mut timeline = matted_timeline(vv_core::MatteMode::Alpha);
+    timeline.tracks[1].clips[0].effects.blend_mode = vv_core::BlendMode::Screen;
+    let layers = stack_at_0(&timeline, &mut NoMediaProvider);
+    assert_eq!(layers.len(), 2);
+    assert!(matches!(layers[1].content, OwnedContent::Solid(c) if c == RED));
+    assert_eq!(layers[1].blend, vv_core::BlendMode::Screen);
+}
