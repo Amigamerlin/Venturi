@@ -765,7 +765,12 @@ fn a_multiplied_title_blends_its_background_and_text_as_one_image() {
         OutputFrame::exact(160, 90),
     );
     let pixels = out.as_chunks::<4>().0;
-    assert_eq!(pixels[0], [0, 0, 0, 255], "outside the text: black");
+    // Off the edge: the box is centered on the text, a subpixel off the frame.
+    assert_eq!(
+        pixels[2 * 160 + 2],
+        [0, 0, 0, 255],
+        "outside the text: black"
+    );
     assert!(
         pixels.iter().any(|px| px == &[255, 0, 0, 255]),
         "the layer below shows through the text"
