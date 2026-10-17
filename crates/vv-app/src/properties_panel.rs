@@ -1573,22 +1573,24 @@ impl VenturiApp {
             ui.label(t!("props.frames"));
         });
 
-        ui.horizontal(|ui| {
-            ui.label(t!("props.direction"));
-            let items: Vec<_> = vv_core::PushDirection::ALL
-                .iter()
-                .map(|d| (*d, timeline_ui::push_direction_label(*d).to_string(), true))
-                .collect();
-            preview_combo(
-                ui,
-                "transition_direction",
-                &mut transition.direction,
-                &items,
-                None,
-                None,
-                None,
-            );
-        });
+        if transition.kind.has_direction() {
+            ui.horizontal(|ui| {
+                ui.label(t!("props.direction"));
+                let items: Vec<_> = vv_core::PushDirection::ALL
+                    .iter()
+                    .map(|d| (*d, timeline_ui::push_direction_label(*d).to_string(), true))
+                    .collect();
+                preview_combo(
+                    ui,
+                    "transition_direction",
+                    &mut transition.direction,
+                    &items,
+                    None,
+                    None,
+                    None,
+                );
+            });
+        }
 
         ui.horizontal(|ui| {
             ui.label(t!("props.ease"));

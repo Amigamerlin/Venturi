@@ -122,6 +122,10 @@ transition.push:
   en: "Push"
   it: "Push"
 
+transition.cross_dissolve:
+  en: "Cross Dissolve"
+  it: "Dissolvenza incrociata"
+
 transition.direction_left:
   en: "Push Left"
   it: "Push a sinistra"

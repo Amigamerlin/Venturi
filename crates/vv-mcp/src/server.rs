@@ -251,7 +251,7 @@ impl VenturiServer {
     }
 
     #[tool(
-        description = "Sets or removes (`kind: none`) the transition on one edge of video clips: `push` slides the clip in from, or out to, the edge of the frame over what is below. Options not given keep the value already on that edge, else the defaults. `get_clip` reports it as `transition_in`/`transition_out`."
+        description = "Sets or removes (`kind: none`) the transition on one edge of video clips: `push` slides the clip in from, or out to, the edge of the frame over what is below; `cross_dissolve` fades it in or out against what is below. Options not given keep the value already on that edge, else the defaults. `get_clip` reports it as `transition_in`/`transition_out`."
     )]
     async fn set_transition(&self, Parameters(args): Parameters<SetTransitionArgs>) -> ToolReturn {
         self.call(ToolCall::SetTransition(args)).await

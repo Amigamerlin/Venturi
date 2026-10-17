@@ -1353,6 +1353,14 @@ impl ClipFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransitionKind {
     Push,
+    CrossDissolve,
+}
+
+impl TransitionKind {
+    /// Whether `Transition::direction` means anything for this kind.
+    pub fn has_direction(self) -> bool {
+        matches!(self, Self::Push)
+    }
 }
 
 /// Slide direction of a Push transition. Independent of the clip edge
@@ -1443,6 +1451,16 @@ pub struct Transition {
     pub ease: Ease,
     /// "Transition Curve" in the inspector, 0..1.
     pub curve: f32,
+}
+
+impl Transition {
+    /// A dissolve is linear by default, as in the NLEs.
+    pub fn default_ease(kind: TransitionKind) -> Ease {
+        match kind {
+            TransitionKind::Push => Ease::InOut,
+            TransitionKind::CrossDissolve => Ease::None,
+        }
+    }
 }
 
 /// Compositing method of a layer onto those below ("Composite Mode"
@@ -2053,7 +2071,9 @@ impl Clip {
         if self.is_adjustment() {
             return offset;
         }
-        if let Some(t) = &self.effects.transition_in {
+        if let Some(t) = &self.effects.transition_in
+            && t.kind == TransitionKind::Push
+        {
             let d = t.duration.clamp(1, len);
             if pos >= 0 && pos < d {
                 let progress = eased(pos as f32 / d as f32, t.ease, t.curve);
@@ -2063,7 +2083,9 @@ impl Clip {
                 offset[1] += vec[1] * frame_size.1 * amount;
             }
         }
-        if let Some(t) = &self.effects.transition_out {
+        if let Some(t) = &self.effects.transition_out
+            && t.kind == TransitionKind::Push
+        {
             let d = t.duration.clamp(1, len);
             let from_end = len - pos;
             if from_end > 0 && from_end <= d {
@@ -2075,6 +2097,35 @@ impl Clip {
             }
         }
         offset
+    }
+
+    /// Opacity multiplier at `timeline_frame` due to the cross dissolve
+    /// transitions in/out: the clip dissolves against what is below it.
+    pub fn transition_opacity_at(&self, timeline_frame: FrameIdx) -> f32 {
+        let len = self.timeline_len.max(1);
+        let pos = timeline_frame - self.timeline_start;
+        let mut opacity = 1.0;
+        if self.is_adjustment() {
+            return opacity;
+        }
+        if let Some(t) = &self.effects.transition_in
+            && t.kind == TransitionKind::CrossDissolve
+        {
+            let d = t.duration.clamp(1, len);
+            if pos >= 0 && pos < d {
+                opacity *= eased(pos as f32 / d as f32, t.ease, t.curve);
+            }
+        }
+        if let Some(t) = &self.effects.transition_out
+            && t.kind == TransitionKind::CrossDissolve
+        {
+            let d = t.duration.clamp(1, len);
+            let from_end = len - pos;
+            if from_end > 0 && from_end <= d {
+                opacity *= 1.0 - eased(1.0 - from_end as f32 / d as f32, t.ease, t.curve);
+            }
+        }
+        opacity
     }
 }
 
@@ -2535,6 +2586,9 @@ impl CrossTransition {
         left_zoom: [f32; 2],
         right_zoom: [f32; 2],
     ) -> ([f32; 2], [f32; 2]) {
+        if self.transition.kind != TransitionKind::Push {
+            return ([0.0; 2], [0.0; 2]);
+        }
         let vec = self.transition.direction.vector();
         let left_amount = progress * push_clearance(vec, left_zoom);
         let right_amount = -(1.0 - progress) * push_clearance(vec, right_zoom);
@@ -2547,6 +2601,17 @@ impl CrossTransition {
             vec[1] * frame_size.1 * right_amount,
         ];
         (left, right)
+    }
+
+    /// Opacity multipliers of the left and right sides at the already
+    /// "eased" progress. For a dissolve the left side stays opaque under
+    /// the right one fading in: with "over" compositing that already mixes
+    /// them `(1 - p, p)`, while fading both would dip towards what is below.
+    pub fn opacities(&self, progress: f32) -> (f32, f32) {
+        match self.transition.kind {
+            TransitionKind::Push => (1.0, 1.0),
+            TransitionKind::CrossDissolve => (1.0, progress),
+        }
     }
 }
 

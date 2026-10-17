@@ -945,6 +945,17 @@ pub(crate) fn set_transition(session: &mut Session, args: SetTransitionArgs) -> 
             FadeEdge::Out => &clip.effects.transition_out,
         };
         let mut transition = current.clone().unwrap_or_else(|| default.clone());
+        let kind = match args.kind {
+            Some(TransitionKindArg::CrossDissolve) => Some(TransitionKind::CrossDissolve),
+            Some(TransitionKindArg::Push) => Some(TransitionKind::Push),
+            _ => None,
+        };
+        if let Some(kind) = kind
+            && kind != transition.kind
+        {
+            transition.kind = kind;
+            transition.ease = Transition::default_ease(kind);
+        }
         if let Some(duration) = args.duration {
             transition.duration = duration;
         }

@@ -296,7 +296,7 @@ pub fn clip_layer(
     );
     transform.position[0] += push[0];
     transform.position[1] += push[1];
-    let opacity = clip.fade_multiplier_at(frame);
+    let opacity = clip.fade_multiplier_at(frame) * clip.transition_opacity_at(frame);
     let content = clip_content(project, clip, frame, provider)?;
     Ok(build_layer(
         project,
@@ -430,12 +430,13 @@ fn crossing_side_layer(
     timeline_size: (u32, u32),
     provider: &mut dyn FrameProvider,
     extra_offset: [f32; 2],
+    extra_opacity: f32,
 ) -> Result<Option<OwnedLayer>, ExportError> {
     let source_frame = clip.source_frame_at(frame);
     let mut transform = clip.effects.transform.value_at(source_frame);
     transform.position[0] += extra_offset[0];
     transform.position[1] += extra_offset[1];
-    let opacity = clip.fade_multiplier_at(frame);
+    let opacity = clip.fade_multiplier_at(frame) * extra_opacity;
     let content = clip_content(
         project,
         clip,
@@ -454,8 +455,8 @@ fn crossing_side_layer(
 }
 
 /// The layers of an active crossing transition at `frame`: tail of `left`,
-/// then head of `right` (in that order, `right` on top — for a push it does
-/// not matter, the two visible areas never really overlap).
+/// then head of `right` (in that order: `right` on top is what a dissolve
+/// fades in).
 fn crossing_layers(
     project: &Project,
     left: &Clip,
@@ -483,6 +484,7 @@ fn crossing_layers(
         .value_at(right.source_frame_at(frame))
         .zoom;
     let (left_offset, right_offset) = crossing.offsets(progress, frame_size, left_zoom, right_zoom);
+    let (left_opacity, right_opacity) = crossing.opacities(progress);
     let mut layers = Vec::with_capacity(2);
     layers.extend(crossing_side_layer(
         project,
@@ -491,6 +493,7 @@ fn crossing_layers(
         timeline_size,
         provider,
         left_offset,
+        left_opacity,
     )?);
     layers.extend(crossing_side_layer(
         project,
@@ -499,6 +502,7 @@ fn crossing_layers(
         timeline_size,
         provider,
         right_offset,
+        right_opacity,
     )?);
     Ok(layers)
 }

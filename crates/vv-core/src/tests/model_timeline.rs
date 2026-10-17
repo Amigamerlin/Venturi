@@ -551,6 +551,29 @@ fn transitions_do_not_apply_to_adjustment_clips() {
 }
 
 #[test]
+fn edge_cross_dissolve_fades_opacity_without_moving_the_clip() {
+    let dissolve = Transition {
+        kind: TransitionKind::CrossDissolve,
+        duration: 10,
+        direction: PushDirection::Right,
+        ease: Ease::None,
+        curve: 0.5,
+    };
+    let mut clip = clip_at(0, 100, 1);
+    clip.effects.transition_in = Some(dissolve.clone());
+    clip.effects.transition_out = Some(dissolve);
+
+    assert_eq!(clip.transition_opacity_at(0), 0.0);
+    assert_eq!(clip.transition_opacity_at(5), 0.5);
+    assert_eq!(clip.transition_opacity_at(50), 1.0);
+    assert_eq!(clip.transition_opacity_at(95), 0.5);
+    assert_eq!(
+        clip.transition_offset_at(5, (1920.0, 1080.0), [1.0, 1.0]),
+        [0.0, 0.0]
+    );
+}
+
+#[test]
 fn retime_keeps_the_clip_speed() {
     let rate_30 = Rational::conform_rate(Rational::new(30, 1), Rational::new(30, 1));
     let mut clip = media_clip_at(rate_30, 300, 900, 150);

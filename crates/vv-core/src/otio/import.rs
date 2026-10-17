@@ -397,8 +397,13 @@ impl Importer<'_> {
             },
             None => {
                 let effect = &item["metadata"]["Resolve_OTIO"]["Effects"];
+                let kind = if item["transition_type"] == "SMPTE_Dissolve" {
+                    TransitionKind::CrossDissolve
+                } else {
+                    TransitionKind::Push
+                };
                 Transition {
-                    kind: TransitionKind::Push,
+                    kind,
                     duration,
                     direction: PushDirection::Left,
                     ease: resolve_ease(effect),

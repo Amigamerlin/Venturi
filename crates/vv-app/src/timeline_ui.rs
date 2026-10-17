@@ -5006,11 +5006,15 @@ pub(crate) fn paint_bracket_icon(
 
 /// Transitions of the Effects panel, in the order they appear there — see
 /// `FILTER_ENTRIES`, same idea.
-pub const ALL_TRANSITION_KINDS: [vv_core::TransitionKind; 1] = [vv_core::TransitionKind::Push];
+pub const ALL_TRANSITION_KINDS: [vv_core::TransitionKind; 2] = [
+    vv_core::TransitionKind::CrossDissolve,
+    vv_core::TransitionKind::Push,
+];
 
 pub fn transition_kind_label(kind: vv_core::TransitionKind) -> std::borrow::Cow<'static, str> {
     match kind {
         vv_core::TransitionKind::Push => t!("transition.push"),
+        vv_core::TransitionKind::CrossDissolve => t!("transition.cross_dissolve"),
     }
 }
 
@@ -5641,7 +5645,7 @@ fn apply_pending_action(
                 kind,
                 duration: default_duration.max(1),
                 direction: vv_core::PushDirection::Right,
-                ease: vv_core::Ease::InOut,
+                ease: vv_core::Transition::default_ease(kind),
                 curve: 0.5,
             };
             let neighbor = adjacent_clip(

@@ -539,9 +539,10 @@ pub enum MaskModeArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TransitionKindArg {
     Push,
+    CrossDissolve,
     None,
 }
 
@@ -574,8 +575,9 @@ pub struct SetTransitionArgs {
     pub clip_ids: Vec<String>,
     /// `start`: the clip enters; `end`: it leaves.
     pub edge: EdgeArg,
-    /// `push` (default) slides the clip in or out of the frame; `none`
-    /// removes the transition from that edge.
+    /// `push` (default) slides the clip in or out of the frame;
+    /// `cross_dissolve` fades it against what is below; `none` removes the
+    /// transition from that edge. Not given: the kind already on that edge.
     #[serde(default)]
     pub kind: Option<TransitionKindArg>,
     /// Timeline frames from the edge, at most the clip's length. Default

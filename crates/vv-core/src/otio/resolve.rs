@@ -500,13 +500,14 @@ pub(super) fn transition_to_otio(
         (_, 0) => "out",
         _ => "crossing",
     };
-    let name = match transition.kind {
-        crate::model::TransitionKind::Push => "Push",
+    let (name, transition_type) = match transition.kind {
+        crate::model::TransitionKind::Push => ("Push", "Custom_Transition"),
+        crate::model::TransitionKind::CrossDissolve => ("Cross Dissolve", "SMPTE_Dissolve"),
     };
     json!({
         "OTIO_SCHEMA": "Transition.1",
         "name": name,
-        "transition_type": "Custom_Transition",
+        "transition_type": transition_type,
         "in_offset": rational_time(into_previous, fps),
         "out_offset": rational_time(into_next, fps),
         "metadata": {
