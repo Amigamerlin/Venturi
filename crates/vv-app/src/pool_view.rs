@@ -364,10 +364,11 @@ fn accept_drop<I: PoolId, F: PoolId, A>(
     }
     if carries_own_items(&resp.ctx, state) {
         egui::DragAndDrop::clear_payload(&resp.ctx);
-        events.push(PoolEvent::MoveItems(
-            std::mem::take(&mut state.dragging),
-            folder.cloned(),
-        ));
+        let moved = std::mem::take(&mut state.dragging);
+        // Opened and scrolled to, or the moved items would vanish into it.
+        state.expanded.extend(folder.cloned());
+        state.reveal = moved.first().cloned();
+        events.push(PoolEvent::MoveItems(moved, folder.cloned()));
     } else if egui::DragAndDrop::has_payload_of_type::<FolderDrag<F>>(&resp.ctx)
         && let Some(dragged) = resp.dnd_release_payload::<FolderDrag<F>>()
         && media_pool::can_move_folder(folders, &dragged.0, folder)
@@ -476,7 +477,13 @@ fn folder_row<I: PoolId, F: PoolId, M: PoolMenus<I, F>>(
         paint_selected(ui, rect, 3.0);
     }
     if resp.clicked() {
-        state.select_folder(id.clone());
+        // The arrow only opens and closes: what is selected stays selected.
+        let on_arrow = resp
+            .interact_pointer_pos()
+            .is_some_and(|pos| pos.x < arrow.right() + 4.0);
+        if !on_arrow {
+            state.select_folder(id.clone());
+        }
         state.rename_pending = None;
         if expanded {
             state.expanded.remove(id);
