@@ -338,7 +338,8 @@ fn nested_layers(
 
 /// The stack from the layers of each track, bottom to top, each with the
 /// matte mode of its clip: a matte is not shown, it cuts out the track
-/// below it instead. A matte with nothing below is dropped.
+/// below it instead. A matte with nothing below is dropped. An
+/// adjustment below stands for the whole stack it adjusts.
 pub fn stack_layers(
     groups: impl IntoIterator<Item = (Option<vv_core::MatteMode>, Vec<OwnedLayer>)>,
     provider: &mut dyn FrameProvider,
@@ -353,6 +354,29 @@ pub fn stack_layers(
         let Some(mut fill) = stack.pop() else {
             continue;
         };
+        // An adjustment replaces the stack with its adjusted version: that is
+        // what the matte cuts out.
+        if fill
+            .iter()
+            .any(|l| matches!(l.content, OwnedContent::Adjustment))
+        {
+            let adjusted: Vec<OwnedLayer> = stack.drain(..).flatten().chain(fill).collect();
+            match provider.matte_texture(&adjusted, &layers, mode, timeline_size) {
+                Some(texture) => stack.push(vec![OwnedLayer {
+                    content: OwnedContent::Texture {
+                        texture,
+                        source_size: timeline_size,
+                    },
+                    transform: Transform::default(),
+                    opacity: 1.0,
+                    filters: Vec::new(),
+                    blend: vv_core::BlendMode::Normal,
+                    masks: Vec::new(),
+                }]),
+                None => stack.push(adjusted),
+            }
+            continue;
+        }
         let Some(blend) = fill.last().map(|l| l.blend) else {
             continue;
         };

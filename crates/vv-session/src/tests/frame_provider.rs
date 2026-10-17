@@ -784,3 +784,29 @@ fn a_title_layer_shows_the_text_of_its_frame() {
         .unwrap();
     assert!(matches!(first.content, OwnedContent::Text(t) if t.display_text() == "First"));
 }
+
+#[test]
+fn a_matte_over_an_adjustment_cuts_out_the_adjusted_stack() {
+    let mut timeline = matted_timeline(vv_core::MatteMode::Alpha);
+    let mut adjustment = solid_clip(2, 0, 10, [1.0, 1.0]);
+    adjustment.source = ClipSource::Adjustment;
+    let mut darken = vv_core::ClipFilter::new(vv_core::FilterKind::Exposure);
+    darken.amount = vv_core::Keyframed::constant(-10.0);
+    adjustment.effects.filters.push(darken);
+    timeline.tracks[1].clips = vec![adjustment];
+
+    let compositor = vv_render::Compositor::new_headless();
+    let mut inner = NoMediaProvider;
+    let mut provider = GpuCompounds::new(&mut inner, &compositor);
+    let layers = stack_at_0(&timeline, &mut provider);
+    let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+    let out = compositor
+        .render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(4, 4));
+    let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+    let inside = px(0, 1);
+    assert!(
+        inside[2] < 40 && inside[3] == 255,
+        "left: inside the matte, the darkened blue: {inside:?}"
+    );
+    assert_eq!(px(3, 1), &[0, 0, 0, 0], "right: outside, nothing");
+}
