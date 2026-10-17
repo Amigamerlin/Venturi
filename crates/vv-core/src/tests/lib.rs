@@ -811,6 +811,52 @@ fn undo_split_restores_the_keyframes_of_the_left_half() {
     assert_eq!(clip.effects.gain_db.value_at(15), -6.0);
 }
 
+fn split_faded_clip(split_at: FrameIdx) -> (Project, History, TimelineId) {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let mut a = make_clip(&mut project, 0, 20);
+    a.fade_in = 6;
+    a.fade_out = 6;
+    let a_id = a.id;
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: a,
+        }),
+    );
+    history.do_command(
+        &mut project,
+        Box::new(command::SplitClip::new(timeline, 0, a_id, split_at)),
+    );
+    (project, history, timeline)
+}
+
+#[test]
+fn split_keeps_fades_only_on_the_outer_edges() {
+    let (project, _, timeline) = split_faded_clip(10);
+    let clips = &project.timelines[timeline].tracks[0].clips;
+    assert_eq!((clips[0].fade_in, clips[0].fade_out), (6, 0));
+    assert_eq!((clips[1].fade_in, clips[1].fade_out), (0, 6));
+}
+
+#[test]
+fn split_inside_a_fade_shortens_it_to_the_half() {
+    let (project, _, timeline) = split_faded_clip(4);
+    let clips = &project.timelines[timeline].tracks[0].clips;
+    assert_eq!((clips[0].fade_in, clips[0].fade_out), (4, 0));
+    assert_eq!((clips[1].fade_in, clips[1].fade_out), (0, 6));
+}
+
+#[test]
+fn undo_split_restores_the_fades() {
+    let (mut project, mut history, timeline) = split_faded_clip(4);
+    history.undo(&mut project);
+    let clip = &project.timelines[timeline].tracks[0].clips[0];
+    assert_eq!((clip.fade_in, clip.fade_out), (6, 6));
+}
+
 const RATES: [Rational; 4] = [
     Rational::new(1, 1),
     Rational::new(1001, 1000),

@@ -1656,6 +1656,7 @@ pub struct SplitClip {
     pub clip_id: ClipId,
     pub split_at: FrameIdx,
     original_len: Option<FrameIdx>,
+    original_fades: (FrameIdx, FrameIdx),
     original_effects: Option<EffectStack>,
     new_clip_id: Option<ClipId>,
     /// Id of the right half decided by the caller, to relink the halves of
@@ -1680,6 +1681,7 @@ impl SplitClip {
             clip_id,
             split_at,
             original_len: None,
+            original_fades: (0, 0),
             original_effects: None,
             new_clip_id: None,
             preallocated_new_clip_id: None,
@@ -1728,10 +1730,19 @@ impl Command for SplitClip {
         second_half.linked_group = None;
         self.new_clip_id = Some(new_id);
 
+        // Fades and edge transitions belong to the outer edges only.
+        self.original_fades = (clip.fade_in, clip.fade_out);
+        clip.fade_in = clip.fade_in.min(clip.timeline_len);
+        clip.fade_out = 0;
+        second_half.fade_in = 0;
+        second_half.fade_out = second_half.fade_out.min(second_half.timeline_len);
+
         // Each half keeps only the keyframes on its own side of the cut:
         // otherwise the right one would interpolate from the left one's keyframes.
         self.original_effects = Some(clip.effects.clone());
         clip.effects.drop_keyframes_from(clip.source_out());
+        clip.effects.transition_out = None;
+        second_half.effects.transition_in = None;
         second_half
             .effects
             .drop_keyframes_before(second_half.source_in());
@@ -1753,6 +1764,7 @@ impl Command for SplitClip {
         track.clips.retain(|c| c.id != new_clip_id);
         if let Some(clip) = track.clip_mut(self.clip_id) {
             clip.timeline_len = original_len;
+            (clip.fade_in, clip.fade_out) = self.original_fades;
             if let Some(effects) = &self.original_effects {
                 clip.effects = effects.clone();
             }
