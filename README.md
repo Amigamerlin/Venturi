@@ -23,7 +23,7 @@ Built for editing, picture and sound, with timelines that travel to and from oth
 [Architecture](ARCHITECTURE.md) •
 [Contributing](#contributing)
 
-<img src="media/venturi.png" alt="Venturi editing a multi-track timeline, with the animation curves and settings open" width="100%">
+<img src="media/venturi.png" alt="Venturi editing a multi-track timeline, with the animation curve editor and the Color window open" width="100%">
 
 </div>
 
