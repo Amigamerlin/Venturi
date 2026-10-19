@@ -3936,6 +3936,7 @@ fn frame_stride(shown_frames_only: bool, playing: bool, speed: f64) -> FrameIdx 
 }
 
 impl eframe::App for VenturiApp {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         unstick_wheel_modifiers(raw_input);
         self.paste_key_watch.feed(raw_input);
