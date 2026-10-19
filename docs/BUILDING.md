@@ -184,7 +184,8 @@ export uses FFmpeg's native AAC encoder.
 scripts/build-macos.sh
 ```
 
-Must run on a Mac with the Xcode command line tools and `pkgconf`. Produces
+Must run on a Mac with the Xcode command line tools, `pkgconf`, `meson` and
+`ninja` (`brew install pkgconf meson ninja`; meson builds rubberband). Produces
 `target/macos/Venturi.app` and `target/macos/Venturi-arm64.dmg`, with FFmpeg
 (libx264, librubberband, zlib, libmp3lame, libopus, libvorbis,
 VideoToolbox) bundled in
