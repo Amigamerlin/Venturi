@@ -37,6 +37,10 @@ pub use pool::{
 };
 
 #[cfg(test)]
+#[path = "tests/test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
 #[path = "tests/lib.rs"]
 mod tests;
 
