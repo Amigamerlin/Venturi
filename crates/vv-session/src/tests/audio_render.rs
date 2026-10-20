@@ -579,6 +579,27 @@ fn a_file_changed_on_disk_is_measured_again() {
     assert_ne!(after, before);
 }
 
+#[test]
+fn an_in_memory_measure_is_rechecked_when_its_source_changes() {
+    let path = chirp("changed-in-memory.wav", 48_000, 10);
+    let mut project = Project::default();
+    let file = media(&mut project, path.clone(), 48_000, 1);
+    let mut tl = timeline(vec![audio_track(vec![clip(1, file, 0, 200, 0)])]);
+    tl.master.effects = vec![normalize(NormalizeMode::Loudness)];
+
+    let mut cache = LevelCache::default();
+    let before = both_measures(&project, &tl, &mut cache);
+    let rendered_before = cache.rendered;
+    assert!(rendered_before > 0);
+
+    let quieter = "aevalsrc=0.1*sin(300*t*t):sample_rate=48000:duration=10";
+    vv_media::test_support::ffmpeg(&["-f", "lavfi", "-i", quieter], &path);
+    let after = both_measures(&project, &tl, &mut cache);
+
+    assert!(cache.rendered > rendered_before);
+    assert_ne!(after, before);
+}
+
 fn segment(frames: Range<u64>) -> LevelSegment {
     LevelSegment {
         frames,
