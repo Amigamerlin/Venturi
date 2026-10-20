@@ -4685,6 +4685,7 @@ dependencies = [
  "vv-core",
  "vv-mcp",
  "vv-media",
+ "vv-plugin",
  "vv-render",
  "vv-session",
  "wayland-backend",
