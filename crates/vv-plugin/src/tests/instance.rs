@@ -253,6 +253,25 @@ fn busy_instance_passes_audio_through() {
 }
 
 #[test]
+fn process_reports_whether_the_block_was_processed() {
+    let instance = fixture(Vec::new());
+    let mut block = ramp(32, 6);
+    assert!(instance.process(&mut block, 6));
+    instance
+        .busy
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(!instance.process(&mut block, 6));
+    instance
+        .busy
+        .store(false, std::sync::atomic::Ordering::Release);
+    instance
+        .active
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(!instance.process(&mut block, 6));
+    assert!(!instance.process(&mut block, 0));
+}
+
+#[test]
 fn mono_and_surround_run_through_the_plugin() {
     let instance = fixture(0.25f32.to_le_bytes().to_vec());
     let mut mono = ramp(32, 1);

@@ -869,7 +869,9 @@ fn queued_timeline() -> vv_core::Timeline {
 struct Stub;
 
 impl vv_audio::PluginProcessor for Stub {
-    fn process(&self, _: &mut [f32], _: usize) {}
+    fn process(&self, _: &mut [f32], _: usize) -> bool {
+        true
+    }
     fn reset(&self) {}
     fn latency(&self) -> u32 {
         0

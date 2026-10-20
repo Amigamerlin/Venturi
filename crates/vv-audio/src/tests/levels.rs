@@ -89,7 +89,9 @@ struct Segments {
 struct Silent;
 
 impl crate::PluginProcessor for Silent {
-    fn process(&self, _: &mut [f32], _: usize) {}
+    fn process(&self, _: &mut [f32], _: usize) -> bool {
+        true
+    }
     fn reset(&self) {}
     fn latency(&self) -> u32 {
         0

@@ -774,15 +774,15 @@ impl HostedPlugin for Vst3Instance {
 }
 
 impl PluginProcessor for Vst3Instance {
-    fn process(&self, samples: &mut [f32], channels: usize) {
+    fn process(&self, samples: &mut [f32], channels: usize) -> bool {
         if channels == 0 {
-            return;
+            return false;
         }
         let Some(_audio) = self.try_lock_audio() else {
-            return;
+            return false;
         };
         if !self.active.load(Ordering::Relaxed) {
-            return;
+            return false;
         }
         // SAFETY: `busy` gives this thread exclusive use of `rt`.
         let rt = unsafe { &mut *self.rt.get() };
@@ -805,6 +805,7 @@ impl PluginProcessor for Vst3Instance {
             // Changes go to the first slice only.
             rt.changes.clear();
         }
+        true
     }
 
     fn reset(&self) {

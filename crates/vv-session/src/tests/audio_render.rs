@@ -931,7 +931,7 @@ impl Echo {
 }
 
 impl vv_audio::PluginProcessor for Echo {
-    fn process(&self, samples: &mut [f32], _: usize) {
+    fn process(&self, samples: &mut [f32], _: usize) -> bool {
         self.1.fetch_add(1, Ordering::SeqCst);
         let (line, at) = &mut *self.0.lock().unwrap();
         for s in samples {
@@ -940,6 +940,7 @@ impl vv_audio::PluginProcessor for Echo {
             *s += 0.5 * delayed;
             *at = (*at + 1) % line.len();
         }
+        true
     }
     fn reset(&self) {
         let (line, at) = &mut *self.0.lock().unwrap();
@@ -1510,8 +1511,9 @@ fn a_bypassed_plugin_does_not_degrade_a_measure() {
 struct Halve;
 
 impl vv_audio::PluginProcessor for Halve {
-    fn process(&self, samples: &mut [f32], _: usize) {
+    fn process(&self, samples: &mut [f32], _: usize) -> bool {
         samples.iter_mut().for_each(|s| *s *= 0.5);
+        true
     }
     fn reset(&self) {}
     fn latency(&self) -> u32 {
@@ -1627,8 +1629,9 @@ fn a_level_after_a_compound_with_a_plugin_reads_its_tail_in_the_gaps() {
 struct Stopper(Arc<AtomicBool>);
 
 impl vv_audio::PluginProcessor for Stopper {
-    fn process(&self, _: &mut [f32], _: usize) {
+    fn process(&self, _: &mut [f32], _: usize) -> bool {
         self.0.store(true, Ordering::SeqCst);
+        true
     }
     fn reset(&self) {}
     fn latency(&self) -> u32 {

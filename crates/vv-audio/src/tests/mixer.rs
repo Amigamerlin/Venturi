@@ -1674,9 +1674,10 @@ impl FakePlugin {
 }
 
 impl crate::effect::PluginProcessor for FakePlugin {
-    fn process(&self, samples: &mut [f32], _channels: usize) {
+    fn process(&self, samples: &mut [f32], _channels: usize) -> bool {
         self.processed.fetch_add(1, Ordering::Relaxed);
         samples.iter_mut().for_each(|s| *s *= self.gain);
+        true
     }
 
     fn reset(&self) {
@@ -2258,11 +2259,12 @@ fn plugin_key_in_is_none_out_of_range() {
 struct StereoOnlyPlugin(f32);
 
 impl crate::effect::PluginProcessor for StereoOnlyPlugin {
-    fn process(&self, samples: &mut [f32], channels: usize) {
+    fn process(&self, samples: &mut [f32], channels: usize) -> bool {
         for frame in samples.chunks_exact_mut(channels) {
             frame[0] *= self.0;
             frame[1] *= self.0;
         }
+        true
     }
 
     fn reset(&self) {}
@@ -2328,11 +2330,39 @@ fn a_plugin_receives_the_centre_through_the_fold() {
     assert_eq!(samples[1], 0.0);
 }
 
+/// Like a hosted instance that is busy or inactive: the block is left alone.
+struct BusyPlugin;
+
+impl crate::effect::PluginProcessor for BusyPlugin {
+    fn process(&self, _: &mut [f32], _: usize) -> bool {
+        false
+    }
+
+    fn reset(&self) {}
+
+    fn latency(&self) -> u32 {
+        0
+    }
+}
+
+#[test]
+fn a_plugin_that_skips_a_block_leaves_the_surround_channels_alone() {
+    use crate::effect::{Effect, PluginEffect};
+    let mut effect = PluginEffect {
+        handle: Arc::new(BusyPlugin),
+        channels: 6,
+    };
+    let mut samples = vec![0.0, 0.0, 0.9, 0.0, 0.0, 0.0];
+    let before = samples.clone();
+    effect.process(&mut samples);
+    assert_eq!(samples, before);
+}
+
 /// Folds the way the host does (mean of every second channel), writes the pair.
 struct FoldingPlugin;
 
 impl crate::effect::PluginProcessor for FoldingPlugin {
-    fn process(&self, samples: &mut [f32], channels: usize) {
+    fn process(&self, samples: &mut [f32], channels: usize) -> bool {
         for frame in samples.chunks_exact_mut(channels) {
             let fold = |k: usize| {
                 let v: Vec<f32> = frame[k..].iter().step_by(2).copied().collect();
@@ -2342,6 +2372,7 @@ impl crate::effect::PluginProcessor for FoldingPlugin {
             frame[0] = l;
             frame[1] = r;
         }
+        true
     }
 
     fn reset(&self) {}

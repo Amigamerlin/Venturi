@@ -27,7 +27,8 @@ pub trait Effect: Send {
 /// A hosted plugin, shared by the snapshots that play the same placement.
 pub trait PluginProcessor: Send + Sync {
     /// In place, interleaved; never blocks: passes through when busy.
-    fn process(&self, samples: &mut [f32], channels: usize);
+    /// `true` only if the block was processed (it is left untouched otherwise).
+    fn process(&self, samples: &mut [f32], channels: usize) -> bool;
     fn reset(&self);
     fn latency(&self) -> u32;
 }
@@ -53,9 +54,9 @@ pub(crate) struct PluginEffect {
 
 impl Effect for PluginEffect {
     fn process(&mut self, samples: &mut [f32]) -> Option<BandActivity> {
-        self.handle.process(samples, self.channels);
+        let processed = self.handle.process(samples, self.channels);
         // The plugin folded the channels into its stereo bus; the upmix back fills `c` from `c % 2`.
-        if self.channels > 2 {
+        if processed && self.channels > 2 {
             for frame in samples.chunks_exact_mut(self.channels) {
                 for c in 2..frame.len() {
                     frame[c] = frame[c % 2];

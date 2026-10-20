@@ -62,7 +62,9 @@ pub fn fixture_instance(effect: &Vst3Effect) -> Arc<Vst3Instance> {
 pub struct Passthrough;
 
 impl vv_audio::PluginProcessor for Passthrough {
-    fn process(&self, _: &mut [f32], _: usize) {}
+    fn process(&self, _: &mut [f32], _: usize) -> bool {
+        true
+    }
     fn reset(&self) {}
     fn latency(&self) -> u32 {
         0

@@ -37,9 +37,10 @@ impl Drop for Fake {
 }
 
 impl PluginProcessor for Fake {
-    fn process(&self, samples: &mut [f32], _: usize) {
+    fn process(&self, samples: &mut [f32], _: usize) -> bool {
         self.counts.processed.fetch_add(1, Ordering::SeqCst);
         samples.iter_mut().for_each(|s| *s *= 0.5);
+        true
     }
     fn reset(&self) {}
     fn latency(&self) -> u32 {
