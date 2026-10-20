@@ -4029,6 +4029,7 @@ impl eframe::App for VenturiApp {
     // occluded or on another Space, when the open plugin editors need servicing.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump_plugin_editors(ctx);
+        self.poll_plugin_scan_hidden();
         if let Some(audio) = &self.timeline_audio {
             audio.service_plugin_restarts();
         }
@@ -4074,6 +4075,21 @@ impl VenturiApp {
             self.timeline_audio.as_mut(),
             group_open,
         );
+        if borrowed {
+            self.mcp_return_session();
+        }
+    }
+
+    // `frame_ui` does not run while the window is hidden; closing dropped
+    // editors needs the real session.
+    fn poll_plugin_scan_hidden(&mut self) {
+        if self.plugin_scan_rx.is_none() {
+            return;
+        }
+        let Some(borrowed) = self.mcp_borrow_session() else {
+            return;
+        };
+        self.poll_plugin_scan();
         if borrowed {
             self.mcp_return_session();
         }

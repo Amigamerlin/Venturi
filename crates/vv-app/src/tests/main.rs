@@ -5502,6 +5502,20 @@ fn plugin_editors_are_pumped_by_logic_without_a_ui_pass() {
     assert_eq!(plugin_state(&app, id), [9]);
 }
 
+// A hidden main window gets `App::logic` only: a finished scan must still publish.
+#[test]
+fn a_finished_plugin_scan_is_published_by_logic_without_a_ui_pass() {
+    let mut app = VenturiApp::default();
+    let (tx, rx) = mpsc::channel();
+    tx.send(Vec::new()).unwrap();
+    app.plugin_scan_rx = Some(rx);
+    let ctx = egui::Context::default();
+    eframe::App::logic(&mut app, &ctx, &mut eframe::Frame::_new_kittest());
+
+    assert!(app.plugin_scan_rx.is_none());
+    assert!(app.settings.vst3_plugins.is_some());
+}
+
 #[test]
 fn a_crash_marker_survives_a_quit_when_no_scan_is_running() {
     let dir = std::env::temp_dir().join(format!("vv-quit-marker-{}", std::process::id()));
