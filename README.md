@@ -87,14 +87,21 @@ curl -fL https://github.com/VenturiVideo/Venturi/releases/latest/download/instal
 bash install.sh
 ```
 
-The installer requires Bash and curl. It installs the release's AppImage as
+The installer requires Bash, curl and tar. It installs the release's AppImage as
 `~/.local/bin/venturi` and adds Venturi to your application menu, without sudo.
 Run it again with `bash install.sh latest` to update, or pass a release tag
 such as `bash install.sh v0.2.0` to select a version. Set `INSTALL_DIR` to
 choose another binary directory; desktop entries respect `XDG_DATA_HOME`.
 Add the binary directory to your `PATH` to run `venturi` from the terminal.
-To uninstall the default installation, remove `~/.local/bin/venturi` and
-`${XDG_DATA_HOME:-$HOME/.local/share}/applications/venturi.desktop`.
+To uninstall, run `bash install.sh --uninstall` with the same `INSTALL_DIR`
+and `XDG_DATA_HOME` settings used for installation. This removes the binary,
+menu entry, icons and MIME registration; your projects are preserved.
+
+Both this installer and `scripts/install-linux.sh` use the binary name
+`venturi` and the repository's desktop entry, icons and `.vvproj` association.
+When installed into the same directories, the last installer run wins.
+AppImages may require FUSE 2; without it, run
+`venturi --appimage-extract-and-run`.
 
 For macOS or a manual Linux installation, grab the latest build from the
 [Releases](https://github.com/VenturiVideo/Venturi/releases/latest) page:

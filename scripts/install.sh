@@ -12,10 +12,11 @@ fail() {
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<'EOF'
-Usage: bash install.sh [latest|vX.Y.Z]
+Usage: bash install.sh [latest|vX.Y.Z|--uninstall]
 
 Install the Linux AppImage and a menu entry for the current user.
 Run again to replace the installed version. No sudo is needed.
+Use --uninstall to remove the binary and desktop integration.
 
 Environment:
   INSTALL_DIR    Binary directory (default: $HOME/.local/bin)
@@ -23,18 +24,11 @@ Environment:
 EOF
     exit 0
 fi
-[[ $# -le 1 ]] || fail "Usage: bash install.sh [latest|vX.Y.Z]"
+[[ $# -le 1 ]] || fail "Usage: bash install.sh [latest|vX.Y.Z|--uninstall]"
 VERSION="${1:-$DEFAULT_VERSION}"
-[[ $VERSION == latest || $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
+[[ $VERSION == --uninstall || $VERSION == latest || $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] \
     || fail "Expected latest or a release tag such as v0.2.0."
 [[ $(uname -s) == Linux ]] || fail "This installer supports Linux. Download the macOS DMG from $RELEASES."
-ARCH="$(uname -m)"
-case "$ARCH" in
-    x86_64|aarch64) ;;
-    *) fail "Unsupported Linux architecture: $ARCH" ;;
-esac
-command -v curl >/dev/null || fail "Install curl and try again."
-
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
 for directory in "$INSTALL_DIR" "$DATA_DIR"; do
@@ -42,10 +36,38 @@ for directory in "$INSTALL_DIR" "$DATA_DIR"; do
         || fail "Install directories must be absolute paths without line breaks."
 done
 
+refresh_caches() {
+    command -v gtk-update-icon-cache >/dev/null && \
+        gtk-update-icon-cache -q -t -f "$DATA_DIR/icons/hicolor" 2>/dev/null || true
+    command -v update-desktop-database >/dev/null && \
+        update-desktop-database "$DATA_DIR/applications" 2>/dev/null || true
+    command -v update-mime-database >/dev/null && [[ -d $DATA_DIR/mime/packages ]] && \
+        update-mime-database "$DATA_DIR/mime" 2>/dev/null || true
+}
+
+if [[ $VERSION == --uninstall ]]; then
+    rm -f -- "$INSTALL_DIR/venturi" "$DATA_DIR/applications/venturi.desktop" \
+        "$DATA_DIR/mime/packages/venturi.xml"
+    for icon in "$DATA_DIR"/icons/hicolor/*/apps/venturi.{png,svg}; do
+        rm -f -- "$icon"
+    done
+    refresh_caches
+    echo "Removed Venturi from $INSTALL_DIR and $DATA_DIR."
+    exit 0
+fi
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|aarch64) ;;
+    *) fail "Unsupported Linux architecture: $ARCH" ;;
+esac
+command -v curl >/dev/null || fail "Install curl and try again."
+command -v tar >/dev/null || fail "Install tar and try again."
+
 if [[ $VERSION == latest ]]; then
-    URL="$RELEASES/latest/download/Venturi-$ARCH.AppImage"
+    BASE_URL="$RELEASES/latest/download"
 else
-    URL="$RELEASES/download/$VERSION/Venturi-$ARCH.AppImage"
+    BASE_URL="$RELEASES/download/$VERSION"
 fi
 
 mkdir -p "$INSTALL_DIR" "$DATA_DIR/applications"
@@ -62,10 +84,15 @@ trap 'exit 143' TERM
 echo "Downloading Venturi ($VERSION, $ARCH)..."
 curl --fail --location --show-error --silent --retry 3 \
     --proto '=https' --proto-redir '=https' \
-    --output "$STAGING/venturi" "$URL"
+    --output "$STAGING/venturi" "$BASE_URL/Venturi-$ARCH.AppImage"
 [[ -s "$STAGING/venturi" ]] || fail "The downloaded AppImage is empty."
+curl --fail --location --show-error --silent --retry 3 \
+    --proto '=https' --proto-redir '=https' \
+    --output "$STAGING/desktop.tar.gz" "$BASE_URL/venturi-desktop.tar.gz"
+tar -xzf "$STAGING/desktop.tar.gz" -C "$STAGING" --no-same-owner
+[[ -s $STAGING/packaging/appimage/venturi.desktop && -s $STAGING/packaging/venturi-mime.xml ]] \
+    || fail "The desktop integration package is incomplete."
 chmod 755 "$STAGING/venturi"
-mv -fT -- "$STAGING/venturi" "$INSTALL_DIR/venturi"
 
 # Desktop Exec values have their own escaping rules, separate from the shell.
 EXEC_PATH="$INSTALL_DIR/venturi"
@@ -75,24 +102,26 @@ EXEC_PATH="${EXEC_PATH//\$/\\\\\$}"
 EXEC_PATH="${EXEC_PATH//\`/\\\\\`}"
 EXEC_PATH="${EXEC_PATH//%/%%}"
 DESKTOP_TMP="$(mktemp "$DATA_DIR/applications/.venturi.XXXXXX")"
-cat > "$DESKTOP_TMP" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Venturi
-Comment=Video editor
-Exec="$EXEC_PATH" %f
-Icon=video-x-generic
-Terminal=false
-Categories=AudioVideo;Video;AudioVideoEditing;
-EOF
+while IFS= read -r line; do
+    case "$line" in
+        Exec=*) printf 'Exec="%s" %%f\n' "$EXEC_PATH" ;;
+        *) printf '%s\n' "$line" ;;
+    esac
+done < "$STAGING/packaging/appimage/venturi.desktop" > "$DESKTOP_TMP"
+install -Dm644 "$STAGING/packaging/venturi-mime.xml" "$DATA_DIR/mime/packages/venturi.xml"
+for icon in "$STAGING"/media/icons/linux/hicolor/*/apps/venturi-video.*; do
+    size="$(basename "$(dirname "$(dirname "$icon")")")"
+    install -Dm644 "$icon" "$DATA_DIR/icons/hicolor/$size/apps/venturi.${icon##*.}"
+done
+mv -fT -- "$STAGING/venturi" "$INSTALL_DIR/venturi"
 chmod 644 "$DESKTOP_TMP"
 mv -fT -- "$DESKTOP_TMP" "$DATA_DIR/applications/venturi.desktop"
-if command -v update-desktop-database >/dev/null; then
-    update-desktop-database "$DATA_DIR/applications" || true
-fi
+refresh_caches
 
 echo "Installed $INSTALL_DIR/venturi. Launch Venturi from your application menu."
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) echo "You can also run: venturi" ;;
     *) echo "Add $INSTALL_DIR to PATH to run venturi from the terminal." ;;
 esac
+
+echo "AppImages may require FUSE 2. Without it, run: venturi --appimage-extract-and-run"

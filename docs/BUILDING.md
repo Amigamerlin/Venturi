@@ -94,6 +94,10 @@ type (so the file manager opens projects with Venturi) into `~/.local` (or
 scripts/install-linux.sh              # --uninstall to remove, --prefix DIR to change
 ```
 
+The installed command is `venturi`. It shares its binary path and desktop
+integration with the release installer; the last installation into the same
+prefix wins. Older source installations may also leave a `bin/vv-app` binary.
+
 ## Test
 
 ```sh
