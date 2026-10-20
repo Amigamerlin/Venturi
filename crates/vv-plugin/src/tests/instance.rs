@@ -267,8 +267,14 @@ fn process_reports_whether_the_block_was_processed() {
     instance
         .active
         .store(false, std::sync::atomic::Ordering::Relaxed);
+    let before = block.clone();
     assert!(!instance.process(&mut block, 6));
+    assert_eq!(block, before, "a skipped block is left untouched");
     assert!(!instance.process(&mut block, 0));
+    // Back to the real state, so Drop deactivates before terminate.
+    instance
+        .active
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[test]
