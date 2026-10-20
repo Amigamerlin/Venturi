@@ -668,28 +668,70 @@ fn overlapping_fades_multiply_instead_of_dipping_below_either_ramp_alone() {
 }
 
 #[test]
-fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
+fn a_fade_ramps_every_sample_even_inside_a_gain_block() {
     let (project, a, _) = project();
-    // 3 blocks of GAIN_BLOCK_FRAMES: the fade covers exactly the first one.
-    let blocks = 3;
-    let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
-    let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
-    clip.fade_in = (GAIN_BLOCK_FRAMES / 10) as FrameIdx;
+    let len = (GAIN_BLOCK_FRAMES * 3) as usize;
+    let mut clip = clip_at(a, 0, 0, (len / 10) as FrameIdx);
+    // 100 samples at each edge, an eighth of a gain block.
+    clip.fade_in = 10;
+    clip.fade_out = 10;
     let tl = timeline(vec![audio_track(vec![clip])]);
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
-        Some(mono(Arc::new(vec![0.5; len_frames])))
+        Some(mono(Arc::new(vec![0.5; len])))
     });
-    let mut out = vec![9.0; len_frames];
+    let mut out = vec![9.0; len];
     mix_range(&snap, 0, &mut out);
-    let block = GAIN_BLOCK_FRAMES as usize;
+    assert_eq!(out[0], 0.0, "the fade starts from silence");
+    assert!((out[50] - 0.25).abs() < 1e-3, "halfway: {}", out[50]);
+    assert!((out[99] - 0.495).abs() < 1e-3, "at its end: {}", out[99]);
     assert!(
-        out[..block].iter().all(|&s| s == 0.0),
-        "first block silenced by the fade-in"
+        out[..100].windows(2).all(|pair| pair[1] >= pair[0]),
+        "the ramp up is monotonic: {:?}",
+        &out[..100]
     );
     assert!(
-        out[block..].iter().all(|&s| s == 0.5),
-        "past the fade-in the gain is unchanged"
+        out[100..len - 100].iter().all(|&s| s == 0.5),
+        "between the fades the gain is unchanged"
     );
+    assert!(
+        out[len - 100..].windows(2).all(|pair| pair[1] <= pair[0]),
+        "the ramp down is monotonic: {:?}",
+        &out[len - 100..]
+    );
+    assert!(
+        (out[len - 1] - 0.005).abs() < 1e-3,
+        "last sample: {}",
+        out[len - 1]
+    );
+}
+
+/// A fade is a timeline property: a varispeed clip ramps over the same
+/// timeline frames, reading its source faster underneath.
+#[test]
+fn a_varispeed_clip_fades_over_its_timeline_frames() {
+    let (project, a, _) = project();
+    let mut clip = sped_up_clip(a, Rational::new(2, 1), 240);
+    clip.fade_in = 10;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
+        Some(mono(Arc::new(vec![0.5; 10_000])))
+    });
+    let mut out = vec![9.0; 2400];
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(out[0], 0.0, "the fade starts from silence");
+    assert!((out[50] - 0.25).abs() < 1e-3, "halfway: {}", out[50]);
+    assert!((out[99] - 0.495).abs() < 1e-3, "at its end: {}", out[99]);
+    assert!(
+        out[100..].iter().all(|&s| s == 0.5),
+        "past the fade-in the gain is unchanged: {:?}",
+        &out[95..105]
+    );
+
+    let mut state = MixState::new(&snap);
+    let mut split = vec![9.0; 2400];
+    mix_range_from(&snap, &mut state, 0, &mut split[..1234]);
+    mix_range_from(&snap, &mut state, 1234, &mut split[1234..]);
+    assert_eq!(split, out, "a split mix equals a whole one");
 }
 
 /// `b` from source frame 10 at `speed`, `len` timeline frames from 0,
@@ -1360,7 +1402,6 @@ fn with_mixdowns(project: &Project, snap: &MixSnapshot, compound: MediaId) -> Mi
 #[test]
 fn a_compound_mixed_live_plays_as_its_mixdown() {
     let (project, compound) = project_with_long_compound();
-    // A fade in would silence it: at `RATE` a gain block outlasts the clip.
     let mut gain = clip_at(compound, 2, 0, 30);
     gain.fade_out = 5;
     let mut keyframes = Keyframed::constant(-3.0f32);
