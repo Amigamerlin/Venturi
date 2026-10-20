@@ -1198,7 +1198,17 @@ fn collect_clips(
     let inputs = input_clips(project, timeline, sample_rate, &mut |effect| {
         source.plugin_build(effect)
     });
-    let mix_end = inputs.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+    // Export renders to the timeline end, video included.
+    let mix_end = inputs
+        .iter()
+        .map(|c| c.start + c.len)
+        .max()
+        .unwrap_or(0)
+        .max(timeline_frame_to_sample(
+            timeline.total_frames(),
+            fps,
+            sample_rate,
+        ));
     let measured_channel = measuring.map(|m| m.channel);
     let format = (sample_rate, channels);
     let mut tracks: Vec<Channel> = Vec::with_capacity(timeline.tracks.len());

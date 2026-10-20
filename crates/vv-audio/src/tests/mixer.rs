@@ -2035,6 +2035,7 @@ struct KeyedSource {
     plugins: PluginSource,
     build: Option<u64>,
     levels: Vec<u64>,
+    ends: Vec<u64>,
     stretches: Vec<u64>,
 }
 
@@ -2058,6 +2059,8 @@ impl AudioSource for KeyedSource {
 
     fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
         self.levels.push(analysis.key());
+        self.ends
+            .extend(analysis.segments.iter().map(|s| s.frames.end));
         LevelReading::Ready(0.5)
     }
 }
@@ -2073,6 +2076,40 @@ fn level_keys(effects: Vec<vv_core::AudioEffect>, plugin: Option<Arc<FakePlugin>
     };
     MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
     source.levels
+}
+
+fn level_ends_with_video(video_frames: FrameIdx) -> (Vec<u64>, Vec<u64>) {
+    let (project, a, _) = project();
+    let mut strip = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    strip.mix.effects = vec![vst3(1, b""), normalize(0.0)];
+    let mut video = audio_track(vec![clip_at(a, 0, 0, video_frames)]);
+    video.kind = TrackKind::Video;
+    let mut source = KeyedSource {
+        plugins: PluginSource {
+            plugin: Some(FakePlugin::new(1.0)),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    MixSnapshot::from_timeline(
+        &project,
+        &timeline(vec![strip, video]),
+        RATE,
+        1,
+        &mut source,
+    );
+    (source.ends, source.levels)
+}
+
+// Export renders to the timeline end, so the measure after a plugin must too.
+#[test]
+fn a_plugin_measure_runs_to_the_timeline_end_when_video_outlasts_the_audio() {
+    let (ends, keys) = level_ends_with_video(20);
+    assert_eq!(ends, [200]);
+    let (_, shorter) = level_ends_with_video(30);
+    assert_ne!(keys, shorter, "the end is part of the key");
+    let (ends, _) = level_ends_with_video(3);
+    assert_eq!(ends, [50], "the audio is the longest");
 }
 
 #[test]

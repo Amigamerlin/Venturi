@@ -1060,6 +1060,35 @@ fn a_level_after_a_plugin_reads_its_tail_in_the_gaps() {
     }
 }
 
+/// Export renders to the timeline end: video past the last audio clip lets the
+/// tap of the plugin ring into the measure.
+#[test]
+fn a_plugin_strip_is_measured_to_the_end_of_the_video() {
+    let mut project = Project::default();
+    let file = media(&mut project, chirp("video-end.wav", 48_000, 5), 48_000, 1);
+    let mut strip = audio_track(vec![clip(1, file, 0, 25, 0)]);
+    strip.mix.effects.push(plugin_effect(FIXTURE_CLASS, &[]));
+    let mut audio_only = timeline(vec![strip]);
+    audio_only
+        .master
+        .effects
+        .push(normalize(NormalizeMode::Loudness));
+    let mut with_video = audio_only.clone();
+    let mut video = Track::new(TrackKind::Video);
+    // The Echo tap falls 7 s after the input, past the 1 s audio clip.
+    video.clips.push(clip(2, file, 0, 300, 0));
+    with_video.tracks.push(video);
+
+    let [(short, _)] = echo_measures(&project, &audio_only, &mut echo_cache())[..] else {
+        panic!("one measure");
+    };
+    let [(long, whole)] = echo_measures(&project, &with_video, &mut echo_cache())[..] else {
+        panic!("one measure");
+    };
+    assert!(db(short, long).abs() > 0.5, "{short} vs {long}");
+    assert!(db(long, whole).abs() < 0.01, "{long} vs {whole}");
+}
+
 /// A delay longer than the preroll, an edit two clips before: nothing cached
 /// from before the edit is reused, and a cold cache reads the same.
 #[test]
