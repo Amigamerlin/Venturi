@@ -1611,9 +1611,9 @@ fn add_frames(
         let block = in_clip / GAIN_BLOCK_FRAMES;
         let block_end = (clip.start + (block + 1) * GAIN_BLOCK_FRAMES).min(to);
         // At the start of the block, not of the call: how the mix is split
-        // into calls must not change it.
-        let gain = block_gain_linear(clip, block, snapshot.sample_rate)
-            * fade_multiplier(clip, block * GAIN_BLOCK_FRAMES);
+        // into calls must not change it. The fade is not block granular:
+        // it is applied per frame, at `add_scaled`.
+        let gain = block_gain_linear(clip, block, snapshot.sample_rate);
         let dst = ((f - start) as usize) * ch;
         if clip.step == 1.0 {
             let mut from = f;
@@ -1623,9 +1623,8 @@ fn add_frames(
                 let frames = match input.run(src) {
                     Run::Samples(samples) => {
                         let count = samples.len().min((block_end - from) as usize * ch);
-                        for (d, s) in out[dst..dst + count].iter_mut().zip(&samples[..count]) {
-                            *d += s * gain;
-                        }
+                        let (dst, src) = (&mut out[dst..dst + count], &samples[..count]);
+                        add_scaled(clip, gain, from - clip.start, dst, src, ch);
                         (count / ch) as u64
                     }
                     Run::Silence(frames) => frames,
@@ -1636,11 +1635,35 @@ fn add_frames(
         } else {
             let frames = &mut out[dst..dst + (block_end - f) as usize * ch];
             for (i, frame) in frames.chunks_exact_mut(ch).enumerate() {
-                let pos = clip.source_offset as f64 + (in_clip + i as u64) as f64 * clip.step;
-                add_resampled(input, pos, clip.step, gain, frame);
+                let at = in_clip + i as u64;
+                let pos = clip.source_offset as f64 + at as f64 * clip.step;
+                add_resampled(
+                    input,
+                    pos,
+                    clip.step,
+                    gain * fade_multiplier(clip, at),
+                    frame,
+                );
             }
         }
         f = block_end;
+    }
+}
+
+/// Adds `src` (interleaved, `in_clip` frames into the clip) to `dst`,
+/// scaled by `gain` and by the fade of that instant.
+fn add_scaled(clip: &MixClip, gain: f32, in_clip: u64, dst: &mut [f32], src: &[f32], ch: usize) {
+    if clip.fade_in == 0 && clip.fade_out == 0 {
+        for (d, s) in dst.iter_mut().zip(src) {
+            *d += s * gain;
+        }
+        return;
+    }
+    for (i, (d, s)) in dst.chunks_mut(ch).zip(src.chunks(ch)).enumerate() {
+        let gain = gain * fade_multiplier(clip, in_clip + i as u64);
+        for (d, s) in d.iter_mut().zip(s) {
+            *d += s * gain;
+        }
     }
 }
 
