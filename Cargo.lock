@@ -4782,6 +4782,7 @@ dependencies = [
  "vv-audio",
  "vv-core",
  "vv-media",
+ "vv-plugin",
  "vv-render",
  "vv-vad",
 ]
