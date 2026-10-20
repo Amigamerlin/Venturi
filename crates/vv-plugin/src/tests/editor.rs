@@ -53,3 +53,18 @@ fn a_report_that_matches_the_constraint_requests_nothing() {
     assert_eq!(ok.request, None);
     assert_eq!(requested, None);
 }
+
+#[test]
+fn a_window_closed_while_idling_wakes_the_app_once() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    let waker: Waker = Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let woke = || calls.load(std::sync::atomic::Ordering::SeqCst);
+    wake_if_closed(true, true, &waker);
+    wake_if_closed(false, false, &waker);
+    assert_eq!(woke(), 0);
+    wake_if_closed(true, false, &waker);
+    assert_eq!(woke(), 1);
+}

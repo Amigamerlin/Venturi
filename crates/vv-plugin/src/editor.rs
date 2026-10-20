@@ -127,6 +127,8 @@ pub struct Editor {
     // Only Linux window managers refuse a size.
     #[cfg(target_os = "linux")]
     requested: Option<(i32, i32)>,
+    #[cfg(target_os = "linux")]
+    waker: Waker,
     instance: Arc<Vst3Instance>,
 }
 
@@ -150,6 +152,15 @@ fn resize_decision(
     ResizeDecision {
         request,
         notify: constrained,
+    }
+}
+
+/// The window manager closed the window during `idle`, after the app last
+/// looked for closed editors: ask for another look.
+#[cfg(any(target_os = "linux", test))]
+fn wake_if_closed(was_open: bool, is_open: bool, waker: &Waker) {
+    if was_open && !is_open {
+        waker();
     }
 }
 
@@ -216,7 +227,7 @@ impl Editor {
             frame.run_loop.clear();
             return Err(format!("the plugin editor did not attach ({attached})"));
         }
-        instance.set_waker(Some(waker));
+        instance.set_waker(Some(waker.clone()));
         Ok(Self {
             view,
             frame,
@@ -224,6 +235,8 @@ impl Editor {
             resize,
             #[cfg(target_os = "linux")]
             requested: None,
+            #[cfg(target_os = "linux")]
+            waker,
             instance,
         })
     }
@@ -237,9 +250,15 @@ impl Editor {
         self.instance.forward_outputs();
         #[cfg(target_os = "linux")]
         self.frame.run_loop.pump();
+        #[cfg(target_os = "linux")]
+        let was_open = self.window.is_open();
         let resized = self.window.idle();
         #[cfg(target_os = "linux")]
-        self.frame.run_loop.rearm();
+        {
+            // The app drops closed editors before it pumps them.
+            wake_if_closed(was_open, self.window.is_open(), &self.waker);
+            self.frame.run_loop.rearm();
+        }
         if let Some((width, height)) = resized {
             let mut rect = ViewRect {
                 left: 0,
