@@ -79,7 +79,31 @@ the part that has to be perfect.
 
 ## Install
 
-Grab the latest build from the
+On Linux (x86_64 or aarch64), download and run the
+[installer](https://github.com/VenturiVideo/Venturi/releases/latest/download/install.sh):
+
+```sh
+curl -fL https://github.com/VenturiVideo/Venturi/releases/latest/download/install.sh -o install.sh
+bash install.sh
+```
+
+The downloaded installer stays pinned to that release; use
+`bash install.sh latest` to install a newer release later.
+
+The installer requires Bash, curl and tar. It installs the release's AppImage as
+`~/.local/bin/venturi` and adds Venturi to your application menu, without sudo.
+Pass a release tag such as `bash install.sh v0.9.0` to select a version
+(releases before the installer existed are not supported). Set `INSTALL_DIR` to
+choose another binary directory; desktop entries respect `XDG_DATA_HOME`.
+Add the binary directory to your `PATH` to run `venturi` from the terminal.
+To uninstall, run `bash install.sh --uninstall` with the same `INSTALL_DIR`
+and `XDG_DATA_HOME` settings used for installation. This removes the binary,
+menu entry, icons and MIME registration; your projects are preserved.
+
+AppImages may require FUSE 2; without it, run
+`venturi --appimage-extract-and-run`.
+
+For macOS or a manual Linux installation, grab the latest build from the
 [Releases](https://github.com/VenturiVideo/Venturi/releases/latest) page:
 
 | Platform | File | Notes |

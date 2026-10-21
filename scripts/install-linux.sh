@@ -22,7 +22,7 @@ if [ -z "$PREFIX" ]; then
     if [ "$(id -u)" -eq 0 ]; then PREFIX=/usr/local; else PREFIX="$HOME/.local"; fi
 fi
 
-BIN="$PREFIX/bin/vv-app"
+BIN="$PREFIX/bin/venturi"
 DESKTOP="$PREFIX/share/applications/venturi.desktop"
 ICONS="$PREFIX/share/icons/hicolor"
 MIME="$PREFIX/share/mime"
@@ -38,9 +38,10 @@ refresh_caches() {
 }
 
 if [ "$UNINSTALL" -eq 1 ]; then
-    rm -f "$BIN" "$DESKTOP" "$MIME/packages/venturi.xml"
-    find "$ICONS" -name 'venturi.png' -o -name 'venturi.svg' 2>/dev/null \
-        | while read -r f; do rm -f "$f"; done
+    rm -f "$PREFIX/bin/vv-app" "$BIN" "$DESKTOP" "$MIME/packages/venturi.xml"
+    for icon in "$ICONS"/*/apps/venturi.{png,svg}; do
+        rm -f -- "$icon"
+    done
     refresh_caches
     echo "removed from $PREFIX"
     exit 0
@@ -52,7 +53,11 @@ if [ ! -x "$TARGET_DIR/release/vv-app" ]; then
 fi
 
 install -Dm755 "$TARGET_DIR/release/vv-app" "$BIN"
-install -Dm644 packaging/appimage/venturi.desktop "$DESKTOP"
+rm -f "$PREFIX/bin/vv-app"
+mkdir -p "$(dirname "$DESKTOP")"
+source scripts/linux-desktop.sh
+write_desktop_entry packaging/appimage/venturi.desktop "$BIN" > "$DESKTOP"
+chmod 644 "$DESKTOP"
 install -Dm644 packaging/venturi-mime.xml "$MIME/packages/venturi.xml"
 
 # The icon file name must match the Icon= key of the .desktop.
