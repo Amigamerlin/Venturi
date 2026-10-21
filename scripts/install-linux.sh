@@ -53,7 +53,11 @@ if [ ! -x "$TARGET_DIR/release/vv-app" ]; then
 fi
 
 install -Dm755 "$TARGET_DIR/release/vv-app" "$BIN"
-rm -f "$PREFIX/bin/vv-app"
+LEGACY_REPLACED=0
+if [ -e "$PREFIX/bin/vv-app" ]; then
+    rm -f "$PREFIX/bin/vv-app"
+    LEGACY_REPLACED=1
+fi
 mkdir -p "$(dirname "$DESKTOP")"
 source scripts/linux-desktop.sh
 write_desktop_entry packaging/appimage/venturi.desktop "$BIN" > "$DESKTOP"
@@ -75,3 +79,7 @@ case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;
     *) echo "note: $PREFIX/bin is not in PATH" ;;
 esac
+if [ "$LEGACY_REPLACED" -eq 1 ]; then
+    echo "note: the command is now venturi, $PREFIX/bin/vv-app was removed;"
+    echo "      point MCP configs at \"$BIN mcp\" (see docs/MCP.md)"
+fi

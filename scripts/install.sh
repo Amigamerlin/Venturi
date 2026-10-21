@@ -46,7 +46,7 @@ refresh_caches() {
 }
 
 if [[ $VERSION == --uninstall ]]; then
-    rm -f -- "$INSTALL_DIR/venturi" "$DATA_DIR/applications/venturi.desktop" \
+    rm -f -- "$INSTALL_DIR/venturi" "$INSTALL_DIR/vv-app" "$DATA_DIR/applications/venturi.desktop" \
         "$DATA_DIR/mime/packages/venturi.xml"
     for icon in "$DATA_DIR"/icons/hicolor/*/apps/venturi.{png,svg}; do
         rm -f -- "$icon"
@@ -106,6 +106,11 @@ for icon in "$STAGING"/media/icons/linux/hicolor/*/apps/venturi-video.*; do
     install -Dm644 "$icon" "$DATA_DIR/icons/hicolor/$size/apps/venturi.${icon##*.}"
 done
 mv -fT -- "$STAGING/venturi" "$INSTALL_DIR/venturi"
+LEGACY_REPLACED=false
+if [[ -e $INSTALL_DIR/vv-app ]]; then
+    rm -f -- "$INSTALL_DIR/vv-app"
+    LEGACY_REPLACED=true
+fi
 chmod 644 "$DESKTOP_TMP"
 mv -fT -- "$DESKTOP_TMP" "$DATA_DIR/applications/venturi.desktop"
 refresh_caches
@@ -117,3 +122,7 @@ case ":$PATH:" in
 esac
 
 echo "AppImages may require FUSE 2. Without it, run: venturi --appimage-extract-and-run"
+if $LEGACY_REPLACED; then
+    echo "The command is now venturi and $INSTALL_DIR/vv-app was removed."
+    echo "Point MCP configs at \"$INSTALL_DIR/venturi mcp\" (see docs/MCP.md)."
+fi
