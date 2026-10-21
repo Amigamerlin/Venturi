@@ -1,4 +1,5 @@
 use super::*;
+use vv_audio::mixer::mix_range_without_plugins;
 
 const FPS: f64 = 25.0;
 const RATE: f64 = PROJECT_SAMPLE_RATE as f64;
@@ -467,4 +468,54 @@ fn a_rescan_forces_a_timeline_rebuild_and_keeps_a_media_preview() {
     after_a_rescan(|audio| {
         audio.plugins_rescanned();
     });
+}
+
+fn loaded_audio(name: &str) -> TimelineAudio {
+    let mut project = vv_core::Project::default();
+    let timeline = tone_timeline(&mut project, name, 0.8);
+    let mut audio = TimelineAudio::new();
+    while {
+        audio.sync(&project, timeline, 1);
+        audio.has_pending_buffers()
+    } {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    audio
+}
+
+#[test]
+fn a_window_mixed_in_pieces_equals_one_mixed_whole() {
+    let audio = loaded_audio("pieces.wav");
+    let frames = 3 * PROJECT_SAMPLE_RATE as u64 + 1234;
+    let start = 777;
+    let mut whole = vec![0.0; frames as usize * audio.mix.channels as usize];
+    mix_range_without_plugins(&audio.mix, start, &mut whole);
+    assert!(whole.iter().any(|&s| s != 0.0));
+    let pieces = mix_window(&audio.mix, start, frames, &|| false).unwrap();
+    assert_eq!(pieces, whole);
+}
+
+#[test]
+fn a_cancelled_window_stops_mixing_between_pieces() {
+    let audio = loaded_audio("cancel_mix.wav");
+    let polls = std::cell::Cell::new(0);
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 2
+    };
+    // Cancelled during the mix: the stretcher (rubberband) is never reached.
+    let rendered = render_window(&audio.mix, 0, WINDOW_FRAMES, 2, &cancelled);
+    assert!(rendered.is_none());
+    assert_eq!(polls.get(), 3, "no piece mixed after the cancel");
+}
+
+#[test]
+fn replacing_a_request_cancels_the_one_in_flight() {
+    let mut audio = TimelineAudio::new();
+    audio.request_window(2, 0, true);
+    let first = audio.stretch_cancel.clone();
+    assert!(!first.load(Ordering::Relaxed));
+    audio.request_window(2, 48_000, true);
+    assert!(first.load(Ordering::Relaxed));
+    assert!(!audio.stretch_cancel.load(Ordering::Relaxed));
 }

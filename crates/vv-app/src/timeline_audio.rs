@@ -4,12 +4,15 @@
 //! the clock is wall time and nothing plays.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use vv_audio::Stretcher;
 use vv_audio::mixer::{
-    Channel, ClipInput, MixClip, MixMeters, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE,
-    StretchedWindow, mix_range_without_plugins, sample_to_timeline_frame, timeline_frame_to_sample,
+    Channel, ClipInput, MixClip, MixMeters, MixSnapshot, MixState, Mixer, MixerState,
+    PROJECT_SAMPLE_RATE, StretchedWindow, mix_range_from, sample_to_timeline_frame,
+    timeline_frame_to_sample,
 };
 use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
 
@@ -53,6 +56,63 @@ struct StretchResult {
     samples: Result<Vec<f32>, String>,
 }
 
+/// Where a window being rendered checks whether it was superseded.
+const RENDER_PIECE_FRAMES: u64 = PROJECT_SAMPLE_RATE as u64;
+
+/// The mix of the window, `None` once `cancelled` turns true.
+fn mix_window(
+    mix: &MixSnapshot,
+    start: u64,
+    frames: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<f32>> {
+    let ch = mix.channels as usize;
+    let mut samples = vec![0.0; frames as usize * ch];
+    // The callback is playing the plugin instances: this thread leaves them alone.
+    let mut state = MixState::without_plugins(mix);
+    let mut at = 0;
+    while at < frames {
+        if cancelled() {
+            return None;
+        }
+        let len = RENDER_PIECE_FRAMES.min(frames - at);
+        let piece = &mut samples[at as usize * ch..(at + len) as usize * ch];
+        mix_range_from(mix, &mut state, start + at, piece);
+        at += len;
+    }
+    Some(samples)
+}
+
+/// The window mixed and stretched; `None` once `cancelled` turns true.
+fn render_window(
+    mix: &MixSnapshot,
+    start: u64,
+    frames: u64,
+    tempo: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Result<Vec<f32>, String>> {
+    let samples = mix_window(mix, start, frames, cancelled)?;
+    let ch = mix.channels as usize;
+    let mut stretcher = match Stretcher::new(mix.sample_rate, mix.channels, tempo as f64) {
+        Ok(stretcher) => stretcher,
+        Err(e) => return Some(Err(e)),
+    };
+    let mut stretched = Vec::new();
+    for piece in samples.chunks(RENDER_PIECE_FRAMES as usize * ch) {
+        if cancelled() {
+            return None;
+        }
+        if let Err(e) = stretcher.push(piece, &mut stretched) {
+            return Some(Err(e));
+        }
+    }
+    if let Err(e) = stretcher.finish(&mut stretched) {
+        return Some(Err(e));
+    }
+    stretched.resize((frames / tempo) as usize * ch, 0.0);
+    Some(Ok(stretched))
+}
+
 fn hand_back(tx: &mpsc::Sender<StretchResult>, result: StretchResult) {
     if let Err(mpsc::SendError(result)) = tx.send(result) {
         // Dropping here would tear the plugins down off the UI thread while
@@ -88,6 +148,8 @@ pub struct TimelineAudio {
     /// The last stretch failed: not retried every frame, only after a
     /// change of content, position or speed.
     stretch_failed: bool,
+    /// Set when the request in flight is superseded, so its thread stops.
+    stretch_cancel: Arc<AtomicBool>,
     next_request_id: u64,
     stretch_tx: mpsc::Sender<StretchResult>,
     stretch_rx: mpsc::Receiver<StretchResult>,
@@ -116,6 +178,7 @@ impl TimelineAudio {
             stretch_request: None,
             restretch: None,
             stretch_failed: false,
+            stretch_cancel: Arc::default(),
             next_request_id: 0,
             stretch_tx,
             stretch_rx,
@@ -250,6 +313,8 @@ impl TimelineAudio {
         if self.playing && self.stretch_request.is_none_or(|r| !r.new_window) {
             self.request_window(tempo, start, true);
         } else {
+            // Its result is discarded for the restretch.
+            self.stretch_cancel.store(true, Ordering::Relaxed);
             self.restretch = Some(tempo);
         }
     }
@@ -398,6 +463,7 @@ impl TimelineAudio {
             return;
         }
         if tempo == 1 {
+            self.stretch_cancel.store(true, Ordering::Relaxed);
             self.stretch_request = None;
             self.restretch = None;
             self.speed = 1.0;
@@ -440,6 +506,9 @@ impl TimelineAudio {
         };
         self.next_request_id += 1;
         self.stretch_request = Some(request);
+        self.stretch_cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.stretch_cancel = cancel.clone();
         if new_window {
             self.restretch = None;
         }
@@ -447,17 +516,10 @@ impl TimelineAudio {
         let mix = self.mix.clone();
         let tx = self.stretch_tx.clone();
         std::thread::spawn(move || {
-            let ch = mix.channels as usize;
-            let mut samples = vec![0.0; frames as usize * ch];
-            // The callback is playing the plugin instances: this thread leaves them alone.
-            mix_range_without_plugins(&mix, start, &mut samples);
-            let expected = (frames / tempo) as usize * ch;
-            let samples =
-                vv_audio::stretch_samples(&samples, mix.sample_rate, mix.channels, tempo as f64)
-                    .map(|mut stretched| {
-                        stretched.resize(expected, 0.0);
-                        stretched
-                    });
+            let samples = render_window(&mix, start, frames, tempo, &|| {
+                cancel.load(Ordering::Relaxed)
+            })
+            .unwrap_or_else(|| Err("superseded".into()));
             hand_back(
                 &tx,
                 StretchResult {
