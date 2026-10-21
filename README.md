@@ -92,8 +92,8 @@ The downloaded installer stays pinned to that release; use
 
 The installer requires Bash, curl and tar. It installs the release's AppImage as
 `~/.local/bin/venturi` and adds Venturi to your application menu, without sudo.
-Run it again with `bash install.sh latest` to update, or pass a release tag
-such as `bash install.sh v0.2.0` to select a version. Set `INSTALL_DIR` to
+Pass a release tag such as `bash install.sh v0.9.0` to select a version
+(releases before the installer existed are not supported). Set `INSTALL_DIR` to
 choose another binary directory; desktop entries respect `XDG_DATA_HOME`.
 Add the binary directory to your `PATH` to run `venturi` from the terminal.
 To uninstall, run `bash install.sh --uninstall` with the same `INSTALL_DIR`

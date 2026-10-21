@@ -88,7 +88,8 @@ curl --fail --location --show-error --silent --retry 3 \
 [[ -s "$STAGING/venturi" ]] || fail "The downloaded AppImage is empty."
 curl --fail --location --show-error --silent --retry 3 \
     --proto '=https' --proto-redir '=https' \
-    --output "$STAGING/desktop.tar.gz" "$BASE_URL/venturi-desktop.tar.gz"
+    --output "$STAGING/desktop.tar.gz" "$BASE_URL/venturi-desktop.tar.gz" \
+    || fail "This release has no desktop integration package; it predates the installer."
 tar -xzf "$STAGING/desktop.tar.gz" -C "$STAGING" --no-same-owner
 [[ -s $STAGING/packaging/appimage/venturi.desktop && -s $STAGING/packaging/venturi-mime.xml \
     && -s $STAGING/scripts/linux-desktop.sh ]] \
