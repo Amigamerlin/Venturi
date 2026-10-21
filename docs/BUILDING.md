@@ -96,8 +96,9 @@ scripts/install-linux.sh              # --uninstall to remove, --prefix DIR to c
 
 Both this script and the release installer use the command `venturi` and the
 repository's desktop entry, icons and `.vvproj` association. When installed
-into the same directories, the last installer run wins. This script removes
-the legacy `bin/vv-app` binary on installation and uninstallation.
+into the same directories, the last installer run wins. Both remove the
+legacy `bin/vv-app` binary on installation and uninstallation, and say so
+when it was there, since MCP configs pointing at it stop working.
 
 ## Test
 
