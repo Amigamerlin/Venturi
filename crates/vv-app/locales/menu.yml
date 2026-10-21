@@ -64,6 +64,10 @@ menu.settings:
   en: "Settings..."
   it: "Impostazioni..."
 
+menu.exit:
+  en: "Exit"
+  it: "Esci"
+
 menu.edit:
   en: "Edit"
   it: "Modifica"

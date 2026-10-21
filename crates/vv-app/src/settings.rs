@@ -141,6 +141,9 @@ impl Action {
         t!(format!("action.{}", self.id()))
     }
 
+    /// Returns the translated settings category for this action.
+    ///
+    /// The returned string is used to group shortcuts in the settings UI.
     pub fn category(self) -> Cow<'static, str> {
         match self {
             Action::TogglePlayback
@@ -185,6 +188,7 @@ impl Action {
         }
     }
 
+    /// Returns the built-in keyboard shortcuts used when no custom binding exists.
     fn default_shortcuts(self) -> Vec<Shortcut> {
         use egui::Key;
         let plain = Shortcut::plain;
