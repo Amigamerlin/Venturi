@@ -94,9 +94,10 @@ type (so the file manager opens projects with Venturi) into `~/.local` (or
 scripts/install-linux.sh              # --uninstall to remove, --prefix DIR to change
 ```
 
-The installed command is `venturi`. It shares its binary path and desktop
-integration with the release installer; the last installation into the same
-prefix wins. Older source installations may also leave a `bin/vv-app` binary.
+Both this script and the release installer use the command `venturi` and the
+repository's desktop entry, icons and `.vvproj` association. When installed
+into the same directories, the last installer run wins. This script removes
+the legacy `bin/vv-app` binary on installation and uninstallation.
 
 ## Test
 

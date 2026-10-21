@@ -90,24 +90,15 @@ curl --fail --location --show-error --silent --retry 3 \
     --proto '=https' --proto-redir '=https' \
     --output "$STAGING/desktop.tar.gz" "$BASE_URL/venturi-desktop.tar.gz"
 tar -xzf "$STAGING/desktop.tar.gz" -C "$STAGING" --no-same-owner
-[[ -s $STAGING/packaging/appimage/venturi.desktop && -s $STAGING/packaging/venturi-mime.xml ]] \
+[[ -s $STAGING/packaging/appimage/venturi.desktop && -s $STAGING/packaging/venturi-mime.xml \
+    && -s $STAGING/scripts/linux-desktop.sh ]] \
     || fail "The desktop integration package is incomplete."
 chmod 755 "$STAGING/venturi"
 
-# Desktop Exec values have their own escaping rules, separate from the shell.
-EXEC_PATH="$INSTALL_DIR/venturi"
-EXEC_PATH="${EXEC_PATH//\\/\\\\\\\\}"
-EXEC_PATH="${EXEC_PATH//\"/\\\\\"}"
-EXEC_PATH="${EXEC_PATH//\$/\\\\\$}"
-EXEC_PATH="${EXEC_PATH//\`/\\\\\`}"
-EXEC_PATH="${EXEC_PATH//%/%%}"
+# shellcheck source=scripts/linux-desktop.sh
+source "$STAGING/scripts/linux-desktop.sh"
 DESKTOP_TMP="$(mktemp "$DATA_DIR/applications/.venturi.XXXXXX")"
-while IFS= read -r line; do
-    case "$line" in
-        Exec=*) printf 'Exec="%s" %%f\n' "$EXEC_PATH" ;;
-        *) printf '%s\n' "$line" ;;
-    esac
-done < "$STAGING/packaging/appimage/venturi.desktop" > "$DESKTOP_TMP"
+write_desktop_entry "$STAGING/packaging/appimage/venturi.desktop" "$INSTALL_DIR/venturi" > "$DESKTOP_TMP"
 install -Dm644 "$STAGING/packaging/venturi-mime.xml" "$DATA_DIR/mime/packages/venturi.xml"
 for icon in "$STAGING"/media/icons/linux/hicolor/*/apps/venturi-video.*; do
     size="$(basename "$(dirname "$(dirname "$icon")")")"
