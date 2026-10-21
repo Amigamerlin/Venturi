@@ -402,7 +402,7 @@ fn a_failed_stretch_is_not_retried_every_frame() {
         .send(StretchResult {
             id: failed.id,
             _mix: audio.mix.clone(),
-            samples: Err("failed".into()),
+            samples: Some(Err("failed".into())),
         })
         .unwrap();
     let before = audio.next_request_id;
@@ -417,7 +417,7 @@ fn stretch_result(mix: &Arc<MixSnapshot>) -> StretchResult {
     StretchResult {
         id: 0,
         _mix: mix.clone(),
-        samples: Ok(Vec::new()),
+        samples: Some(Ok(Vec::new())),
     }
 }
 
@@ -491,7 +491,12 @@ fn a_window_mixed_in_pieces_equals_one_mixed_whole() {
     let mut whole = vec![0.0; frames as usize * audio.mix.channels as usize];
     mix_range_without_plugins(&audio.mix, start, &mut whole);
     assert!(whole.iter().any(|&s| s != 0.0));
-    let pieces = mix_window(&audio.mix, start, frames, &|| false).unwrap();
+    let mut pieces = Vec::new();
+    let done = mix_pieces(&audio.mix, start, frames, &|| false, &mut |piece| {
+        pieces.extend_from_slice(piece);
+        Ok(())
+    });
+    assert_eq!(done, Some(Ok(())));
     assert_eq!(pieces, whole);
 }
 
@@ -503,9 +508,9 @@ fn a_cancelled_window_stops_mixing_between_pieces() {
         polls.set(polls.get() + 1);
         polls.get() > 2
     };
-    // Cancelled during the mix: the stretcher (rubberband) is never reached.
-    let rendered = render_window(&audio.mix, 0, WINDOW_FRAMES, 2, &cancelled);
-    assert!(rendered.is_none());
+    // Without a stretcher, so it runs without rubberband.
+    let mixed = mix_pieces(&audio.mix, 0, WINDOW_FRAMES, &cancelled, &mut |_| Ok(()));
+    assert!(mixed.is_none());
     assert_eq!(polls.get(), 3, "no piece mixed after the cancel");
 }
 

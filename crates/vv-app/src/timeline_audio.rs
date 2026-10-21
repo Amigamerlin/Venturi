@@ -54,7 +54,8 @@ struct StretchResult {
     /// Handed back so the last owner of the plugin instances drops it on
     /// the thread that polls the results, not on the stretch thread.
     _mix: Arc<MixSnapshot>,
-    samples: Result<Vec<f32>, String>,
+    /// `None`: superseded, nothing to apply.
+    samples: Option<Result<Vec<f32>, String>>,
 }
 
 /// Where a window being rendered checks whether it was superseded. A
@@ -63,15 +64,17 @@ struct StretchResult {
 const RENDER_PIECE_FRAMES: u64 = 12 * STRETCH_CHUNK_FRAMES as u64;
 const _: () = assert!(RENDER_PIECE_FRAMES.is_multiple_of(MIX_BLOCK_FRAMES as u64));
 
-/// The mix of the window, `None` once `cancelled` turns true.
-fn mix_window(
+/// Mixes the window piece by piece into `sink`; `None` once `cancelled`
+/// turns true, polled before each piece.
+fn mix_pieces(
     mix: &MixSnapshot,
     start: u64,
     frames: u64,
     cancelled: &dyn Fn() -> bool,
-) -> Option<Vec<f32>> {
+    sink: &mut dyn FnMut(&[f32]) -> Result<(), String>,
+) -> Option<Result<(), String>> {
     let ch = mix.channels as usize;
-    let mut samples = vec![0.0; frames as usize * ch];
+    let mut piece = vec![0.0; RENDER_PIECE_FRAMES.min(frames) as usize * ch];
     // The callback is playing the plugin instances: this thread leaves them alone.
     let mut state = MixState::without_plugins(mix);
     let mut at = 0;
@@ -80,11 +83,14 @@ fn mix_window(
             return None;
         }
         let len = RENDER_PIECE_FRAMES.min(frames - at);
-        let piece = &mut samples[at as usize * ch..(at + len) as usize * ch];
+        let piece = &mut piece[..len as usize * ch];
         mix_range_from(mix, &mut state, start + at, piece);
+        if let Err(e) = sink(piece) {
+            return Some(Err(e));
+        }
         at += len;
     }
-    Some(samples)
+    Some(Ok(()))
 }
 
 /// The window mixed and stretched; `None` once `cancelled` turns true.
@@ -95,25 +101,18 @@ fn render_window(
     tempo: u64,
     cancelled: &dyn Fn() -> bool,
 ) -> Option<Result<Vec<f32>, String>> {
-    let samples = mix_window(mix, start, frames, cancelled)?;
-    let ch = mix.channels as usize;
     let mut stretcher = match Stretcher::new(mix.sample_rate, mix.channels, tempo as f64) {
         Ok(stretcher) => stretcher,
         Err(e) => return Some(Err(e)),
     };
     let mut stretched = Vec::new();
-    for piece in samples.chunks(RENDER_PIECE_FRAMES as usize * ch) {
-        if cancelled() {
-            return None;
-        }
-        if let Err(e) = stretcher.push(piece, &mut stretched) {
-            return Some(Err(e));
-        }
-    }
-    if let Err(e) = stretcher.finish(&mut stretched) {
+    let mixed = mix_pieces(mix, start, frames, cancelled, &mut |piece| {
+        stretcher.push(piece, &mut stretched)
+    })?;
+    if let Err(e) = mixed.and_then(|()| stretcher.finish(&mut stretched)) {
         return Some(Err(e));
     }
-    stretched.resize((frames / tempo) as usize * ch, 0.0);
+    stretched.resize((frames / tempo) as usize * mix.channels as usize, 0.0);
     Some(Ok(stretched))
 }
 
@@ -528,8 +527,7 @@ impl TimelineAudio {
         std::thread::spawn(move || {
             let samples = render_window(&mix, start, frames, tempo, &|| {
                 cancel.load(Ordering::Relaxed)
-            })
-            .unwrap_or_else(|| Err("superseded".into()));
+            });
             hand_back(
                 &tx,
                 StretchResult {
@@ -553,8 +551,9 @@ impl TimelineAudio {
                 continue;
             }
             let samples = match result.samples {
-                Ok(samples) => Arc::new(samples),
-                Err(e) => {
+                Some(Ok(samples)) => Arc::new(samples),
+                None => continue,
+                Some(Err(e)) => {
                     eprintln!("vv-app: audio stretch at {}x failed: {e}", request.tempo);
                     self.stretch_failed = true;
                     continue;
