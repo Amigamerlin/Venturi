@@ -24,6 +24,7 @@ mod mask_panel;
 mod mcp_host;
 mod media_pool;
 mod media_pool_ui;
+mod menu_list;
 mod mix_buffers;
 mod mixer_panel;
 mod new_timeline_dialog;

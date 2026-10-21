@@ -15,6 +15,7 @@ use vv_core::{
 use vv_core::Vst3Effect;
 use vv_plugin::PluginInfo;
 
+use crate::menu_list;
 use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
 use crate::settings::Preset;
 
@@ -781,16 +782,23 @@ fn effects(
             } else if vst3.installed.is_empty() {
                 ui.weak(t!("mixer.vst3_none"));
             }
-            for (vendor, plugins) in vst3_menu(vst3.installed) {
-                let vendor = if vendor.is_empty() { "-" } else { &vendor };
-                ui.menu_button(vendor, |ui| {
-                    for plugin in plugins {
-                        if ui.button(&plugin.name).clicked() {
-                            edit.add_effect = Some(add_plugin_effect(plugin));
-                        }
-                    }
-                });
-            }
+            menu_list::menu_list(ui, |ui, type_ahead| {
+                for (vendor, plugins) in vst3_menu(vst3.installed) {
+                    let vendor = if vendor.is_empty() { "-" } else { &vendor };
+                    let response = ui.menu_button(vendor, |ui| {
+                        menu_list::menu_list(ui, |ui, type_ahead| {
+                            for plugin in plugins {
+                                let response = ui.button(&plugin.name);
+                                type_ahead.item(&response, &plugin.name);
+                                if response.clicked() {
+                                    edit.add_effect = Some(add_plugin_effect(plugin));
+                                }
+                            }
+                        });
+                    });
+                    type_ahead.item(&response.response, vendor);
+                }
+            });
             ui.separator();
             let rescan = ui.add_enabled(!vst3.scanning, egui::Button::new(t!("mixer.vst3_rescan")));
             if rescan.clicked() {
