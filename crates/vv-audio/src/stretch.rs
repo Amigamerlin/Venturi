@@ -16,7 +16,7 @@ fn ensure_init() {
     });
 }
 
-const CHUNK_FRAMES: usize = 4096;
+pub const CHUNK_FRAMES: usize = 4096;
 
 /// Duration multiplied by `1/tempo`, same rate and channels, pitch
 /// preserved.

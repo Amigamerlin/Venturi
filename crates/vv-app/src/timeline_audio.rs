@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use vv_audio::Stretcher;
+use vv_audio::mixer::MIX_BLOCK_FRAMES;
 use vv_audio::mixer::{
     Channel, ClipInput, MixClip, MixMeters, MixSnapshot, MixState, Mixer, MixerState,
     PROJECT_SAMPLE_RATE, StretchedWindow, mix_range_from, sample_to_timeline_frame,
     timeline_frame_to_sample,
 };
+use vv_audio::{STRETCH_CHUNK_FRAMES, Stretcher};
 use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
 
 use crate::mix_buffers::MixBufferCache;
@@ -56,8 +57,11 @@ struct StretchResult {
     samples: Result<Vec<f32>, String>,
 }
 
-/// Where a window being rendered checks whether it was superseded.
-const RENDER_PIECE_FRAMES: u64 = PROJECT_SAMPLE_RATE as u64;
+/// Where a window being rendered checks whether it was superseded. A
+/// multiple of the mix block and of the stretcher chunk: the pieces cut the
+/// audio where a single call would.
+const RENDER_PIECE_FRAMES: u64 = 12 * STRETCH_CHUNK_FRAMES as u64;
+const _: () = assert!(RENDER_PIECE_FRAMES.is_multiple_of(MIX_BLOCK_FRAMES as u64));
 
 /// The mix of the window, `None` once `cancelled` turns true.
 fn mix_window(
@@ -401,7 +405,13 @@ impl TimelineAudio {
         let channels = self.channels();
         // A click seeks a few times to the same place: the window already
         // wanted from there must not be thrown away and stretched again.
-        if let Some(window) = &self.stretched
+        if self.stretched.is_none()
+            && let Some(req) = self.stretch_request
+            && req.new_window
+            && !(req.start..req.start + req.frames).contains(&sample)
+        {
+            self.want_window(req.tempo, sample);
+        } else if let Some(window) = &self.stretched
             && !(window.origin..window.covered_until(channels)).contains(&sample)
             && !(window.chunks.is_empty() && window.origin == sample)
         {
@@ -711,6 +721,12 @@ impl TimelineAudio {
     /// Per-track and master peaks of what is playing.
     pub fn meters(&self) -> &MixMeters {
         &self.mix.meters
+    }
+}
+
+impl Drop for TimelineAudio {
+    fn drop(&mut self) {
+        self.stretch_cancel.store(true, Ordering::Relaxed);
     }
 }
 

@@ -519,3 +519,43 @@ fn replacing_a_request_cancels_the_one_in_flight() {
     assert!(first.load(Ordering::Relaxed));
     assert!(!audio.stretch_cancel.load(Ordering::Relaxed));
 }
+
+#[test]
+fn a_seek_outside_the_first_window_in_flight_cancels_it() {
+    let mut audio = TimelineAudio::new();
+    audio.request_window(2, 0, true);
+    let flag = audio.stretch_cancel.clone();
+    audio.seek_sample(FIRST_WINDOW_FRAMES / 2);
+    assert!(!flag.load(Ordering::Relaxed), "a seek inside keeps it");
+    audio.seek_sample(FIRST_WINDOW_FRAMES * 5);
+    assert!(flag.load(Ordering::Relaxed));
+}
+
+#[test]
+fn dropping_the_audio_cancels_the_render() {
+    let mut audio = TimelineAudio::new();
+    audio.request_window(2, 0, true);
+    let flag = audio.stretch_cancel.clone();
+    drop(audio);
+    assert!(flag.load(Ordering::Relaxed));
+}
+
+#[test]
+fn a_window_rendered_in_pieces_equals_the_whole_stretch() {
+    if Stretcher::new(PROJECT_SAMPLE_RATE, 1, 2.0).is_err() {
+        return; // FFmpeg without rubberband
+    }
+    let audio = loaded_audio("render_equal.wav");
+    let frames = 4 * RENDER_PIECE_FRAMES + 1000;
+    let frames = frames / 2 * 2;
+    let ch = audio.mix.channels as usize;
+    let mut whole = vec![0.0; frames as usize * ch];
+    mix_range_without_plugins(&audio.mix, 0, &mut whole);
+    let mut expected =
+        vv_audio::stretch_samples(&whole, audio.mix.sample_rate, audio.mix.channels, 2.0).unwrap();
+    expected.resize((frames / 2) as usize * ch, 0.0);
+    let pieces = render_window(&audio.mix, 0, frames, 2, &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pieces, expected);
+}
