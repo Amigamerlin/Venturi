@@ -5,6 +5,7 @@ use super::*;
 const DISCORD_INVITE: &str = "https://discord.gg/3v2xjXFnZv";
 
 impl VenturiApp {
+    /// Handles configured keyboard shortcuts using the current UI frame.
     pub(crate) fn handle_shortcuts(&mut self, ui: &mut egui::Ui) {
         // Copy/paste are handled outside `ui.input`: `ctx.copy_text` takes
         // the same lock and would deadlock inside it.
@@ -222,6 +223,25 @@ impl VenturiApp {
         }
     }
 
+    /// Requests a normal close of the application's root viewport via `ctx`.
+    ///
+    /// The window close lifecycle remains responsible for saving session state
+    /// and handling any unsaved changes.
+    fn request_exit(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Draws the File menu's Exit item and requests a normal viewport close.
+    fn show_exit_menu_item(&self, ui: &mut egui::Ui) -> egui::Response {
+        let response = ui.button(t!("menu.exit"));
+        if response.clicked() {
+            self.request_exit(ui.ctx());
+            ui.close();
+        }
+        response
+    }
+
+    /// Displays the top menu bar in `ui` and dispatches selected menu actions.
     pub(crate) fn show_menu_bar(&mut self, ui: &mut egui::Ui) {
         let keymap = self.settings.keymap.clone();
         let mut set_fullscreen = None;
@@ -316,6 +336,8 @@ impl VenturiApp {
                             self.open_settings(settings_dialog::Section::General);
                             ui.close();
                         }
+                        ui.separator();
+                        self.show_exit_menu_item(ui);
                     })
                     .response,
                 );
@@ -821,3 +843,7 @@ fn switch_bar_menu_on_hover(ctx: &egui::Context, bar_menus: &[egui::Response]) {
         ctx.request_repaint();
     }
 }
+
+#[cfg(test)]
+#[path = "tests/app_menu.rs"]
+mod tests;
