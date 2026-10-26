@@ -508,10 +508,15 @@ fn a_cancelled_window_stops_mixing_between_pieces() {
         polls.set(polls.get() + 1);
         polls.get() > 2
     };
+    let mut pieces = 0;
     // Without a stretcher, so it runs without rubberband.
-    let mixed = mix_pieces(&audio.mix, 0, WINDOW_FRAMES, &cancelled, &mut |_| Ok(()));
+    let mixed = mix_pieces(&audio.mix, 0, WINDOW_FRAMES, &cancelled, &mut |_| {
+        pieces += 1;
+        Ok(())
+    });
     assert!(mixed.is_none());
-    assert_eq!(polls.get(), 3, "no piece mixed after the cancel");
+    assert_eq!(polls.get(), 3);
+    assert_eq!(pieces, 2, "no piece mixed after the cancel");
 }
 
 #[test]
@@ -552,7 +557,6 @@ fn a_window_rendered_in_pieces_equals_the_whole_stretch() {
     }
     let audio = loaded_audio("render_equal.wav");
     let frames = 4 * RENDER_PIECE_FRAMES + 1000;
-    let frames = frames / 2 * 2;
     let ch = audio.mix.channels as usize;
     let mut whole = vec![0.0; frames as usize * ch];
     mix_range_without_plugins(&audio.mix, 0, &mut whole);

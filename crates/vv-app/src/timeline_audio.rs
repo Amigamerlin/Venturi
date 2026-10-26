@@ -8,10 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use vv_audio::mixer::MIX_BLOCK_FRAMES;
 use vv_audio::mixer::{
-    Channel, ClipInput, MixClip, MixMeters, MixSnapshot, MixState, Mixer, MixerState,
-    PROJECT_SAMPLE_RATE, StretchedWindow, mix_range_from, sample_to_timeline_frame,
+    Channel, ClipInput, MIX_BLOCK_FRAMES, MixClip, MixMeters, MixSnapshot, MixState, Mixer,
+    MixerState, PROJECT_SAMPLE_RATE, StretchedWindow, mix_range_from, sample_to_timeline_frame,
     timeline_frame_to_sample,
 };
 use vv_audio::{STRETCH_CHUNK_FRAMES, Stretcher};
