@@ -1,5 +1,117 @@
 use super::*;
 
+fn menu_frame(
+    app: &mut VenturiApp,
+    ctx: &egui::Context,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    let mut input = egui::RawInput::default();
+    input.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(1280.0, 900.0),
+    ));
+    input.events = events;
+    let mut output = ctx.run_ui(input, |ui| app.show_menu_bar(ui));
+    output.textures_delta.clear();
+    output
+}
+
+fn menu_text_position(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+    fn find(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|shape| find(shape, label)),
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|shape| find(&shape.shape, label))
+        .unwrap_or_else(|| panic!("menu entry {label:?} was not rendered"))
+}
+
+fn click_menu_position(
+    app: &mut VenturiApp,
+    ctx: &egui::Context,
+    pos: egui::Pos2,
+) -> egui::FullOutput {
+    for pressed in [true, false] {
+        menu_frame(
+            app,
+            ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    menu_frame(app, ctx, Vec::new())
+}
+
+#[test]
+fn timeline_menu_registers_both_export_mark_actions() {
+    let mut app = VenturiApp::default();
+    let timeline = app.ensure_timeline();
+    let id = app.session.project.alloc_clip_id();
+    app.session.project.timelines[timeline].tracks[0]
+        .clips
+        .push(vv_core::Clip::from_source_range(
+            id,
+            vv_core::ClipSource::SolidColor,
+            0,
+            100,
+            0,
+            vv_core::Rational::one(),
+        ));
+    let ctx = egui::Context::default();
+    for (action, frame) in [(Action::MarkIn, 20), (Action::MarkOut, 59)] {
+        app.timeline_state.playhead = frame;
+        let output = menu_frame(&mut app, &ctx, Vec::new());
+        let pos = menu_text_position(&output, &t!("menu.timeline"));
+        let output = click_menu_position(&mut app, &ctx, pos);
+        let label = app.settings.keymap.menu_label(&action.label(), action);
+        let pos = menu_text_position(&output, &label);
+        click_menu_position(&mut app, &ctx, pos);
+        assert_eq!(
+            app.timeline_state.export_marks.resolve(100),
+            if frame == 20 { (20, 100) } else { (20, 60) }
+        );
+    }
+}
+
+#[test]
+fn mark_menu_items_stay_disabled_on_an_empty_timeline() {
+    let mut app = VenturiApp::default();
+    let timeline = app.ensure_timeline();
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        assert!(!app.show_mark_menu_item(ui, true).enabled());
+        assert!(!app.show_mark_menu_item(ui, false).enabled());
+    });
+    output.textures_delta.clear();
+    click_mark_item(&mut app, false);
+    let id = app.session.project.alloc_clip_id();
+    app.session.project.timelines[timeline].tracks[0]
+        .clips
+        .push(vv_core::Clip::from_source_range(
+            id,
+            vv_core::ClipSource::SolidColor,
+            0,
+            100,
+            0,
+            vv_core::Rational::one(),
+        ));
+    assert_eq!(app.timeline_state.export_marks.resolve(100), (0, 100));
+}
+
 fn click_mark_item(app: &mut VenturiApp, is_in: bool) {
     let ctx = egui::Context::default();
     let mut rect = egui::Rect::NOTHING;
