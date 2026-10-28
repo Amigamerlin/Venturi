@@ -1,8 +1,8 @@
 _version: 2
 
 export.range_mark_hint:
-  en: "Return to the timeline, then set In and Out from the Timeline menu or shortcuts to export a range. With a preview active, these actions mark the preview."
-  it: "Torna alla timeline, poi imposta In e Out dal menu Timeline o con le scorciatoie per esportare un intervallo. Con un'anteprima attiva, queste azioni impostano i marcatori dell'anteprima."
+  en: "To export only a range, set In and Out from the Timeline menu."
+  it: "Per esportare solo un intervallo, imposta In e Out dal menu Timeline."
 
 export.title:
   en: "Export"

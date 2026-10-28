@@ -5,30 +5,6 @@ use super::*;
 const DISCORD_INVITE: &str = "https://discord.gg/3v2xjXFnZv";
 
 impl VenturiApp {
-    fn show_mark_menu_item(&mut self, ui: &mut egui::Ui, is_in: bool) -> egui::Response {
-        let action = if is_in {
-            Action::MarkIn
-        } else {
-            Action::MarkOut
-        };
-        let response = ui.add_enabled(
-            if self.browsing.is_some() {
-                self.preview_error.is_none()
-                    && self.browsing_item().is_some()
-                    && self.browse_total_frames() > 0
-            } else {
-                self.timeline_id
-                    .is_some_and(|id| self.session.project.timelines[id].total_frames() > 0)
-            },
-            egui::Button::new(self.settings.keymap.menu_label(&action.label(), action)),
-        );
-        if response.clicked() {
-            self.mark_at_playhead(is_in);
-            ui.close();
-        }
-        response
-    }
-
     /// Handles configured keyboard shortcuts using the current UI frame.
     pub(crate) fn handle_shortcuts(&mut self, ui: &mut egui::Ui) {
         // Copy/paste are handled outside `ui.input`: `ctx.copy_text` takes
@@ -490,9 +466,6 @@ impl VenturiApp {
 
                 bar_menus.push(
                     ui.menu_button(t!("menu.timeline"), |ui| {
-                        self.show_mark_menu_item(ui, true);
-                        self.show_mark_menu_item(ui, false);
-                        ui.separator();
                         // Checkboxes: they stay open on click, unlike the
                         // action buttons elsewhere in the menus.
                         ui.checkbox(
@@ -552,6 +525,19 @@ impl VenturiApp {
                         {
                             self.add_marker_at_playhead();
                             ui.close();
+                        }
+                        let can_mark = self.mark_target_frames() > 0;
+                        for (action, is_in) in [(Action::MarkIn, true), (Action::MarkOut, false)] {
+                            if ui
+                                .add_enabled(
+                                    can_mark,
+                                    egui::Button::new(keymap.menu_label(&action.label(), action)),
+                                )
+                                .clicked()
+                            {
+                                self.mark_at_playhead(is_in);
+                                ui.close();
+                            }
                         }
                     })
                     .response,
