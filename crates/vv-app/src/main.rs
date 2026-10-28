@@ -4162,6 +4162,12 @@ impl VenturiApp {
             }
         }
         self.sync_timeline_audio();
+        if let Some(audio) = &self.timeline_audio
+            && let Some(at) = audio.next_retry()
+        {
+            ui.ctx()
+                .request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
+        }
         self.sync_window_title(ui.ctx());
 
         self.handle_shortcuts(ui);
