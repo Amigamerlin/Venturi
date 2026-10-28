@@ -12,10 +12,14 @@ impl VenturiApp {
             Action::MarkOut
         };
         let response = ui.add_enabled(
-            self.browsing.is_some()
-                || self
-                    .timeline_id
-                    .is_some_and(|id| self.session.project.timelines[id].total_frames() > 0),
+            if self.browsing.is_some() {
+                self.preview_error.is_none()
+                    && self.browsing_item().is_some()
+                    && self.browse_total_frames() > 0
+            } else {
+                self.timeline_id
+                    .is_some_and(|id| self.session.project.timelines[id].total_frames() > 0)
+            },
             egui::Button::new(self.settings.keymap.menu_label(&action.label(), action)),
         );
         if response.clicked() {

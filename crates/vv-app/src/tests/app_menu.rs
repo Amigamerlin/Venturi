@@ -1,5 +1,69 @@
 use super::*;
 
+#[test]
+fn mark_menu_items_follow_the_active_preview_without_a_timeline_fallback() {
+    let mut app = VenturiApp::default();
+    let timeline = app.ensure_timeline();
+    let clip = app.session.project.alloc_clip_id();
+    app.session.project.timelines[timeline].tracks[0]
+        .clips
+        .push(vv_core::Clip::from_source_range(
+            clip,
+            vv_core::ClipSource::SolidColor,
+            0,
+            100,
+            0,
+            vv_core::Rational::one(),
+        ));
+    let meta = vv_core::MediaMeta {
+        duration_frames: 100,
+        fps: vv_core::Rational::new(25, 1),
+        width: 64,
+        height: 48,
+        has_video: true,
+        has_audio: false,
+        sample_rate: 0,
+        channels: 0,
+        audio_streams: 0,
+        file: Default::default(),
+    };
+    let media = app.session.project.media_pool.insert(vv_core::MediaItem {
+        path: "preview.mp4".into(),
+        meta: meta.clone(),
+        content_hash: 1,
+        compound: None,
+        folder: None,
+    });
+    app.browsing = Some(Browsed::Media(media));
+    app.preview_meta = Some(meta.clone());
+    app.preview_error = Some("cannot open preview".into());
+    let check_enabled = |app: &mut VenturiApp, expected: bool| {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for is_in in [true, false] {
+                assert_eq!(app.show_mark_menu_item(ui, is_in).enabled(), expected);
+            }
+        });
+        output.textures_delta.clear();
+    };
+    check_enabled(&mut app, false);
+    click_mark_item(&mut app, false);
+    assert_eq!(app.browse_marks.resolve(100), (0, 100));
+    app.preview_error = None;
+    app.preview_meta = None;
+    check_enabled(&mut app, false);
+    app.preview_meta = Some(meta);
+    check_enabled(&mut app, true);
+    app.browse_playhead = 20;
+    click_mark_item(&mut app, true);
+    app.browse_playhead = 59;
+    click_mark_item(&mut app, false);
+    assert_eq!(app.browse_marks.resolve(100), (20, 60));
+    assert_eq!(app.timeline_state.export_marks.resolve(100), (0, 100));
+    app.session.project.media_pool.remove(media);
+    check_enabled(&mut app, false);
+}
+
 fn menu_frame(
     app: &mut VenturiApp,
     ctx: &egui::Context,
