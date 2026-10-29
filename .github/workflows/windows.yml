@@ -28,9 +28,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # dumpbin and lib, for the import libraries below.
-      - uses: ilammy/msvc-dev-cmd@v1
-
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.FFMPEG_NAME }}
@@ -52,24 +49,12 @@ jobs:
           if (-not (Test-Path "$llvm\libclang.dll")) { choco install llvm -y --no-progress }
           "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV
 
-      # MSVC links to `avcodec.lib`; builds that only ship MinGW's
-      # `.dll.a` get one generated from the DLL's exports.
+      # MSVC links to `avcodec.lib` and friends, which BtbN's shared builds ship.
       - name: Import libraries
         shell: pwsh
         run: |
-          $dlls = Get-ChildItem "$env:FFMPEG_DIR\bin\*.dll" | Where-Object Name -Match '^(av|sw|postproc)'
-          foreach ($dll in $dlls) {
-            $name = $dll.BaseName -replace '-\d+$', ''
-            $lib = "$env:FFMPEG_DIR\lib\$name.lib"
-            if (Test-Path $lib) { continue }
-            Write-Host "generating $name.lib"
-            $exports = dumpbin /nologo /exports $dll.FullName |
-              Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)' |
-              ForEach-Object { $_.Matches[0].Groups[1].Value }
-            $def = "$env:RUNNER_TEMP\$name.def"
-            @("LIBRARY $($dll.Name)", "EXPORTS") + $exports | Set-Content $def
-            lib /nologo /machine:x64 /def:$def /out:$lib
-            if ($LASTEXITCODE -ne 0) { throw "lib failed for $name" }
+          foreach ($name in 'avcodec', 'avdevice', 'avfilter', 'avformat', 'avutil', 'swresample', 'swscale') {
+            if (-not (Test-Path "$env:FFMPEG_DIR\lib\$name.lib")) { throw "$name.lib missing from the FFmpeg build" }
           }
 
       - name: FFmpeg features
@@ -82,9 +67,6 @@ jobs:
           }
           if ($filters -match ' rubberband ') { 'found filter rubberband' }
           else { '::warning::FFmpeg has no rubberband filter: clip speed changes will fail' }
-
-      - name: Test vv-core
-        run: cargo test -p vv-core
 
       - name: Build
         run: cargo build -p vv-app --release
@@ -111,6 +93,10 @@ jobs:
           name: Venturi-windows-x64
           path: dist/Venturi
           if-no-files-found: error
+
+      # After the upload: a failing test must not cost the zip.
+      - name: Test vv-core
+        run: cargo test -p vv-core
 
       # Starting the MCP server loads every DLL and answers on stdout
       # without needing a desktop. FFmpeg's folder leaves PATH so the DLLs
