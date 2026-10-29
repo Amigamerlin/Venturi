@@ -168,6 +168,18 @@ settings.language:
 settings.language_system:
   en: System default
   it: Predefinita di sistema
+settings.theme:
+  en: Theme
+  it: Tema
+settings.theme_system:
+  en: System default
+  it: Predefinito di sistema
+settings.theme_dark:
+  en: Dark
+  it: Scuro
+settings.theme_light:
+  en: Light
+  it: Chiaro
 settings.kinetic_scroll:
   en: Kinetic scrolling on the timeline
   it: Scrolling cinetico sulla timeline

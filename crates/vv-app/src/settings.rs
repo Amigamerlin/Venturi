@@ -593,6 +593,7 @@ pub const AUDIO_BUDGET_MB: std::ops::RangeInclusive<u32> = 100..=32000;
 pub struct Settings {
     pub keymap: Keymap,
     pub language: Language,
+    pub theme: crate::theme::ThemeChoice,
     /// Kinetic scrolling (inertia after a touchpad swipe) on the timeline.
     pub kinetic_scroll: bool,
     pub kinetic_scroll_media_pool: bool,
@@ -686,6 +687,7 @@ impl Default for Settings {
         Self {
             keymap: Keymap::default(),
             language: Language::default(),
+            theme: crate::theme::ThemeChoice::default(),
             kinetic_scroll: true,
             kinetic_scroll_media_pool: true,
             proxy_enabled: false,
@@ -738,6 +740,8 @@ struct SettingsFile {
     shortcuts: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    theme: Option<String>,
     #[serde(default)]
     kinetic_scroll: Option<bool>,
     #[serde(default)]
@@ -933,6 +937,11 @@ impl Settings {
             .as_deref()
             .and_then(Language::from_id)
             .unwrap_or_default();
+        settings.theme = file
+            .theme
+            .as_deref()
+            .and_then(crate::theme::ThemeChoice::from_id)
+            .unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
         settings.kinetic_scroll_media_pool = file.kinetic_scroll_media_pool.unwrap_or(true);
         settings.proxy_enabled = file.use_proxies.unwrap_or(settings.proxy_enabled);
@@ -1051,6 +1060,7 @@ impl Settings {
                 })
                 .collect(),
             language: Some(self.language.id().to_owned()),
+            theme: Some(self.theme.id().to_owned()),
             kinetic_scroll: Some(self.kinetic_scroll),
             kinetic_scroll_media_pool: Some(self.kinetic_scroll_media_pool),
             use_proxies: Some(self.proxy_enabled),

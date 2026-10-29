@@ -5031,6 +5031,7 @@ fn main() -> eframe::Result<()> {
             }
             app.settings = settings;
             app.settings.language.apply();
+            app.settings.theme.apply(&cc.egui_ctx);
             // Seeded even when empty so nothing scans on the UI thread.
             vv_plugin::set_installed(app.settings.vst3_plugins.clone().unwrap_or_default());
             if app.settings.needs_plugin_scan() {

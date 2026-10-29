@@ -61,6 +61,7 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
         .assign(Action::Split, Some(0), Shortcut::ctrl(egui::Key::K));
     settings.keymap.remove(Action::ZoomIn, 1);
     settings.language = Language::Italian;
+    settings.theme = crate::theme::ThemeChoice::Light;
     settings.proxy_enabled = true;
     settings.proxy_quality = ProxyQuality::High;
     settings.preview_resolution = PreviewResolution::Quarter;
@@ -514,4 +515,12 @@ fn the_scanned_state_is_written_as_before() {
         (serde_json::json!([]), serde_json::json!(true))
     );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn the_theme_is_dark_unless_chosen() {
+    assert_eq!(Settings::default().theme, crate::theme::ThemeChoice::Dark);
+    for theme in crate::theme::ThemeChoice::ALL {
+        assert_eq!(crate::theme::ThemeChoice::from_id(theme.id()), Some(theme));
+    }
 }

@@ -261,6 +261,25 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     if changed {
         settings.language.apply();
     }
+    ui.horizontal(|ui| {
+        ui.label(t!("settings.theme"));
+        let items: Vec<_> = crate::theme::ThemeChoice::ALL
+            .iter()
+            .map(|theme| (*theme, theme.label().to_string(), true))
+            .collect();
+        if preview_combo(
+            ui,
+            "settings_theme",
+            &mut settings.theme,
+            &items,
+            None,
+            None,
+            None,
+        ) {
+            settings.theme.apply(ui.ctx());
+            changed = true;
+        }
+    });
     changed |= ui
         .checkbox(&mut settings.kinetic_scroll, t!("settings.kinetic_scroll"))
         .changed();
