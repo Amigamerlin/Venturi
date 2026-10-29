@@ -1,0 +1,131 @@
+name: Windows
+
+# venturi.exe with FFmpeg's DLLs, ready to unzip and run. Run it by hand from
+# the Actions tab, or let a push to master or a v* tag start it; a tag also
+# attaches the zip to that release.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+env:
+  # BtbN's rolling build of the FFmpeg branch scripts/build-ffmpeg.sh pins.
+  FFMPEG_NAME: ffmpeg-n9.0-latest-win64-gpl-shared-9.0
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # build.rs names the version with `git describe`.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # dumpbin and lib, for the import libraries below.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.FFMPEG_NAME }}
+
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "$env:FFMPEG_URL/$env:FFMPEG_NAME.zip" -OutFile "$env:RUNNER_TEMP\ffmpeg.zip"
+          Expand-Archive "$env:RUNNER_TEMP\ffmpeg.zip" -DestinationPath $env:RUNNER_TEMP
+          $dir = Join-Path $env:RUNNER_TEMP $env:FFMPEG_NAME
+          if (-not (Test-Path "$dir\include\libavcodec\avcodec.h")) { throw "unexpected FFmpeg layout in $dir" }
+          "FFMPEG_DIR=$dir" >> $env:GITHUB_ENV
+          "$dir\bin" >> $env:GITHUB_PATH
+
+      - name: libclang
+        shell: pwsh
+        run: |
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$llvm\libclang.dll")) { choco install llvm -y --no-progress }
+          "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV
+
+      # MSVC links to `avcodec.lib`; builds that only ship MinGW's
+      # `.dll.a` get one generated from the DLL's exports.
+      - name: Import libraries
+        shell: pwsh
+        run: |
+          $dlls = Get-ChildItem "$env:FFMPEG_DIR\bin\*.dll" | Where-Object Name -Match '^(av|sw|postproc)'
+          foreach ($dll in $dlls) {
+            $name = $dll.BaseName -replace '-\d+$', ''
+            $lib = "$env:FFMPEG_DIR\lib\$name.lib"
+            if (Test-Path $lib) { continue }
+            Write-Host "generating $name.lib"
+            $exports = dumpbin /nologo /exports $dll.FullName |
+              Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value }
+            $def = "$env:RUNNER_TEMP\$name.def"
+            @("LIBRARY $($dll.Name)", "EXPORTS") + $exports | Set-Content $def
+            lib /nologo /machine:x64 /def:$def /out:$lib
+            if ($LASTEXITCODE -ne 0) { throw "lib failed for $name" }
+          }
+
+      - name: FFmpeg features
+        shell: pwsh
+        run: |
+          $encoders = (ffmpeg -hide_banner -encoders) -join "`n"
+          $filters = (ffmpeg -hide_banner -filters) -join "`n"
+          foreach ($e in 'libx264', 'h264_nvenc', 'h264_amf', 'h264_vulkan', 'aac') {
+            if ($encoders -match " $e ") { "found encoder $e" } else { "::warning::FFmpeg has no encoder $e" }
+          }
+          if ($filters -match ' rubberband ') { 'found filter rubberband' }
+          else { '::warning::FFmpeg has no rubberband filter: clip speed changes will fail' }
+
+      - name: Test vv-core
+        run: cargo test -p vv-core
+
+      - name: Build
+        run: cargo build -p vv-app --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "dist\Venturi"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item target\release\vv-app.exe "$out\venturi.exe"
+          Copy-Item "$env:FFMPEG_DIR\bin\*.dll" $out
+          Copy-Item "$env:FFMPEG_DIR\LICENSE.txt" "$out\FFMPEG-LICENSE.txt" -ErrorAction SilentlyContinue
+          # The VC++ runtime, for PCs that never installed it.
+          foreach ($dll in 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item "C:\Windows\System32\$dll" $out -ErrorAction SilentlyContinue
+          }
+          Copy-Item packaging\windows\* $out
+          Copy-Item media\icons\windows\venturi-video.ico $out
+          Copy-Item LICENSE "$out\LICENSE.txt"
+          Compress-Archive -Path $out -DestinationPath dist\Venturi-windows-x64.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Venturi-windows-x64
+          path: dist/Venturi
+          if-no-files-found: error
+
+      # Starting the MCP server loads every DLL and answers on stdout
+      # without needing a desktop. FFmpeg's folder leaves PATH so the DLLs
+      # must come from the package.
+      - name: Smoke test
+        shell: bash
+        run: |
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -vi ffmpeg | paste -sd:)
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | timeout 120 dist/Venturi/venturi.exe mcp > mcp.out 2> mcp.err || echo "exit code $?"
+          cat mcp.out mcp.err
+          grep -q serverInfo mcp.out
+
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/Venturi-windows-x64.zip
+          fail_on_unmatched_files: true
