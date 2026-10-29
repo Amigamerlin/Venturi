@@ -17,11 +17,16 @@ pub use wgpu;
 
 /// The Vulkan adapters of the machine, without opening them.
 pub fn vulkan_adapters() -> Vec<wgpu::AdapterInfo> {
+    adapters(wgpu::Backends::VULKAN)
+}
+
+/// The adapters of `backends`, without opening them.
+pub fn adapters(backends: wgpu::Backends) -> Vec<wgpu::AdapterInfo> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+    pollster::block_on(instance.enumerate_adapters(backends))
         .iter()
         .map(|adapter| adapter.get_info())
         .collect()

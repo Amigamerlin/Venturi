@@ -135,6 +135,12 @@ settings.hw_decode_vulkan:
 settings.hw_decode_vulkan_hint:
   en: "Any GPU whose driver supports Vulkan video decoding (Intel, AMD, NVIDIA): on a laptop with two GPUs, the discrete one."
   it: "Qualsiasi GPU il cui driver supporti la decodifica Vulkan video (Intel, AMD, NVIDIA): su un portatile con due GPU, quella dedicata."
+settings.hw_decode_d3d11va:
+  en: "Direct3D 11 (D3D11VA)"
+  it: "Direct3D 11 (D3D11VA)"
+settings.hw_decode_d3d11va_hint:
+  en: "Windows' own video decoder: works with any GPU (AMD, Intel, NVIDIA), on the one Windows uses by default."
+  it: "Il decodificatore video di Windows: funziona con qualsiasi GPU (AMD, Intel, NVIDIA), su quella che Windows usa di default."
 settings.hw_decode_failed:
   en: "⚠ %{devices} cannot decode video on this machine: decoding on the CPU."
   it: "⚠ %{devices} non può decodificare video su questa macchina: si decodifica sulla CPU."

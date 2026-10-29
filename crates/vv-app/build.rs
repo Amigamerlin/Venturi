@@ -15,6 +15,18 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=VV_VERSION={version}");
 
+    #[cfg(windows)]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let mut resource = winresource::WindowsResource::new();
+        resource
+            .set_icon("../../media/icons/windows/venturi-video.ico")
+            .set("ProductName", "Venturi")
+            .set("FileDescription", "Venturi video editor");
+        if let Err(e) = resource.compile() {
+            println!("cargo:warning=venturi.exe built without its icon: {e}");
+        }
+    }
+
     // Without these the build script doesn't rerun on every commit and the version goes stale.
     if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
         let git_dir = Path::new(&git_dir);

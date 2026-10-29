@@ -435,6 +435,10 @@ fn hw_decode_settings(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
                 t!("settings.hw_decode_vulkan"),
                 Some(t!("settings.hw_decode_vulkan_hint")),
             ),
+            HwDecodeMode::D3d11va => (
+                t!("settings.hw_decode_d3d11va"),
+                Some(t!("settings.hw_decode_d3d11va_hint")),
+            ),
         };
         let response = ui.radio_value(&mut settings.hw_decode, mode, label);
         let response = match hint {

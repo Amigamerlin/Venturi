@@ -27,6 +27,9 @@ vv-plugin = { path = "../vv-plugin" }
 vv-session = { path = "../vv-session" }
 
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Direct dependency only for the feature: without it, winit's client-side
 # decorations draw the buttons but not the window title.
@@ -34,6 +37,9 @@ winit = { version = "0.30.13", features = ["wayland-csd-adwaita"] }
 raw-window-handle = "0.6.2"
 sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false }
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "=0.1.31"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync"] }

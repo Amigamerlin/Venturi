@@ -1,4 +1,4 @@
-//! Encoding + muxing into MP4 (H.264 x264/NVENC/VideoToolbox/Vulkan + AAC). It receives already
+//! Encoding + muxing into MP4 (H.264 x264/NVENC/AMF/VideoToolbox/Vulkan + AAC). It receives already
 //! composited I420 frames (BT.709 limited) and already mixed PCM; it only
 //! converts the audio into the AAC encoder's native format.
 
@@ -18,18 +18,35 @@ pub enum VideoCodec {
     Nvenc,
     VideoToolbox,
     Vulkan,
+    /// AMD's AMF, Windows only (on Linux it needs the proprietary driver).
+    Amf,
 }
 
 impl VideoCodec {
-    pub const ALL: [Self; 4] = [Self::X264, Self::Nvenc, Self::VideoToolbox, Self::Vulkan];
+    pub const ALL: [Self; 5] = [
+        Self::X264,
+        Self::Nvenc,
+        Self::VideoToolbox,
+        Self::Vulkan,
+        Self::Amf,
+    ];
 
     /// The encoders that can exist on this platform.
     pub fn choices() -> &'static [Self] {
         if cfg!(target_os = "macos") {
             &[Self::X264, Self::VideoToolbox]
+        } else if cfg!(windows) {
+            &[Self::X264, Self::Nvenc, Self::Amf, Self::Vulkan]
         } else {
             &[Self::X264, Self::Nvenc, Self::Vulkan]
         }
+    }
+
+    /// The GPU encoders an export picks by default, best first.
+    pub fn preferred_gpu() -> impl Iterator<Item = Self> {
+        [Self::Nvenc, Self::Amf]
+            .into_iter()
+            .filter(|codec| Self::choices().contains(codec))
     }
 
     fn ffmpeg_name(self) -> &'static str {
@@ -38,6 +55,7 @@ impl VideoCodec {
             Self::Nvenc => "h264_nvenc",
             Self::VideoToolbox => "h264_videotoolbox",
             Self::Vulkan => "h264_vulkan",
+            Self::Amf => "h264_amf",
         }
     }
 
@@ -56,6 +74,7 @@ impl VideoCodec {
                 "veryslow",
             ],
             Self::Nvenc => &["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+            Self::Amf => &["speed", "balanced", "quality"],
             Self::VideoToolbox | Self::Vulkan => &[],
         }
     }
@@ -66,6 +85,7 @@ impl VideoCodec {
             // ~2× larger files.
             Self::X264 => "superfast",
             Self::Nvenc => "p5",
+            Self::Amf => "balanced",
             Self::VideoToolbox | Self::Vulkan => "",
         }
     }
@@ -73,7 +93,7 @@ impl VideoCodec {
     /// The scale of `VideoSettings::quality`.
     pub fn quality_range(self) -> std::ops::RangeInclusive<u8> {
         match self {
-            Self::X264 | Self::Nvenc | Self::Vulkan => 0..=51,
+            Self::X264 | Self::Nvenc | Self::Vulkan | Self::Amf => 0..=51,
             Self::VideoToolbox => 1..=100,
         }
     }
@@ -88,7 +108,7 @@ impl VideoCodec {
         match self {
             Self::X264 | Self::Nvenc => 20,
             // A constant QP spends more than a CRF at the same number.
-            Self::Vulkan => 23,
+            Self::Vulkan | Self::Amf => 23,
             Self::VideoToolbox => 65,
         }
     }
@@ -119,7 +139,8 @@ impl VideoCodec {
     /// Like `is_available` without blocking: the first call starts the check
     /// on a thread, `None` until it is done.
     pub fn availability(self) -> Option<bool> {
-        static STARTED: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+        static STARTED: [AtomicBool; VideoCodec::ALL.len()] =
+            [const { AtomicBool::new(false) }; VideoCodec::ALL.len()];
         if let Some(&available) = AVAILABLE[self as usize].get() {
             return Some(available);
         }
@@ -163,7 +184,8 @@ impl VideoCodec {
     }
 }
 
-static AVAILABLE: [OnceLock<bool>; 4] = [const { OnceLock::new() }; 4];
+static AVAILABLE: [OnceLock<bool>; VideoCodec::ALL.len()] =
+    [const { OnceLock::new() }; VideoCodec::ALL.len()];
 
 /// Red in BT.709 limited range: Y, U and V all far from each other and from
 /// the neutral 128, so a swapped or missing chroma plane shows.
@@ -602,6 +624,14 @@ fn open_video_encoder(
             opts.set("rc_mode", "cqp");
             opts.set("qp", &quality);
             nv12 = Some(ffmpeg::frame::Video::new(Pixel::NV12, width, height));
+        }
+        VideoCodec::Amf => {
+            // Older FFmpeg names the speed/quality choice `quality` only.
+            opts.set("quality", &settings.preset);
+            opts.set("rc", "cqp");
+            opts.set("qp_i", &quality);
+            opts.set("qp_p", &quality);
+            opts.set("qp_b", &quality);
         }
     }
     ctx.set_flags(flags);

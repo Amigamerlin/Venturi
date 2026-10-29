@@ -50,12 +50,12 @@ impl ExportSettings {
     }
 
     /// Like `new`, but with the fastest encoders available on this
-    /// machine (NVENC, FDK). `new` stays deterministic for the tests.
-    /// Blocks on the NVENC check, up to a second the first time.
+    /// machine (NVENC or AMF, FDK). `new` stays deterministic for the tests.
+    /// Blocks on the GPU encoder checks, up to a second the first time.
     pub fn preferred(output_path: PathBuf) -> Self {
         let mut settings = Self::with_preferred_audio(output_path);
-        if vv_media::VideoCodec::Nvenc.is_available() {
-            settings.video = vv_media::VideoSettings::for_codec(vv_media::VideoCodec::Nvenc);
+        if let Some(codec) = vv_media::VideoCodec::preferred_gpu().find(|c| c.is_available()) {
+            settings.video = vv_media::VideoSettings::for_codec(codec);
         }
         settings
     }

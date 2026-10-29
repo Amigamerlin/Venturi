@@ -1,6 +1,9 @@
 //! egui window: media pool, viewer, properties panel, timeline. The
 //! viewer composes on the GPU the active clips of all the video tracks and passes
 //! the texture to egui-wgpu without readback (plans/REFACTOR_PIPELINE.md B2).
+// No console window behind the app; `venturi mcp` still talks over the
+// pipes its client hands it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[macro_use]
 extern crate rust_i18n;

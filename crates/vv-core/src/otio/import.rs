@@ -1221,7 +1221,10 @@ fn url_to_path(url: &str, base_dir: &Path) -> Option<PathBuf> {
         }
         return Some(base_dir.join(url));
     };
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let rest = match rest.strip_prefix("localhost") {
+        Some(path) if path.is_empty() || path.starts_with('/') => path,
+        _ => rest,
+    };
     let mut bytes = Vec::with_capacity(rest.len());
     let mut iter = rest.bytes();
     while let Some(byte) = iter.next() {
@@ -1232,7 +1235,26 @@ fn url_to_path(url: &str, base_dir: &Path) -> Option<PathBuf> {
             bytes.push(byte);
         }
     }
-    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+    let path = String::from_utf8(bytes).ok()?;
+    Some(PathBuf::from(if cfg!(windows) {
+        windows_path(&path)
+    } else {
+        path
+    }))
+}
+
+/// The path part of a `file://` URL as a Windows path: `/C:/a` is `C:\a`,
+/// a host (`server/share/a`) is the UNC `\\server\share\a`.
+pub(crate) fn windows_path(url_path: &str) -> String {
+    let bytes = url_path.as_bytes();
+    let path = if bytes.first() == Some(&b'/') && bytes.get(2) == Some(&b':') {
+        url_path[1..].to_owned()
+    } else if bytes.first() != Some(&b'/') && bytes.get(1) != Some(&b':') {
+        format!("//{url_path}")
+    } else {
+        url_path.to_owned()
+    };
+    path.replace('/', "\\")
 }
 
 #[cfg(test)]

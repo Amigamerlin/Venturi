@@ -1,0 +1,31 @@
+Venturi per Windows
+===================
+
+AVVIO
+1. Estrai tutta la cartella dove vuoi (non avviare l'exe da dentro lo zip).
+2. Doppio clic su  venturi.exe.
+   Facoltativo: crea_collegamento.bat mette l'icona "Venturi" sul Desktop.
+Non serve installare nient'altro: FFmpeg e' gia' dentro la cartella (i file .dll).
+Lascia i file .dll accanto a venturi.exe.
+
+SCHEDA VIDEO
+Serve un driver video aggiornato (AMD Adrenalin, NVIDIA o Intel).
+- Decodifica (Impostazioni > Riproduzione):
+  Automatico = NVIDIA NVDEC se c'e' una scheda NVIDIA, altrimenti
+  Direct3D 11 (D3D11VA, va con AMD, Intel e NVIDIA), poi Vulkan.
+- Esportazione: H.264 con NVENC (NVIDIA), AMF (AMD), Vulkan oppure x264 (CPU).
+  Venturi sceglie da solo il piu' veloce che funziona sul PC.
+
+COSA NON C'E' SU WINDOWS
+- Plugin VST3 (equalizzatore, compressore e normalizzazione interni ci sono).
+- Collegamento di un agente AI alla finestra gia' aperta
+  (la modalita' separata "venturi.exe mcp" funziona).
+
+DOVE SALVA LE SUE COSE
+Impostazioni e libreria: %APPDATA%\venturi
+Cache (proxy, forme d'onda): %LOCALAPPDATA%\venturi
+
+ATTENZIONE
+Venturi e' in versione alpha: il formato dei progetti puo' cambiare tra una
+versione e l'altra. Tieni una copia dei progetti importanti.
+Licenza: GPL-3.0 (LICENSE.txt). FFmpeg: FFMPEG-LICENSE.txt.

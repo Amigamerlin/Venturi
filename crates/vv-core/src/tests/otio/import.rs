@@ -1320,3 +1320,21 @@ fn a_reverse_speed_still_warns() {
     let clip = &imported.project.timelines.values().next().unwrap().tracks[0].clips[0];
     assert_eq!(clip.freeze, None);
 }
+
+#[test]
+fn windows_url_paths_become_windows_paths() {
+    assert_eq!(windows_path("/C:/Users/Me/a.mp4"), r"C:\Users\Me\a.mp4");
+    assert_eq!(windows_path("server/share/a.mov"), r"\\server\share\a.mov");
+}
+#[test]
+fn localhost_is_only_stripped_as_a_whole_host() {
+    let base = Path::new("/base");
+    assert_eq!(
+        url_to_path("file://localhost/a.mov", base),
+        Some(PathBuf::from("/a.mov"))
+    );
+    assert_eq!(
+        url_to_path("file://localhost-nas/a.mov", base),
+        Some(PathBuf::from("localhost-nas/a.mov"))
+    );
+}

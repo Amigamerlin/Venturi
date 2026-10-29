@@ -280,16 +280,41 @@ fn time_range(start: FrameIdx, duration: FrameIdx, fps: Rational) -> Value {
 
 fn file_url(path: &Path) -> String {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    path_to_url(&absolute.to_string_lossy(), cfg!(windows))
+}
+
+/// Windows paths become `file:///C:/dir/f.mp4` and `file://server/share/f.mp4`,
+/// the form Resolve writes and reads there.
+pub(crate) fn path_to_url(path: &str, windows: bool) -> String {
+    let path = if windows {
+        windows_url_path(path)
+    } else {
+        path.to_owned()
+    };
     let mut url = String::from("file://");
-    for byte in absolute.to_string_lossy().bytes() {
+    for byte in path.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 url.push(byte as char)
             }
+            b':' if windows => url.push(':'),
             _ => url.push_str(&format!("%{byte:02X}")),
         }
     }
     url
+}
+
+fn windows_url_path(path: &str) -> String {
+    let path = match path.strip_prefix(r"\\?\UNC\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
+    };
+    let path = path.replace('\\', "/");
+    match path.strip_prefix("//") {
+        Some(unc) => unc.to_owned(),
+        None if path.as_bytes().get(1) == Some(&b':') => format!("/{path}"),
+        None => path,
+    }
 }
 
 #[cfg(test)]

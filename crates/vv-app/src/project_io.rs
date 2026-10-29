@@ -1399,6 +1399,7 @@ fn encoder_label(codec: vv_media::VideoCodec) -> &'static str {
         vv_media::VideoCodec::Nvenc => "NVENC",
         vv_media::VideoCodec::VideoToolbox => "VideoToolbox",
         vv_media::VideoCodec::Vulkan => "Vulkan",
+        vv_media::VideoCodec::Amf => "AMF",
     }
 }
 

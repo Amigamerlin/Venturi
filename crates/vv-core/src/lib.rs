@@ -10,6 +10,7 @@ pub mod otio;
 pub mod persistence;
 pub mod pool;
 mod stable_hash;
+pub mod user_dirs;
 
 pub use command::{
     AddAudioEffect, AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge,

@@ -116,7 +116,7 @@ fn preferred_dialog_switches_to_nvenc_only_once_it_passed_its_check() {
     assert_eq!(dialog.settings.video.codec == VideoCodec::Nvenc, nvenc);
 
     let mut dialog = ExportDialog::preferred(PathBuf::from("out.mp4"), Vec::new());
-    dialog.nvenc_pending = false;
+    dialog.gpu_encoder_pending = false;
     wait_for_encoder_checks(&mut dialog);
     assert_eq!(dialog.settings.video.codec, VideoCodec::X264);
 }
@@ -130,5 +130,22 @@ fn default_output_path_names_project_and_timeline_next_to_the_project() {
     assert_eq!(
         default_output_path(Some(Path::new("/videos/trip.vvproj")), "trip", "a/b"),
         PathBuf::from("/videos/trip-a_b.mp4")
+    );
+}
+
+#[test]
+fn gpu_encoder_pick_waits_for_better_choices() {
+    use VideoCodec::{Amf, Nvenc};
+    assert_eq!(
+        pick_gpu_encoder([(Nvenc, None), (Amf, Some(true))].into_iter()),
+        GpuPick::Waiting
+    );
+    assert_eq!(
+        pick_gpu_encoder([(Nvenc, Some(false)), (Amf, Some(true))].into_iter()),
+        GpuPick::Codec(Amf)
+    );
+    assert_eq!(
+        pick_gpu_encoder([(Nvenc, Some(false)), (Amf, Some(false))].into_iter()),
+        GpuPick::None
     );
 }

@@ -41,9 +41,10 @@ pub struct ExportDialog {
     gpu_decoders: Vec<HwDevice>,
     /// `None` decodes on the CPU.
     decoder: Option<HwDevice>,
-    /// Switch to NVENC once its check passes, unless an encoder was picked
-    /// meanwhile (`ExportSettings::preferred` without blocking the UI).
-    nvenc_pending: bool,
+    /// Switch to the first GPU encoder whose check passes (NVENC, then AMF),
+    /// unless an encoder was picked meanwhile (`ExportSettings::preferred`
+    /// without blocking the UI).
+    gpu_encoder_pending: bool,
     /// File dialog opened on a separate thread (on the GNOME/Wayland event
     /// loop thread it marks the app as unresponsive).
     browsing: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
@@ -62,7 +63,7 @@ impl ExportDialog {
             },
             gpu_decoders,
             settings,
-            nvenc_pending: false,
+            gpu_encoder_pending: false,
             whole_timeline: false,
             browsing: None,
         }
@@ -72,19 +73,21 @@ impl ExportDialog {
     pub fn preferred(output_path: PathBuf, gpu_decoders: Vec<HwDevice>) -> Self {
         let settings = ExportSettings::with_preferred_audio(output_path);
         Self {
-            nvenc_pending: true,
+            gpu_encoder_pending: true,
             ..Self::new(settings, gpu_decoders)
         }
     }
 
     /// Starts the encoders' checks; `true` while some is still running.
     fn poll_encoder_checks(&mut self) -> bool {
-        if self.nvenc_pending
-            && let Some(available) = VideoCodec::Nvenc.availability()
-        {
-            self.nvenc_pending = false;
-            if available {
-                self.settings.video = VideoSettings::for_codec(VideoCodec::Nvenc);
+        if self.gpu_encoder_pending {
+            match pick_gpu_encoder(VideoCodec::preferred_gpu().map(|c| (c, c.availability()))) {
+                GpuPick::Waiting => {}
+                GpuPick::None => self.gpu_encoder_pending = false,
+                GpuPick::Codec(codec) => {
+                    self.gpu_encoder_pending = false;
+                    self.settings.video = VideoSettings::for_codec(codec);
+                }
             }
         }
         // Not `any`: every check must start now, not one after the other.
@@ -266,7 +269,7 @@ impl ExportDialog {
                 );
                 if video.codec != before {
                     *video = VideoSettings::for_codec(video.codec);
-                    self.nvenc_pending = false;
+                    self.gpu_encoder_pending = false;
                 }
                 ui.end_row();
 
@@ -294,7 +297,7 @@ impl ExportDialog {
                 ui.label(match video.codec {
                     VideoCodec::X264 => t!("export.quality_crf"),
                     VideoCodec::Nvenc => t!("export.quality_cq"),
-                    VideoCodec::Vulkan => t!("export.quality_qp"),
+                    VideoCodec::Vulkan | VideoCodec::Amf => t!("export.quality_qp"),
                     VideoCodec::VideoToolbox => t!("export.quality"),
                 });
                 let hint = if video.codec.quality_rises() {
@@ -495,9 +498,7 @@ pub fn default_output_path(
 ) -> PathBuf {
     let dir = match project_path.and_then(Path::parent) {
         Some(dir) => dir.to_path_buf(),
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default(),
+        None => vv_core::user_dirs::home().unwrap_or_default(),
     };
     let file_name: String = format!("{project_name}-{timeline_name}.mp4")
         .chars()
@@ -506,12 +507,32 @@ pub fn default_output_path(
     dir.join(file_name)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GpuPick {
+    /// A better encoder than any available one is still being checked.
+    Waiting,
+    None,
+    Codec(VideoCodec),
+}
+
+fn pick_gpu_encoder(checks: impl Iterator<Item = (VideoCodec, Option<bool>)>) -> GpuPick {
+    for (codec, available) in checks {
+        match available {
+            None => return GpuPick::Waiting,
+            Some(true) => return GpuPick::Codec(codec),
+            Some(false) => {}
+        }
+    }
+    GpuPick::None
+}
+
 fn video_codec_label(codec: VideoCodec) -> &'static str {
     match codec {
         VideoCodec::X264 => "H.264 – x264 (CPU)",
         VideoCodec::Nvenc => "H.264 – NVENC (GPU NVIDIA)",
         VideoCodec::VideoToolbox => "H.264 – VideoToolbox (GPU)",
         VideoCodec::Vulkan => "H.264 – Vulkan (GPU)",
+        VideoCodec::Amf => "H.264 – AMF (GPU AMD)",
     }
 }
 

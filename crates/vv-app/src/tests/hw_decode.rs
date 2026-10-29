@@ -38,13 +38,17 @@ fn vulkan(gpu: &wgpu::AdapterInfo) -> HwDevice {
 
 #[test]
 fn auto_on_a_hybrid_laptop_decodes_on_the_integrated_gpu() {
-    let devices = resolve(HwDecodeMode::Auto, &[nvidia(), intel(), lavapipe()], false);
+    let devices = resolve(
+        HwDecodeMode::Auto,
+        &[nvidia(), intel(), lavapipe()],
+        Os::Linux,
+    );
     assert_eq!(devices, [vulkan(&intel())]);
 }
 
 #[test]
 fn auto_on_an_nvidia_desktop_prefers_nvdec_then_vulkan() {
-    let devices = resolve(HwDecodeMode::Auto, &[lavapipe(), nvidia()], false);
+    let devices = resolve(HwDecodeMode::Auto, &[lavapipe(), nvidia()], Os::Linux);
     assert_eq!(devices, [HwDevice::Cuda, vulkan(&nvidia())]);
 }
 
@@ -55,34 +59,37 @@ fn auto_without_nvidia_goes_through_vulkan_only() {
         0x1002,
         wgpu::DeviceType::DiscreteGpu,
     );
-    let devices = resolve(HwDecodeMode::Auto, std::slice::from_ref(&amd), false);
+    let devices = resolve(HwDecodeMode::Auto, std::slice::from_ref(&amd), Os::Linux);
     assert_eq!(devices, [vulkan(&amd)]);
 }
 
 #[test]
 fn a_software_vulkan_driver_is_never_a_decoder() {
-    assert!(resolve(HwDecodeMode::Auto, &[lavapipe()], false).is_empty());
-    assert!(resolve(HwDecodeMode::Vulkan, &[lavapipe()], false).is_empty());
+    assert!(resolve(HwDecodeMode::Auto, &[lavapipe()], Os::Linux).is_empty());
+    assert!(resolve(HwDecodeMode::Vulkan, &[lavapipe()], Os::Linux).is_empty());
 }
 
 #[test]
 fn explicit_choices_override_the_hybrid_rule() {
     let gpus = [intel(), nvidia()];
-    assert_eq!(resolve(HwDecodeMode::Nvdec, &gpus, false), [HwDevice::Cuda]);
     assert_eq!(
-        resolve(HwDecodeMode::Vulkan, &gpus, false),
+        resolve(HwDecodeMode::Nvdec, &gpus, Os::Linux),
+        [HwDevice::Cuda]
+    );
+    assert_eq!(
+        resolve(HwDecodeMode::Vulkan, &gpus, Os::Linux),
         [vulkan(&nvidia())]
     );
-    assert!(resolve(HwDecodeMode::Off, &gpus, false).is_empty());
+    assert!(resolve(HwDecodeMode::Off, &gpus, Os::Linux).is_empty());
 }
 
 #[test]
 fn macos_decodes_on_videotoolbox_unless_off() {
     assert_eq!(
-        resolve(HwDecodeMode::Auto, &[], true),
+        resolve(HwDecodeMode::Auto, &[], Os::Mac),
         [HwDevice::VideoToolbox]
     );
-    assert!(resolve(HwDecodeMode::Off, &[], true).is_empty());
+    assert!(resolve(HwDecodeMode::Off, &[], Os::Mac).is_empty());
 }
 
 #[test]
@@ -104,5 +111,32 @@ fn device_labels_name_the_backend_and_the_gpu() {
     assert_eq!(
         device_label(&vulkan(&intel())),
         "Vulkan, Intel(R) UHD Graphics 620"
+    );
+}
+
+#[test]
+fn windows_auto_tries_nvdec_then_d3d11va_then_vulkan() {
+    let devices = resolve(HwDecodeMode::Auto, &[nvidia()], Os::Windows);
+    assert_eq!(devices[..2], [HwDevice::Cuda, HwDevice::D3d11va]);
+    assert!(matches!(devices[2], HwDevice::Vulkan(Some(_))));
+}
+
+#[test]
+fn windows_without_vulkan_still_decodes_on_d3d11va() {
+    assert_eq!(
+        resolve(HwDecodeMode::Auto, &[], Os::Windows),
+        [HwDevice::D3d11va]
+    );
+    assert_eq!(
+        resolve(HwDecodeMode::D3d11va, &[], Os::Windows),
+        [HwDevice::D3d11va]
+    );
+}
+
+#[test]
+fn d3d11va_mode_round_trips_its_id() {
+    assert_eq!(
+        HwDecodeMode::from_id(HwDecodeMode::D3d11va.id()),
+        Some(HwDecodeMode::D3d11va)
     );
 }

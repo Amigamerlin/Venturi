@@ -125,13 +125,7 @@ pub(crate) struct Library {
 
 impl Library {
     pub fn default_root() -> Option<PathBuf> {
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
-            })?;
-        Some(data.join("venturi").join("library"))
+        Some(vv_core::user_dirs::data()?.join("venturi").join("library"))
     }
 
     /// Unreadable entries are skipped with a message, never fatal.

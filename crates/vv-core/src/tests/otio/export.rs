@@ -76,7 +76,13 @@ fn exports_tracks_in_compositing_order_with_gaps_between_clips() {
     assert_eq!(clip["source_range"]["start_time"]["rate"], 30.0);
     assert_eq!(clip["source_range"]["duration"]["value"], 300.0);
     let reference = &clip["media_references"]["DEFAULT_MEDIA"];
-    assert_eq!(reference["target_url"], "file:///tmp/a%20video.mp4");
+    let url = reference["target_url"].as_str().unwrap();
+    if cfg!(windows) {
+        // `/tmp` resolves against the current drive there.
+        assert!(url.starts_with("file:///") && url.ends_with(":/tmp/a%20video.mp4"));
+    } else {
+        assert_eq!(url, "file:///tmp/a%20video.mp4");
+    }
     assert_eq!(reference["available_range"]["duration"]["value"], 1000.0);
 
     let generator = &tracks[1]["children"][0]["media_references"]["DEFAULT_MEDIA"];
@@ -466,4 +472,21 @@ fn keeps_what_otio_cannot_represent_in_metadata() {
     assert_eq!(meta["linked_group"], 7);
     assert_eq!(meta["effects"]["gain_db"]["default"], -6.0);
     assert_eq!(meta["display_color"], "Indigo");
+}
+
+#[test]
+fn windows_paths_become_resolve_style_urls() {
+    assert_eq!(
+        path_to_url(r"C:\Users\Me\My clip.mp4", true),
+        "file:///C:/Users/Me/My%20clip.mp4"
+    );
+    assert_eq!(
+        path_to_url(r"\\server\share\a.mov", true),
+        "file://server/share/a.mov"
+    );
+    assert_eq!(path_to_url(r"\\?\D:\x.wav", true), "file:///D:/x.wav");
+    assert_eq!(
+        path_to_url("/home/me/a:b.mp4", false),
+        "file:///home/me/a%3Ab.mp4"
+    );
 }

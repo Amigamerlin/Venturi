@@ -12,16 +12,23 @@ pub enum HwDecodeMode {
     Off,
     Nvdec,
     Vulkan,
+    D3d11va,
 }
 
 impl HwDecodeMode {
     /// The choices that exist on this platform: macOS has only VideoToolbox,
     /// which is what `Auto` picks there.
     pub fn available() -> &'static [Self] {
-        if cfg!(target_os = "macos") {
-            &[Self::Auto, Self::Off]
-        } else {
-            &[Self::Auto, Self::Off, Self::Nvdec, Self::Vulkan]
+        match Os::CURRENT {
+            Os::Mac => &[Self::Auto, Self::Off],
+            Os::Windows => &[
+                Self::Auto,
+                Self::Off,
+                Self::Nvdec,
+                Self::D3d11va,
+                Self::Vulkan,
+            ],
+            Os::Linux => &[Self::Auto, Self::Off, Self::Nvdec, Self::Vulkan],
         }
     }
 
@@ -31,14 +38,39 @@ impl HwDecodeMode {
             Self::Off => "off",
             Self::Nvdec => "nvdec",
             Self::Vulkan => "vulkan",
+            Self::D3d11va => "d3d11va",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
-        [Self::Auto, Self::Off, Self::Nvdec, Self::Vulkan]
-            .into_iter()
-            .find(|mode| mode.id() == id)
+        [
+            Self::Auto,
+            Self::Off,
+            Self::Nvdec,
+            Self::Vulkan,
+            Self::D3d11va,
+        ]
+        .into_iter()
+        .find(|mode| mode.id() == id)
     }
+}
+
+/// `Linux` stands for every system that is neither macOS nor Windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Os {
+    Linux,
+    Mac,
+    Windows,
+}
+
+impl Os {
+    pub const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::Mac
+    } else if cfg!(windows) {
+        Self::Windows
+    } else {
+        Self::Linux
+    };
 }
 
 const NVIDIA_VENDOR_ID: u32 = 0x10de;
@@ -66,8 +98,8 @@ pub fn has_intel_gpu() -> Option<bool> {
 }
 
 /// The devices for `mode` on a machine with `gpus` (its Vulkan adapters).
-pub fn resolve(mode: HwDecodeMode, gpus: &[wgpu::AdapterInfo], macos: bool) -> Vec<HwDevice> {
-    if macos {
+pub fn resolve(mode: HwDecodeMode, gpus: &[wgpu::AdapterInfo], os: Os) -> Vec<HwDevice> {
+    if os == Os::Mac {
         return match mode {
             HwDecodeMode::Off => Vec::new(),
             _ => vec![HwDevice::VideoToolbox],
@@ -88,6 +120,7 @@ pub fn resolve(mode: HwDecodeMode, gpus: &[wgpu::AdapterInfo], macos: bool) -> V
     match mode {
         HwDecodeMode::Off => Vec::new(),
         HwDecodeMode::Nvdec => vec![HwDevice::Cuda],
+        HwDecodeMode::D3d11va => vec![HwDevice::D3d11va],
         HwDecodeMode::Vulkan => of_type(wgpu::DeviceType::DiscreteGpu)
             .or(real.first())
             .map(vulkan_on)
@@ -98,11 +131,18 @@ pub fn resolve(mode: HwDecodeMode, gpus: &[wgpu::AdapterInfo], macos: bool) -> V
             let discrete = of_type(wgpu::DeviceType::DiscreteGpu);
             if let (Some(integrated), Some(_)) = (integrated, discrete) {
                 // Hybrid laptop: decoding on the discrete GPU would wake it.
-                return vec![vulkan_on(integrated)];
+                // D3D11VA opens the default adapter, usually the integrated one.
+                return match os {
+                    Os::Windows => vec![HwDevice::D3d11va],
+                    _ => vec![vulkan_on(integrated)],
+                };
             }
+            // Without Vulkan drivers `gpus` is empty: D3D11VA still works.
+            let d3d11va = (os == Os::Windows).then_some(HwDevice::D3d11va);
             has_nvidia
                 .then_some(HwDevice::Cuda)
                 .into_iter()
+                .chain(d3d11va)
                 .chain(real.first().map(vulkan_on))
                 .collect()
         }
@@ -113,10 +153,13 @@ static GPUS: OnceLock<Vec<wgpu::AdapterInfo>> = OnceLock::new();
 
 fn gpus() -> &'static [wgpu::AdapterInfo] {
     GPUS.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            Vec::new()
-        } else {
-            vv_render::vulkan_adapters()
+        match Os::CURRENT {
+            Os::Mac => Vec::new(),
+            // A PC without a Vulkan driver still names its GPUs to DX12.
+            Os::Windows => Some(vv_render::vulkan_adapters())
+                .filter(|gpus| !gpus.is_empty())
+                .unwrap_or_else(|| vv_render::adapters(wgpu::Backends::DX12)),
+            Os::Linux => vv_render::vulkan_adapters(),
         }
     })
 }
@@ -125,12 +168,11 @@ fn gpus() -> &'static [wgpu::AdapterInfo] {
 /// setting's first. Starts checking them in the background, so the ones that
 /// do not open turn `known_unavailable` while the window is up.
 pub fn export_choices() -> Vec<HwDevice> {
-    let macos = cfg!(target_os = "macos");
     let has_nvidia = gpus().iter().any(|gpu| gpu.vendor == NVIDIA_VENDOR_ID);
     let mut choices = devices();
     let candidates = [HwDecodeMode::Auto, HwDecodeMode::Vulkan]
         .into_iter()
-        .flat_map(|mode| resolve(mode, gpus(), macos))
+        .flat_map(|mode| resolve(mode, gpus(), Os::CURRENT))
         .chain(has_nvidia.then_some(HwDevice::Cuda));
     for device in candidates {
         if !choices.contains(&device) {
@@ -150,10 +192,12 @@ pub fn export_choices() -> Vec<HwDevice> {
 /// What `Auto` decodes on here, for the settings: `None` while `start` is
 /// still enumerating the GPUs, `Some(None)` if there is no GPU decoder.
 pub fn auto_device() -> Option<Option<HwDevice>> {
-    let macos = cfg!(target_os = "macos");
-    let gpus = if macos { &[][..] } else { GPUS.get()? };
+    let gpus = match Os::CURRENT {
+        Os::Mac => &[][..],
+        _ => GPUS.get()?,
+    };
     Some(
-        resolve(HwDecodeMode::Auto, gpus, macos)
+        resolve(HwDecodeMode::Auto, gpus, Os::CURRENT)
             .into_iter()
             .find(|device| !vv_media::hw::known_unavailable(device)),
     )
@@ -165,6 +209,7 @@ pub fn device_label(device: &HwDevice) -> String {
         HwDevice::Cuda => "NVDEC".into(),
         HwDevice::Vulkan(Some(gpu)) => format!("Vulkan, {gpu}"),
         HwDevice::Vulkan(None) => "Vulkan".into(),
+        HwDevice::D3d11va => "D3D11VA".into(),
     }
 }
 
@@ -211,7 +256,7 @@ pub fn fallback() -> Option<Fallback> {
 }
 
 fn created(mode: HwDecodeMode) -> Vec<HwDevice> {
-    let resolved = resolve(mode, gpus(), cfg!(target_os = "macos"));
+    let resolved = resolve(mode, gpus(), Os::CURRENT);
     let devices: Vec<HwDevice> = resolved
         .iter()
         .filter(|device| vv_media::hw::available(device))
@@ -232,6 +277,11 @@ fn created(mode: HwDecodeMode) -> Vec<HwDevice> {
 /// Default budget for the HW surfaces: an eighth of the physical memory,
 /// which on Apple Silicon is also the GPU's.
 pub fn default_budget_bytes() -> usize {
+    physical_memory_bytes().map_or(1_000_000_000, |bytes| bytes / 8)
+}
+
+#[cfg(unix)]
+fn physical_memory_bytes() -> Option<usize> {
     // SAFETY: plain queries, -1 on failure.
     let (pages, page_size) = unsafe {
         (
@@ -239,10 +289,23 @@ pub fn default_budget_bytes() -> usize {
             libc::sysconf(libc::_SC_PAGESIZE),
         )
     };
-    if pages <= 0 || page_size <= 0 {
-        return 1_000_000_000;
+    (pages > 0 && page_size > 0).then(|| pages as usize * page_size as usize)
+}
+
+#[cfg(windows)]
+fn physical_memory_bytes() -> Option<usize> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: a zeroed MEMORYSTATUSEX with its size set is what the call wants.
+    unsafe {
+        let mut status: MEMORYSTATUSEX = std::mem::zeroed();
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        (GlobalMemoryStatusEx(&mut status) != 0).then(|| status.ullTotalPhys as usize)
     }
-    pages as usize * page_size as usize / 8
+}
+
+#[cfg(not(any(unix, windows)))]
+fn physical_memory_bytes() -> Option<usize> {
+    None
 }
 
 #[cfg(test)]
