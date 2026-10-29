@@ -19,10 +19,12 @@ fn meta(fps: Rational, duration_frames: FrameIdx) -> MediaMeta {
 }
 
 fn probe_from(media: Vec<(&'static str, MediaMeta)>) -> impl FnMut(&Path) -> ProbeResult {
+    // On Windows an export makes `/tmp/a.mp4` absolute on the current drive.
+    let absolute = |path: &Path| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     move |path| {
         media
             .iter()
-            .find(|(p, _)| Path::new(p) == path)
+            .find(|(p, _)| absolute(Path::new(p)) == absolute(path))
             .map(|(_, m)| (m.clone(), 42))
             .ok_or_else(|| "file not found".to_owned())
     }
@@ -1333,8 +1335,13 @@ fn localhost_is_only_stripped_as_a_whole_host() {
         url_to_path("file://localhost/a.mov", base),
         Some(PathBuf::from("/a.mov"))
     );
+    let nas = if cfg!(windows) {
+        r"\\localhost-nas\a.mov"
+    } else {
+        "localhost-nas/a.mov"
+    };
     assert_eq!(
         url_to_path("file://localhost-nas/a.mov", base),
-        Some(PathBuf::from("localhost-nas/a.mov"))
+        Some(PathBuf::from(nas))
     );
 }
