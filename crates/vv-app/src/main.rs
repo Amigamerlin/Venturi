@@ -93,6 +93,12 @@ struct ArrowHold {
     start_frame: FrameIdx,
 }
 
+struct MarkTarget<'a> {
+    marks: &'a mut transport::MarkRange,
+    total: FrameIdx,
+    playhead: FrameIdx,
+}
+
 /// Playhead position with an arrow held for `elapsed` seconds:
 /// one frame immediately, then continuous scrolling after `ARROW_HOLD_DELAY_SECS`.
 fn arrow_hold_target(hold: &ArrowHold, elapsed: f64, fps: f64) -> FrameIdx {
@@ -303,6 +309,8 @@ struct VenturiApp {
     viewer_zoom: viewer_zoom::ViewerZoom,
     /// Player box and frame size of the last draw, for the zoom shortcuts.
     viewer_geometry: Option<(egui::Rect, egui::Vec2)>,
+    /// Screen pixels per timeline pixel in the last draw of the viewer.
+    viewer_scale: f64,
     /// What the viewer shows: the last composition, even if in this
     /// frame no new one was made (no empty flash).
     last_viewer_frame_kind: Option<ViewerFrameKind>,
@@ -526,6 +534,7 @@ impl Default for VenturiApp {
             viewer_content: None,
             viewer_zoom: viewer_zoom::ViewerZoom::default(),
             viewer_geometry: None,
+            viewer_scale: 1.0,
             last_viewer_frame_kind: None,
             viewer_keyframe: false,
             egui_render_state: None,
@@ -978,36 +987,61 @@ impl VenturiApp {
         }
     }
 
-    /// Length of what the I/O keys mark: the preview if active, otherwise
-    /// the timeline. 0 when there is nothing to mark.
-    fn mark_target_frames(&self) -> FrameIdx {
-        if self.browsing.is_some() {
-            if self.preview_error.is_some() {
-                0
-            } else {
-                self.browse_total_frames()
-            }
+    fn mark_at_playhead(&mut self, is_in: bool) {
+        let Some(target) = self.mark_target() else {
+            return;
+        };
+        if target.total <= 0 {
+            return;
+        }
+        if is_in {
+            target.marks.set_in(target.playhead, target.total);
         } else {
-            self.timeline_id
-                .map_or(0, |id| self.session.project.timelines[id].total_frames())
+            target.marks.set_out(target.playhead, target.total);
         }
     }
 
-    fn mark_at_playhead(&mut self, is_in: bool) {
-        let total = self.mark_target_frames();
-        if total <= 0 {
-            return;
+    fn mark_target(&mut self) -> Option<MarkTarget<'_>> {
+        if self.browsing.is_some() {
+            if self.preview_error.is_some() {
+                None
+            } else {
+                let total = self.browse_total_frames();
+                let playhead = self.browse_playhead;
+                Some(MarkTarget {
+                    marks: &mut self.browse_marks,
+                    total,
+                    playhead,
+                })
+            }
+        } else if let Some(timeline_id) = self.timeline_id {
+            let total = self.session.project.timelines[timeline_id].total_frames();
+            let playhead = self.timeline_state.playhead;
+            Some(MarkTarget {
+                marks: &mut self.timeline_state.export_marks,
+                total,
+                playhead,
+            })
+        } else {
+            None
         }
-        let (marks, frame) = if self.browsing.is_some() {
-            (&mut self.browse_marks, self.browse_playhead)
-        } else {
-            let state = &mut self.timeline_state;
-            (&mut state.export_marks, state.playhead)
-        };
-        if is_in {
-            marks.set_in(frame, total);
-        } else {
-            marks.set_out(frame, total);
+    }
+
+    fn clear_in_point(&mut self) {
+        if let Some(target) = self.mark_target() {
+            target.marks.clear_in();
+        }
+    }
+
+    fn clear_out_point(&mut self) {
+        if let Some(target) = self.mark_target() {
+            target.marks.clear_out();
+        }
+    }
+
+    fn clear_in_and_out(&mut self) {
+        if let Some(target) = self.mark_target() {
+            target.marks.clear_all();
         }
     }
 
@@ -1665,6 +1699,7 @@ impl VenturiApp {
             0.0
         });
         render_ahead.set_keyframes_when_behind(self.settings.keyframes_when_behind);
+        render_ahead.set_viewer_scale(self.viewer_scale);
         let (ahead_secs, behind_secs) = self.effective_window_secs(timeline_id);
         render_ahead.set_lookahead_secs(ahead_secs);
         render_ahead.set_behind_secs(behind_secs);
@@ -1719,8 +1754,10 @@ impl VenturiApp {
     /// the cache: the media inside compound clips, at the size the preview
     /// resolution decodes them to.
     fn window_frame_bytes(&self, timeline_id: TimelineId, from: FrameIdx, to: FrameIdx) -> usize {
+        let shown =
+            render_ahead::shown_sizes(&self.session.project, timeline_id, self.viewer_scale);
         let mut seen = std::collections::HashSet::new();
-        self.frame_bytes_within(timeline_id, from, to, &mut seen, 0)
+        self.frame_bytes_within(timeline_id, from, to, &shown, &mut seen, 0)
     }
 
     fn frame_bytes_within(
@@ -1728,6 +1765,7 @@ impl VenturiApp {
         timeline_id: TimelineId,
         from: FrameIdx,
         to: FrameIdx,
+        shown: &std::collections::HashMap<MediaId, (u32, u32)>,
         seen: &mut std::collections::HashSet<MediaId>,
         depth: u32,
     ) -> usize {
@@ -1753,12 +1791,13 @@ impl VenturiApp {
                 let a = clip.picture_frame_at(clip.timeline_start.max(from));
                 let b = clip.picture_frame_at(clip.timeline_end().min(to) - 1);
                 let (start, end) = (a.min(b), a.max(b) + 1);
-                bytes += self.frame_bytes_within(nested_id, start, end, seen, depth + 1);
+                bytes += self.frame_bytes_within(nested_id, start, end, shown, seen, depth + 1);
             } else if seen.insert(media_id) {
-                bytes += vv_media::yuv420_frame_bytes(
-                    (item.meta.width / divisor).max(1),
-                    (item.meta.height / divisor).max(1),
-                );
+                let (w, h) = shown
+                    .get(&media_id)
+                    .copied()
+                    .unwrap_or((item.meta.width, item.meta.height));
+                bytes += vv_media::yuv420_frame_bytes((w / divisor).max(1), (h / divisor).max(1));
             }
         }
         bytes
@@ -4443,12 +4482,18 @@ impl VenturiApp {
                     // the timeline draws them as waveforms on the audio clips.
                     self.ensure_waveforms_loaded();
                     let is_playing = self.is_timeline_playing();
+                    let audio_failures = self
+                        .timeline_audio
+                        .as_ref()
+                        .map(|audio| audio.clip_failures(&self.session.project, timeline_id))
+                        .unwrap_or_default();
                     let (drop, enter_compound) = timeline_ui::show_timeline(
                         ui,
                         &mut self.session.project,
                         &mut self.session.history,
                         timeline_id,
                         &|id| labels.get(&id).cloned().unwrap_or_default(),
+                        &audio_failures,
                         &mut self.timeline_state,
                         self.snapping_enabled,
                         self.settings.kinetic_scroll,
@@ -4514,6 +4559,15 @@ impl VenturiApp {
         self.drive_take();
         // The timeline buffer stays warm during the pool preview too.
         self.sync_render_ahead();
+        // The check above ran before the sync: a setting changed by it
+        // would otherwise wait for an unrelated repaint.
+        if self
+            .render_ahead
+            .as_ref()
+            .is_some_and(|r| !r.is_caught_up())
+        {
+            ui.ctx().request_repaint();
+        }
         self.sync_root_timeline_media();
 
         let (mut pending_effects, mut pending_playhead) =
@@ -4553,7 +4607,7 @@ impl VenturiApp {
                     compressor: &mut self.settings.compressor_presets,
                     eq: &mut self.settings.eq_presets,
                 },
-                &mixer_panel::Vst3View {
+                &mixer_panel::ChainView {
                     installed: &installed,
                     scanning: self.plugin_scan_rx.is_some(),
                     known: &|effect| {
@@ -4573,6 +4627,11 @@ impl VenturiApp {
                         self.timeline_audio
                             .as_ref()
                             .is_some_and(|audio| audio.plugin_failed(key))
+                    },
+                    normalize_failed: &|channel, insert| {
+                        let audio = self.timeline_audio.as_ref()?;
+                        let error = audio.normalize_failure(self.timeline_id?, channel, insert)?;
+                        Some(error.to_owned())
                     },
                 },
             ));
@@ -4768,6 +4827,11 @@ impl VenturiApp {
                             paint_keyframes_badge(ui.painter(), rect.intersect(area));
                         }
                         self.viewer_geometry = Some((area, tex_size));
+                        let scale = f64::from(self.viewer_zoom.scale(area, tex_size, ppp));
+                        if scale != self.viewer_scale {
+                            self.viewer_scale = scale;
+                            ui.ctx().request_repaint();
+                        }
                         viewer_area = Some(area);
                         viewer_rect = Some(rect);
                     }
