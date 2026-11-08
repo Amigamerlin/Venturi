@@ -35,7 +35,8 @@ jobs:
       - name: Download FFmpeg
         shell: pwsh
         run: |
-          Invoke-WebRequest "$env:FFMPEG_URL/$env:FFMPEG_NAME.zip" -OutFile "$env:RUNNER_TEMP\ffmpeg.zip"
+          # GitHub's release downloads time out now and then (504).
+          Invoke-WebRequest "$env:FFMPEG_URL/$env:FFMPEG_NAME.zip" -OutFile "$env:RUNNER_TEMP\ffmpeg.zip" -MaximumRetryCount 5 -RetryIntervalSec 30
           Expand-Archive "$env:RUNNER_TEMP\ffmpeg.zip" -DestinationPath $env:RUNNER_TEMP
           $dir = Join-Path $env:RUNNER_TEMP $env:FFMPEG_NAME
           if (-not (Test-Path "$dir\include\libavcodec\avcodec.h")) { throw "unexpected FFmpeg layout in $dir" }
