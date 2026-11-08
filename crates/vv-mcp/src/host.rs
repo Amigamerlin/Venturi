@@ -31,6 +31,7 @@ pub struct McpHandle {
 }
 
 impl McpHandle {
+    #[cfg(unix)]
     pub(crate) fn notify(&self) {
         (self.notify)();
     }

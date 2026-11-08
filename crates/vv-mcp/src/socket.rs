@@ -19,10 +19,12 @@ pub fn socket_dir() -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 fn socket_name(pid: u32) -> String {
     format!("mcp-{pid}.sock")
 }
 
+#[cfg(unix)]
 fn pid_of(path: &Path) -> Option<u32> {
     path.file_name()?
         .to_str()?
