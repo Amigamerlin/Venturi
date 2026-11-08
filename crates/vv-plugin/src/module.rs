@@ -77,6 +77,7 @@ impl LoadError {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     fn loaded(msg: impl Into<String>) -> Self {
         Self {
             msg: msg.into(),
@@ -164,7 +165,7 @@ fn binary_path(bundle: &Path) -> Result<PathBuf, String> {
 }
 
 // VST3 bundle folders use `uname -m` names, which differ from Rust's ARCH.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(target_os = "linux", test))]
 fn sdk_arch_dir(arch: &str, big_endian: bool) -> String {
     match (arch, big_endian) {
         ("x86", _) => "i386-linux".into(),
@@ -175,7 +176,7 @@ fn sdk_arch_dir(arch: &str, big_endian: bool) -> String {
 }
 
 // Falls back to any `*-linux` folder holding the binary (armv8l, i686, ...).
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(target_os = "linux", test))]
 fn linux_binary(bundle: &Path, stem: &std::ffi::OsStr, arch_dir: &str) -> PathBuf {
     let contents = bundle.join("Contents");
     let file = so_file_name(stem);
@@ -193,7 +194,7 @@ fn linux_binary(bundle: &Path, stem: &std::ffi::OsStr, arch_dir: &str) -> PathBu
         .unwrap_or(mapped)
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(target_os = "linux", test))]
 fn so_file_name(stem: &std::ffi::OsStr) -> std::ffi::OsString {
     let mut name = stem.to_os_string();
     name.push(".so");
